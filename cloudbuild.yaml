@@ -1,0 +1,51 @@
+# GCP Cloud Build — builds and deploys to Cloud Run
+# Trigger: push to main branch
+
+steps:
+  # Build Docker image
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - "-t"
+      - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:$COMMIT_SHA"
+      - "-t"
+      - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:latest"
+      - "."
+
+  # Push to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:$COMMIT_SHA"
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:latest"
+
+  # Deploy to Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - alleasystent
+      - "--image=europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:$COMMIT_SHA"
+      - "--region=europe-central2"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--port=8080"
+      - "--memory=2Gi"
+      - "--cpu=1"
+      - "--min-instances=0"
+      - "--max-instances=10"
+      - "--set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest,FACEBOOK_PAGE_ACCESS_TOKEN=fb-page-token:latest,FACEBOOK_APP_SECRET=fb-app-secret:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest"
+      - "--set-env-vars=APP_ENV=production,GCP_PROJECT_ID=$PROJECT_ID,RAG_BACKEND=chromadb,PORT=8080"
+      - "--service-account=alleasystent-sa@$PROJECT_ID.iam.gserviceaccount.com"
+
+images:
+  - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:$COMMIT_SHA"
+  - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY

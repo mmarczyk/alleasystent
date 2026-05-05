@@ -1,0 +1,25 @@
+# ── Core ──────────────────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+eval_type_backport==0.2.0  # required for Python 3.9 + Pydantic v2 with X|Y union syntax
+
+# ── Anthropic ─────────────────────────────────────────────────────────────────
+anthropic>=0.86.0
+
+# ── HTTP ──────────────────────────────────────────────────────────────────────
+httpx==0.27.2
+
+# ── RAG (local) ───────────────────────────────────────────────────────────────
+chromadb==0.5.23
+sentence-transformers==3.3.1
+
+# ── GCP ───────────────────────────────────────────────────────────────────────
+google-cloud-firestore==2.19.0
+google-cloud-pubsub==2.27.1
+google-cloud-secret-manager==2.21.1
+# google-cloud-aiplatform==1.73.0  # Uncomment for Vertex AI RAG
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1

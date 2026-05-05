@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.pyc
+__pycache__/
+.pytest_cache/
+.git/
+.gitignore
+data/
+*.json
+!requirements.txt
+.allegro_tokens.json
