@@ -38,12 +38,13 @@ if (typeof marked !== 'undefined') {
 
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
-  const DEFAULTS = { apiKey: '', model: 'gemini-3.0-flash', lang: 'pl', style: 'professional' };
+  const DEFAULTS = { apiKey: '', model: 'gemini-2.5-flash', lang: 'pl', style: 'professional' };
+  const VALID_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
   let _s = { ...DEFAULTS };
 
   function load() {
     try { Object.assign(_s, JSON.parse(localStorage.getItem('ae_settings') || '{}')); } catch {}
-    if (_s.model?.startsWith('claude-')) _s.model = DEFAULTS.model;
+    if (!VALID_MODELS.includes(_s.model)) _s.model = DEFAULTS.model;
     return _s;
   }
   function save(vals) { Object.assign(_s, vals); localStorage.setItem('ae_settings', JSON.stringify(_s)); }
@@ -344,12 +345,10 @@ const Chat = (() => {
     const apiKey = Settings.get('apiKey');
     if (!apiKey) { UI.openSettings(); UI.toast('Ustaw klucz API Gemini w Ustawieniach', 4000); return; }
 
-    // ensure active conversation
     if (!Store.active()) Store.create();
     Store.addMessage('user', msgText);
     input.value = ''; input.style.height = 'auto';
 
-    // render user message
     const container = document.getElementById('messages');
     const welcome = document.getElementById('welcome');
     if (container.contains(welcome)) container.removeChild(welcome);
@@ -358,7 +357,6 @@ const Chat = (() => {
     scrollBottom();
     renderSidebar();
 
-    // streaming
     _streaming = true;
     const sendBtn = document.getElementById('btn-send');
     sendBtn.disabled = true;
@@ -368,7 +366,6 @@ const Chat = (() => {
     const lang  = Settings.get('lang');
     const systemPrompt = buildSystemPrompt(lang, Settings.get('style'));
 
-    // build API messages (exclude last assistant placeholder)
     const apiMsgs = Store.active().messages
       .filter(m => m.role === 'user' || m.role === 'assistant')
       .map(m => ({ role: m.role, content: m.content }));
@@ -443,9 +440,7 @@ const Chat = (() => {
   async function regenerate() {
     const c = Store.active();
     if (!c || c.messages.length < 2) return;
-    // remove last assistant message
     c.messages.pop();
-    Store.updateLastMessage && null;
     localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
     renderMessages();
     const lastUser = [...c.messages].reverse().find(m => m.role === 'user');
@@ -460,20 +455,10 @@ window.addEventListener('DOMContentLoaded', () => {
   Settings.load();
   Store.load();
 
-  // apply saved settings to UI
   document.getElementById('model-badge').textContent = Settings.get('model');
 
-  // render
-  Chat.renderSidebar && (() => {
-    const convs = Store.all();
-    if (!convs.length) Store.create('Nowa rozmowa');
-    // expose renderSidebar
-  })();
-
-  // PWA service worker
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
-  // Close sidebar on overlay click (mobile)
   document.addEventListener('click', e => {
     const sidebar = document.getElementById('sidebar');
     if (sidebar.classList.contains('open') &&
@@ -483,12 +468,9 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Initial render — access private renderSidebar/renderMessages via Chat
-  // (they're already called in the Chat IIFE public API)
   const convs = Store.all();
   if (!convs.length) Store.create('Nowa rozmowa');
 
-  // Render sidebar
   (() => {
     const list = document.getElementById('sidebar-history');
     const all = Store.all();
@@ -502,7 +484,6 @@ window.addEventListener('DOMContentLoaded', () => {
     : '<p style="color:var(--muted);font-size:.8rem;padding:.5rem .75rem">Brak rozmów</p>';
   })();
 
-  // Show welcome or messages
   const active = Store.active();
   if (!active || !active.messages.length) {
     document.getElementById('messages').appendChild(document.getElementById('welcome'));
@@ -514,7 +495,6 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('user-input').focus();
 });
 
-// Add cursor blink style
 const style = document.createElement('style');
 style.textContent = '.cursor-blink { animation: blink .7s step-end infinite; } @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }';
 document.head.appendChild(style);
