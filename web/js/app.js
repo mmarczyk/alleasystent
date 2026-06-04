@@ -38,11 +38,12 @@ if (typeof marked !== 'undefined') {
 
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
-  const DEFAULTS = { apiKey: '', model: 'claude-sonnet-4-6', lang: 'pl', style: 'professional' };
+  const DEFAULTS = { apiKey: '', model: 'gemini-2.5-flash', lang: 'pl', style: 'professional' };
   let _s = { ...DEFAULTS };
 
   function load() {
     try { Object.assign(_s, JSON.parse(localStorage.getItem('ae_settings') || '{}')); } catch {}
+    if (_s.model?.startsWith('claude-')) _s.model = DEFAULTS.model;
     return _s;
   }
   function save(vals) { Object.assign(_s, vals); localStorage.setItem('ae_settings', JSON.stringify(_s)); }
@@ -106,25 +107,23 @@ const Store = (() => {
   return { load, create, active, setActive, addMessage, updateLastMessage, deleteConv, clearAll, all: () => convs };
 })();
 
-// ── Claude API ───────────────────────────────────
-const Claude = (() => {
-  const API = 'https://api.anthropic.com/v1/messages';
+// ── Gemini API ───────────────────────────────────
+const Gemini = (() => {
+  const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   async function* stream(messages, apiKey, model, systemPrompt) {
-    const res = await fetch(API, {
+    const contents = messages.map(m => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    }));
+
+    const res = await fetch(`${API_BASE}/${model}:streamGenerateContent?key=${encodeURIComponent(apiKey)}&alt=sse`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-allow-browser': 'true'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model,
-        max_tokens: 4096,
-        stream: true,
-        system: systemPrompt,
-        messages
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents,
+        generationConfig: { maxOutputTokens: 8192 }
       })
     });
 
@@ -146,12 +145,11 @@ const Claude = (() => {
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const raw = line.slice(6).trim();
-        if (raw === '[DONE]') return;
+        if (!raw) continue;
         try {
           const ev = JSON.parse(raw);
-          if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-            yield ev.delta.text;
-          }
+          const text = ev.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) yield text;
         } catch {}
       }
     }
@@ -344,7 +342,7 @@ const Chat = (() => {
     if (!msgText) return;
 
     const apiKey = Settings.get('apiKey');
-    if (!apiKey) { UI.openSettings(); UI.toast('Ustaw klucz API Claude w Ustawieniach', 4000); return; }
+    if (!apiKey) { UI.openSettings(); UI.toast('Ustaw klucz API Gemini w Ustawieniach', 4000); return; }
 
     // ensure active conversation
     if (!Store.active()) Store.create();
@@ -380,7 +378,7 @@ const Chat = (() => {
 
     try {
       Store.addMessage('assistant', '');
-      for await (const chunk of Claude.stream(apiMsgs, apiKey, model, systemPrompt)) {
+      for await (const chunk of Gemini.stream(apiMsgs, apiKey, model, systemPrompt)) {
         fullText += chunk;
         contentEl.innerHTML = renderMarkdown(fullText) + '<span class="cursor-blink">▍</span>';
         scrollBottom();
