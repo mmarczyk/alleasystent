@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0f0f1a" />
+  <meta name="description" content="AllEasystent — AI asystent dla właścicieli sklepów na Allegro" />
+  <title>AllEasystent — Asystent AI</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.svg" />
+  <link rel="stylesheet" href="css/app.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+
+<!-- ── SETTINGS PANEL ──────────────────────────────── -->
+<div id="settings-overlay" class="overlay hidden" onclick="UI.closeSettings()"></div>
+<aside id="settings-panel" class="settings-panel hidden">
+  <div class="settings-header">
+    <h2>Ustawienia</h2>
+    <button class="btn-icon" onclick="UI.closeSettings()">✕</button>
+  </div>
+  <div class="settings-body">
+    <div class="form-group">
+      <label>Google AI API Key</label>
+      <div class="input-eye">
+        <input type="password" id="set-api-key" placeholder="AIza..." autocomplete="off" />
+        <button class="btn-eye" onclick="UI.toggleKeyVisibility()" title="Pokaż/ukryj">👁</button>
+      </div>
+      <small class="muted">Klucz przechowywany lokalnie — nigdy nie opuszcza przeglądarki</small>
+    </div>
+    <div class="form-group">
+      <label>Model</label>
+      <select id="set-model">
+        <option value="gemini-3.0-flash">gemini-3.0-flash (zalecany)</option>
+        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+        <option value="gemini-2.5-pro">gemini-2.5-pro (najdokładniejszy)</option>
+        <option value="gemini-2.0-flash">gemini-2.0-flash (szybki)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Język odpowiedzi</label>
+      <select id="set-lang">
+        <option value="pl">Polski</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Styl odpowiedzi</label>
+      <select id="set-style">
+        <option value="professional">Profesjonalny</option>
+        <option value="friendly">Przyjazny</option>
+        <option value="concise">Zwięzły</option>
+      </select>
+    </div>
+    <button class="btn btn-primary w-full" onclick="UI.saveSettings()">Zapisz</button>
+    <div class="settings-divider"></div>
+    <button class="btn btn-outline w-full" onclick="UI.exportChat()">↓ Eksportuj rozmowę</button>
+    <button class="btn btn-danger w-full mt-sm" onclick="UI.clearAllHistory()">Usuń całą historię</button>
+  </div>
+  <div class="settings-footer">
+    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="link-small">Uzyskaj klucz API →</a>
+  </div>
+</aside>
+
+<!-- ── APP ───────────────────────────────────────── -->
+<div class="app">
+
+  <!-- SIDEBAR (desktop) -->
+  <nav id="sidebar" class="sidebar">
+    <div class="sidebar-top">
+      <div class="logo">
+        <span class="logo-icon">🛒</span>
+        <span class="logo-text">AllEasystent</span>
+      </div>
+      <button class="btn btn-new-chat" onclick="Chat.newConversation()">
+        + Nowa rozmowa
+      </button>
+    </div>
+    <div class="sidebar-history" id="sidebar-history"></div>
+    <div class="sidebar-bottom">
+      <button class="sidebar-btn" onclick="UI.openSettings()">
+        <span>⚙</span> Ustawienia
+      </button>
+    </div>
+  </nav>
+
+  <!-- MAIN CHAT AREA -->
+  <main class="chat-main">
+
+    <!-- TOPBAR (mobile) -->
+    <header class="topbar">
+      <button class="btn-icon" id="btn-sidebar-toggle" onclick="UI.toggleSidebar()" aria-label="Menu">☰</button>
+      <div class="topbar-center">
+        <span class="logo-icon">🛒</span>
+        <span id="topbar-title">AllEasystent</span>
+      </div>
+      <button class="btn-icon" onclick="UI.openSettings()" aria-label="Ustawienia">⚙</button>
+    </header>
+
+    <!-- MESSAGES -->
+    <div id="messages" class="messages">
+      <div id="welcome" class="welcome">
+        <div class="welcome-icon">🛒</div>
+        <h1>AllEasystent</h1>
+        <p class="welcome-sub">Asystent AI dla właścicieli sklepów na Allegro</p>
+        <div class="suggestions">
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Napisz opis produktu dla słuchawek bezprzewodowych</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Jak zwiększyć sprzedaż na Allegro?</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Szablon odpowiedzi na negatywną opinię klienta</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Strategia cenowa dla nowego produktu</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- INPUT AREA -->
+    <div class="input-area">
+      <div class="input-wrap">
+        <textarea id="user-input" placeholder="Zapytaj o oferty, opisy produktów, obsługę klientów…" rows="1" onkeydown="Chat.handleKey(event)" oninput="UI.autoResize(this)"></textarea>
+        <button id="btn-send" class="btn-send" onclick="Chat.send()" title="Wyślij (Enter)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+      <p class="input-hint">Enter — wyślij &nbsp;·&nbsp; Shift+Enter — nowa linia &nbsp;·&nbsp; <span id="model-badge">gemini-3.0-flash</span></p>
+    </div>
+
+  </main>
+</div>
+
+<!-- TOAST -->
+<div id="toast" class="toast hidden"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>
