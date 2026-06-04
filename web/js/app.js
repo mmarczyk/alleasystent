@@ -38,12 +38,13 @@ if (typeof marked !== 'undefined') {
 
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
-  const DEFAULTS = { apiKey: '', model: 'gemini-3.0-flash', lang: 'pl', style: 'professional' };
+  const DEFAULTS = { apiKey: '', model: 'gemini-2.5-flash', lang: 'pl', style: 'professional' };
+  const VALID_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
   let _s = { ...DEFAULTS };
 
   function load() {
     try { Object.assign(_s, JSON.parse(localStorage.getItem('ae_settings') || '{}')); } catch {}
-    if (_s.model?.startsWith('claude-')) _s.model = DEFAULTS.model;
+    if (!VALID_MODELS.includes(_s.model)) _s.model = DEFAULTS.model;
     return _s;
   }
   function save(vals) { Object.assign(_s, vals); localStorage.setItem('ae_settings', JSON.stringify(_s)); }
