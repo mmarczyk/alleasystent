@@ -2,7 +2,8 @@ name: Deploy AllEasystent Chat UI to GitHub Pages
 
 on:
   push:
-    branches: [gh-pages]
+    branches: [main]
+    paths: ["web/**"]
   workflow_dispatch:
 
 permissions:
@@ -22,10 +23,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - name: Checkout gh-pages branch
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: gh-pages
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -33,7 +32,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          path: 'web'
 
       - name: Deploy to GitHub Pages
         id: deploy
