@@ -3,222 +3,141 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#0d1f0d" />
-  <meta name="description" content="Trening kalisteniki wojskowej z AI" />
-  <title>MilCal — Trening Wojskowy</title>
+  <meta name="theme-color" content="#0f0f1a" />
+  <meta name="description" content="AllEasystent — AI asystent dla właścicieli sklepów na Allegro" />
+  <title>AllEasystent — Asystent AI</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icons/icon-192.svg" />
   <link rel="stylesheet" href="css/app.css" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
 <body>
-  <!-- ── SPLASH ──────────────────────────────────────────────── -->
-  <div id="splash" class="splash">
-    <div class="splash-logo">
-      <div class="splash-icon">⚔️</div>
-      <h1>MilCal</h1>
-      <p>Trening Wojskowy</p>
-    </div>
+
+<!-- ── SETTINGS PANEL ──────────────────── -->
+<div id="settings-overlay" class="overlay hidden" onclick="UI.closeSettings()"></div>
+<aside id="settings-panel" class="settings-panel hidden">
+  <div class="settings-header">
+    <h2>Ustawienia</h2>
+    <button class="btn-icon" onclick="UI.closeSettings()">✕</button>
   </div>
+  <div class="settings-body">
+    <div class="form-group">
+      <label>Anthropic API Key</label>
+      <div class="input-eye">
+        <input type="password" id="set-api-key" placeholder="sk-ant-..." autocomplete="off" />
+        <button class="btn-eye" onclick="UI.toggleKeyVisibility()" title="Pokaż/ukryj">👁</button>
+      </div>
+      <small class="muted">Klucz przechowywany lokalnie — nigdy nie opuszcza przeglądarki</small>
+    </div>
+    <div class="form-group">
+      <label>Model</label>
+      <select id="set-model">
+        <option value="claude-sonnet-4-6">claude-sonnet-4-6 (zalecany)</option>
+        <option value="claude-opus-4-8">claude-opus-4-8 (najdokładniejszy)</option>
+        <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001 (najszybszy)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Język odpowiedzi</label>
+      <select id="set-lang">
+        <option value="pl">Polski</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Styl odpowiedzi</label>
+      <select id="set-style">
+        <option value="professional">Profesjonalny</option>
+        <option value="friendly">Przyjazny</option>
+        <option value="concise">Zwieźly</option>
+      </select>
+    </div>
+    <button class="btn btn-primary w-full" onclick="UI.saveSettings()">Zapisz</button>
+    <div class="settings-divider"></div>
+    <button class="btn btn-outline w-full" onclick="UI.exportChat()">↓ Eksportuj rozmowę</button>
+    <button class="btn btn-danger w-full mt-sm" onclick="UI.clearAllHistory()">Usuń całą historię</button>
+  </div>
+  <div class="settings-footer">
+    <a href="https://console.anthropic.com/" target="_blank" rel="noopener" class="link-small">Uzyskaj klucz API →</a>
+  </div>
+</aside>
 
-  <!-- ── APP SHELL ──────────────────────────────────────────── -->
-  <div id="app" class="app hidden">
+<!-- ── APP ────────────────────────────────────── -->
+<div class="app">
 
-    <!-- TOP BAR -->
+  <!-- SIDEBAR (desktop) -->
+  <nav id="sidebar" class="sidebar">
+    <div class="sidebar-top">
+      <div class="logo">
+        <span class="logo-icon">🛒</span>
+        <span class="logo-text">AllEasystent</span>
+      </div>
+      <button class="btn btn-new-chat" onclick="Chat.newConversation()">
+        + Nowa rozmowa
+      </button>
+    </div>
+    <div class="sidebar-history" id="sidebar-history">
+    </div>
+    <div class="sidebar-bottom">
+      <button class="sidebar-btn" onclick="UI.openSettings()">
+        <span>⚙</span> Ustawienia
+      </button>
+    </div>
+  </nav>
+
+  <!-- MAIN CHAT AREA -->
+  <main class="chat-main">
+
+    <!-- TOPBAR (mobile) -->
     <header class="topbar">
-      <button id="btn-back" class="btn-icon hidden" aria-label="Wróć">←</button>
-      <h2 id="page-title">Dashboard</h2>
-      <button id="btn-settings" class="btn-icon" aria-label="Ustawienia">⚙</button>
+      <button class="btn-icon" id="btn-sidebar-toggle" onclick="UI.toggleSidebar()" aria-label="Menu">☰</button>
+      <div class="topbar-center">
+        <span class="logo-icon">🛒</span>
+        <span id="topbar-title">AllEasystent</span>
+      </div>
+      <button class="btn-icon" onclick="UI.openSettings()" aria-label="Ustawienia">⚙</button>
     </header>
 
-    <!-- PAGES -->
-    <main id="pages">
-
-      <!-- ── DASHBOARD ─────────────────────────────────────── -->
-      <section id="page-dashboard" class="page active">
-        <div class="dashboard-hero">
-          <div class="streak-badge">
-            <span id="streak-count">0</span>
-            <small>dni z rzędu</small>
-          </div>
-          <div class="hero-info">
-            <p id="hero-date"></p>
-            <p id="hero-greeting"></p>
-          </div>
+    <!-- MESSAGES -->
+    <div id="messages" class="messages">
+      <div id="welcome" class="welcome">
+        <div class="welcome-icon">🛒</div>
+        <h1>AllEasystent</h1>
+        <p class="welcome-sub">Asystent AI dla właścicieli sklepów na Allegro</p>
+        <div class="suggestions">
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Napisz opis produktu dla słuchawek bezprzewodowych</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Jak zwiększyć sprzedaż na Allegro?</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Szablon odpowiedzi na negatywną opinię klienta</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Strategia cenowa dla nowego produktu</button>
         </div>
+      </div>
+    </div>
 
-        <div class="card today-card" id="today-card">
-          <h3>Dzisiejszy trening</h3>
-          <div id="today-content">
-            <p class="muted">Brak zaplanowanego treningu</p>
-            <button class="btn btn-primary mt-1" onclick="App.goTo('generate')">Wygeneruj z AI ✨</button>
-          </div>
-        </div>
+    <!-- INPUT AREA -->
+    <div class="input-area">
+      <div class="input-wrap">
+        <textarea
+          id="user-input"
+          placeholder="Zapytaj o oferty, opisy produktów, obsługę klientów…"
+          rows="1"
+          onkeydown="Chat.handleKey(event)"
+          oninput="UI.autoResize(this)"
+        ></textarea>
+        <button id="btn-send" class="btn-send" onclick="Chat.send()" title="Wyślij (Enter)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+      <p class="input-hint">Enter — wyślij &nbsp;·&nbsp; Shift+Enter — nowa linia &nbsp;·&nbsp; <span id="model-badge">claude-sonnet-4-6</span></p>
+    </div>
 
-        <div class="card">
-          <h3>Tygodniowy postęp</h3>
-          <canvas id="chart-week" height="160"></canvas>
-        </div>
+  </main>
+</div>
 
-        <div class="stats-grid">
-          <div class="stat-box">
-            <span id="stat-total-workouts">0</span>
-            <small>Treningi</small>
-          </div>
-          <div class="stat-box">
-            <span id="stat-total-reps">0</span>
-            <small>Łączne powtórzenia</small>
-          </div>
-          <div class="stat-box">
-            <span id="stat-best-streak">0</span>
-            <small>Najlepsza seria</small>
-          </div>
-        </div>
-      </section>
+<!-- TOAST -->
+<div id="toast" class="toast hidden"></div>
 
-      <!-- ── GENERATE ──────────────────────────────────────── -->
-      <section id="page-generate" class="page">
-        <div class="card">
-          <h3>Profil treningowy</h3>
-          <div class="form-group">
-            <label>Poziom zaawansowania</label>
-            <select id="gen-level">
-              <option value="rekrut">Rekrut (0–3 mies.)</option>
-              <option value="żołnierz" selected>Żołnierz (3–12 mies.)</option>
-              <option value="kapral">Kapral (1–2 lata)</option>
-              <option value="sierżant">Sierżant (2+ lata)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Czas treningu (minuty)</label>
-            <input type="number" id="gen-duration" value="45" min="15" max="120" />
-          </div>
-          <div class="form-group">
-            <label>Skupienie</label>
-            <div class="chip-group" id="gen-focus">
-              <button class="chip active" data-val="górna partia">Górna</button>
-              <button class="chip active" data-val="core">Core</button>
-              <button class="chip" data-val="dolna partia">Dolna</button>
-              <button class="chip" data-val="wytrzymałość">Wytrzymałość</button>
-              <button class="chip" data-val="siła">Siła</button>
-            </div>
-          </div>
-          <div class="form-group">
-            <label>Dodatkowe uwagi</label>
-            <textarea id="gen-notes" placeholder="np. bolą mnie nadgarstki, chcę więcej pompek..." rows="2"></textarea>
-          </div>
-          <button id="btn-generate" class="btn btn-primary w-full" onclick="App.generateWorkout()">
-            ✨ Generuj z Gemini AI
-          </button>
-        </div>
-
-        <div id="gen-result" class="hidden">
-          <div id="gen-loading" class="loading-card hidden">
-            <div class="spinner"></div>
-            <p>Gemini generuje trening…</p>
-          </div>
-          <div id="gen-plan" class="hidden"></div>
-        </div>
-      </section>
-
-      <!-- ── ACTIVE WORKOUT ────────────────────────────────── -->
-      <section id="page-workout" class="page">
-        <div id="workout-header" class="workout-header">
-          <div id="workout-timer" class="timer">00:00</div>
-          <p id="workout-name" class="workout-name"></p>
-        </div>
-
-        <div id="exercise-list" class="exercise-list"></div>
-
-        <div class="card mt-1">
-          <button id="btn-finish-workout" class="btn btn-success w-full" onclick="App.finishWorkout()">
-            ✓ Zakończ trening
-          </button>
-        </div>
-      </section>
-
-      <!-- ── HISTORY ────────────────────────────────────────── -->
-      <section id="page-history" class="page">
-        <div class="card">
-          <h3>Postęp ćwiczeń</h3>
-          <div class="form-group">
-            <select id="hist-exercise-select" onchange="App.updateProgressChart()">
-              <option value="">— wybierz ćwiczenie —</option>
-            </select>
-          </div>
-          <canvas id="chart-progress" height="200"></canvas>
-        </div>
-
-        <div id="history-list" class="history-list"></div>
-      </section>
-
-      <!-- ── SETTINGS ───────────────────────────────────────── -->
-      <section id="page-settings" class="page">
-        <div class="card">
-          <h3>Konfiguracja AI</h3>
-          <div class="form-group">
-            <label>Gemini API Key</label>
-            <input type="password" id="set-api-key" placeholder="AIza..." autocomplete="off" />
-            <small class="muted">Klucz przechowywany lokalnie na urządzeniu</small>
-          </div>
-          <div class="form-group">
-            <label>Model Gemini</label>
-            <select id="set-model">
-              <option value="gemini-2.0-flash">gemini-2.0-flash (szybki)</option>
-              <option value="gemini-1.5-pro">gemini-1.5-pro (dokładny)</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>Profil</h3>
-          <div class="form-group">
-            <label>Imię / pseudonim</label>
-            <input type="text" id="set-name" placeholder="Żołnierz" />
-          </div>
-          <div class="form-group">
-            <label>Powiadomienia treningowe</label>
-            <label class="toggle">
-              <input type="checkbox" id="set-notif" />
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-        </div>
-
-        <div class="card">
-          <button class="btn btn-primary w-full" onclick="App.saveSettings()">Zapisz ustawienia</button>
-        </div>
-
-        <div class="card danger-zone">
-          <h3>Strefa niebezpieczna</h3>
-          <button class="btn btn-danger w-full" onclick="App.clearData()">Usuń wszystkie dane</button>
-        </div>
-      </section>
-
-    </main>
-
-    <!-- BOTTOM NAV -->
-    <nav class="bottom-nav">
-      <button class="nav-btn active" data-page="dashboard" onclick="App.goTo('dashboard')">
-        <span>🏠</span><small>Dashboard</small>
-      </button>
-      <button class="nav-btn" data-page="generate" onclick="App.goTo('generate')">
-        <span>✨</span><small>Generuj</small>
-      </button>
-      <button class="nav-btn" data-page="history" onclick="App.goTo('history')">
-        <span>📈</span><small>Postępy</small>
-      </button>
-    </nav>
-
-  </div>
-
-  <!-- TOAST -->
-  <div id="toast" class="toast hidden"></div>
-
-  <script src="js/db.js"></script>
-  <script src="js/gemini.js"></script>
-  <script src="js/workout.js"></script>
-  <script src="js/charts.js"></script>
-  <script src="js/app.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>

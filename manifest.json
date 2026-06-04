@@ -1,12 +1,12 @@
 {
-  "name": "MilCal — Trening Wojskowy",
-  "short_name": "MilCal",
-  "description": "Kalistetnika wojskowa z AI — śledź postępy, generuj plany z Gemini",
+  "name": "AllEasystent — Asystent AI",
+  "short_name": "AllEasystent",
+  "description": "AI asystent dla właścicieli sklepów na Allegro",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0d1f0d",
-  "theme_color": "#0d1f0d",
-  "orientation": "portrait",
+  "background_color": "#0f0f1a",
+  "theme_color": "#0f0f1a",
+  "orientation": "any",
   "icons": [
     { "src": "icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any maskable" },
     { "src": "icons/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any maskable" }
