@@ -38,7 +38,7 @@ if (typeof marked !== 'undefined') {
 
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
-  const DEFAULTS = { apiKey: '', model: 'gemini-2.5-flash', lang: 'pl', style: 'professional' };
+  const DEFAULTS = { apiKey: '', model: 'gemini-3.0-flash', lang: 'pl', style: 'professional' };
   let _s = { ...DEFAULTS };
 
   function load() {
