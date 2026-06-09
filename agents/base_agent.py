@@ -121,6 +121,13 @@ class BaseAgent(ABC):
         )
 
     def _build_system_prompt(self, context: str | None) -> str:
+        parts = [self.system_prompt]
         if context:
-            return f"{self.system_prompt}\n\n## Relevant context\n{context}"
-        return self.system_prompt
+            parts.append(f"## Relevant context\n{context}")
+        parts.append(
+            "LANGUAGE RULE: Detect the language of the user's message. "
+            "If it is Polish, your ENTIRE response must be in Polish. "
+            "If it is English, respond in English. "
+            "Never mix languages. Tool results may be in English — ignore that and still reply in the user's language."
+        )
+        return "\n\n".join(parts)
