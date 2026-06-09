@@ -24,35 +24,9 @@
   </div>
   <div class="settings-body">
     <div class="form-group">
-      <label>Google AI API Key</label>
-      <div class="input-eye">
-        <input type="password" id="set-api-key" placeholder="AIza..." autocomplete="off" />
-        <button class="btn-eye" onclick="UI.toggleKeyVisibility()" title="Pokaż/ukryj">👁</button>
-      </div>
-      <small class="muted">Klucz przechowywany lokalnie — nigdy nie opuszcza przeglądarki</small>
-    </div>
-    <div class="form-group">
-      <label>Model</label>
-      <select id="set-model">
-        <option value="gemini-2.5-flash">gemini-2.5-flash (zalecany)</option>
-        <option value="gemini-2.5-pro">gemini-2.5-pro (najdokładniejszy)</option>
-        <option value="gemini-2.0-flash">gemini-2.0-flash (szybki)</option>
-      </select>
-    </div>
-    <div class="form-group">
-      <label>Język odpowiedzi</label>
-      <select id="set-lang">
-        <option value="pl">Polski</option>
-        <option value="en">English</option>
-      </select>
-    </div>
-    <div class="form-group">
-      <label>Styl odpowiedzi</label>
-      <select id="set-style">
-        <option value="professional">Profesjonalny</option>
-        <option value="friendly">Przyjazny</option>
-        <option value="concise">Zwięzły</option>
-      </select>
+      <label>URL backendu</label>
+      <input type="text" id="set-backend-url" placeholder="https://twoj-backend.example.com" autocomplete="off" />
+      <small class="muted">Adres serwera AllEasystent (np. Cloud Run URL)</small>
     </div>
     <button class="btn btn-primary w-full" onclick="UI.saveSettings()">Zapisz</button>
     <div class="settings-divider"></div>
@@ -60,7 +34,7 @@
     <button class="btn btn-danger w-full mt-sm" onclick="UI.clearAllHistory()">Usuń całą historię</button>
   </div>
   <div class="settings-footer">
-    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="link-small">Uzyskaj klucz API →</a>
+    <span class="muted" style="font-size:.82rem">AllEasystent — Backend-powered AI</span>
   </div>
 </aside>
 
@@ -109,10 +83,10 @@
         <h1>AllEasystent</h1>
         <p class="welcome-sub">Asystent AI dla właścicieli sklepów na Allegro</p>
         <div class="suggestions">
-          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Napisz opis produktu dla słuchawek bezprzewodowych</button>
-          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Jak zwiększyć sprzedaż na Allegro?</button>
-          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Szablon odpowiedzi na negatywną opinię klienta</button>
-          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Strategia cenowa dla nowego produktu</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Pokaż moje nowe zamówienia</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Jakie mam aktywne oferty?</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Sprawdź nieprzeczytane wiadomości od kupujących</button>
+          <button class="suggestion" onclick="Chat.sendSuggestion(this)">Pokaż ostatnie rozliczenia Allegro</button>
         </div>
       </div>
     </div>
@@ -122,7 +96,7 @@
       <div class="input-wrap">
         <textarea
           id="user-input"
-          placeholder="Zapytaj o oferty, opisy produktów, obsługę klientów…"
+          placeholder="Zapytaj o zamówienia, oferty, wiadomości od kupujących…"
           rows="1"
           onkeydown="Chat.handleKey(event)"
           oninput="UI.autoResize(this)"
@@ -131,7 +105,7 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
       </div>
-      <p class="input-hint">Enter — wyślij &nbsp;·&nbsp; Shift+Enter — nowa linia &nbsp;·&nbsp; <span id="model-badge">gemini-2.5-flash</span></p>
+      <p class="input-hint">Enter — wyślij &nbsp;·&nbsp; Shift+Enter — nowa linia &nbsp;·&nbsp; <span id="model-badge">AllEasystent API</span></p>
     </div>
 
   </main>
