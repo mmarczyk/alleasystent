@@ -15,7 +15,7 @@
 </head>
 <body>
 
-<!-- ── SETTINGS PANEL ──────────────────────────────── -->
+<!-- ── SETTINGS PANEL ────────────────────────────── -->
 <div id="settings-overlay" class="overlay hidden" onclick="UI.closeSettings()"></div>
 <aside id="settings-panel" class="settings-panel hidden">
   <div class="settings-header">
@@ -78,7 +78,9 @@
         + Nowa rozmowa
       </button>
     </div>
-    <div class="sidebar-history" id="sidebar-history"></div>
+    <div class="sidebar-history" id="sidebar-history">
+      <!-- conversation list injected by JS -->
+    </div>
     <div class="sidebar-bottom">
       <button class="sidebar-btn" onclick="UI.openSettings()">
         <span>⚙</span> Ustawienia
@@ -101,6 +103,7 @@
 
     <!-- MESSAGES -->
     <div id="messages" class="messages">
+      <!-- WELCOME STATE -->
       <div id="welcome" class="welcome">
         <div class="welcome-icon">🛒</div>
         <h1>AllEasystent</h1>
@@ -117,7 +120,13 @@
     <!-- INPUT AREA -->
     <div class="input-area">
       <div class="input-wrap">
-        <textarea id="user-input" placeholder="Zapytaj o oferty, opisy produktów, obsługę klientów…" rows="1" onkeydown="Chat.handleKey(event)" oninput="UI.autoResize(this)"></textarea>
+        <textarea
+          id="user-input"
+          placeholder="Zapytaj o oferty, opisy produktów, obsługę klientów…"
+          rows="1"
+          onkeydown="Chat.handleKey(event)"
+          oninput="UI.autoResize(this)"
+        ></textarea>
         <button id="btn-send" class="btn-send" onclick="Chat.send()" title="Wyślij (Enter)">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
