@@ -79,8 +79,12 @@ class Orchestrator:
             sender_id=message.sender_id,
         )
 
-        # 2. Retrieve RAG context
-        rag_context, sources = await self._rag_agent.retrieve(message.text)
+        # 2. Retrieve RAG context (best-effort — never block a response)
+        try:
+            rag_context, sources = await self._rag_agent.retrieve(message.text)
+        except Exception as exc:
+            logger.warning("RAG retrieval failed, continuing without context: %s", exc)
+            rag_context, sources = "", []
 
         # 3. Classify intent
         intent = await self._classify_intent(message.text, session.to_anthropic_messages())

@@ -26,6 +26,11 @@ COPY . .
 # Create data directory for ChromaDB
 RUN mkdir -p /app/data/chromadb
 
+# Pre-download the embedding model so the first request doesn't time out.
+# HF_HOME is pinned to /app/.cache so it's accessible by appuser later.
+ENV HF_HOME=/app/.cache/huggingface
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')"
+
 # Non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
@@ -33,6 +38,7 @@ USER appuser
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV HF_HOME=/app/.cache/huggingface
 
 EXPOSE 8080
 

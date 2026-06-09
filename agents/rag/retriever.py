@@ -76,48 +76,62 @@ class ChromaRetriever(BaseRetriever):
                 self.COLLECTION_NAME,
                 self._collection.count(),
             )
-        except ImportError as exc:
-            logger.error("chromadb / sentence-transformers not installed: %s", exc)
-            raise
+        except Exception as exc:
+            logger.warning("ChromaDB init failed, RAG disabled: %s", exc)
+            self._collection = None
 
     async def query(self, text: str, top_k: int = 5) -> list[Document]:
         if self._collection is None:
             return []
-        results = self._collection.query(
-            query_texts=[text],
-            n_results=min(top_k, max(1, self._collection.count())),
-            include=["documents", "metadatas", "distances"],
-        )
-        docs = []
-        for i, (doc_id, content, meta, dist) in enumerate(
-            zip(
+
+        import asyncio
+
+        def _sync() -> list[Document] | None:
+            count = self._collection.count()
+            if count == 0:
+                return []
+            results = self._collection.query(
+                query_texts=[text],
+                n_results=min(top_k, max(1, count)),
+                include=["documents", "metadatas", "distances"],
+            )
+            docs = []
+            for doc_id, content, meta, dist in zip(
                 results["ids"][0],
                 results["documents"][0],
                 results["metadatas"][0],
                 results["distances"][0],
-            )
-        ):
-            docs.append(Document(
-                doc_id=doc_id,
-                content=content,
-                metadata=meta or {},
-                score=1.0 - float(dist),  # cosine distance → similarity
-            ))
-        return docs
+            ):
+                docs.append(Document(
+                    doc_id=doc_id,
+                    content=content,
+                    metadata=meta or {},
+                    score=1.0 - float(dist),
+                ))
+            return docs
+
+        return await asyncio.to_thread(_sync)
 
     async def add_documents(self, documents: list[Document]) -> None:
         if self._collection is None:
             return
-        self._collection.upsert(
-            ids=[d.doc_id for d in documents],
-            documents=[d.content for d in documents],
-            metadatas=[d.metadata for d in documents],
-        )
-        logger.info("Added/updated %d documents in ChromaDB", len(documents))
+
+        import asyncio
+
+        def _sync() -> None:
+            self._collection.upsert(
+                ids=[d.doc_id for d in documents],
+                documents=[d.content for d in documents],
+                metadatas=[d.metadata for d in documents],
+            )
+            logger.info("Added/updated %d documents in ChromaDB", len(documents))
+
+        await asyncio.to_thread(_sync)
 
     async def delete_document(self, doc_id: str) -> None:
         if self._collection:
-            self._collection.delete(ids=[doc_id])
+            import asyncio
+            await asyncio.to_thread(self._collection.delete, ids=[doc_id])
 
 
 class VertexAIRetriever(BaseRetriever):
