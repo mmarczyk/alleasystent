@@ -25,8 +25,8 @@
   <div class="settings-body">
     <div class="form-group">
       <label>URL backendu</label>
-      <input type="text" id="set-backend-url" placeholder="https://twoj-backend.example.com" autocomplete="off" />
-      <small class="muted">Adres serwera AllEasystent (np. Cloud Run URL)</small>
+      <input type="text" id="set-backend-url" placeholder="https://... (zostaw puste gdy UI i backend na tej samej domenie)" autocomplete="off" />
+      <small class="muted">Zostaw puste przy deploymencie all-in-one (Railway). Wypełnij tylko gdy UI jest osobno (GitHub Pages).</small>
     </div>
     <button class="btn btn-primary w-full" onclick="UI.saveSettings()">Zapisz</button>
     <div class="settings-divider"></div>

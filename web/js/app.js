@@ -2,7 +2,7 @@
    AllEasystent Chat UI — main controller
    ═══════════════════════════════════════════════════ */
 
-// ── Marked.js config ───────────────────────────────
+// ── Marked.js config ─────────────────────────────
 if (typeof marked !== 'undefined') {
   marked.setOptions({
     breaks: true,
@@ -16,14 +16,14 @@ if (typeof marked !== 'undefined') {
   });
 }
 
-// ── Settings ───────────────────────────────────
+// ── Settings ─────────────────────────────────────
 const Settings = (() => {
   const DEFAULTS = { backendUrl: '' };
   let _s = { ...DEFAULTS };
 
   function load() {
     try { Object.assign(_s, JSON.parse(localStorage.getItem('ae_settings') || '{}')); } catch {}
-    if (_s.backendUrl) _s.backendUrl = _s.backendUrl.replace(/\/$/,  '');
+    if (_s.backendUrl) _s.backendUrl = _s.backendUrl.replace(/\/$/, '');
     return _s;
   }
   function save(vals) {
@@ -95,7 +95,8 @@ const Store = (() => {
 const Backend = (() => {
   async function query(message, sessionId) {
     const backendUrl = Settings.get('backendUrl');
-    const res = await fetch(`${backendUrl}/query`, {
+    const url = backendUrl ? `${backendUrl}/query` : '/query';
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -282,7 +283,6 @@ const Chat = (() => {
     if (!msgText) return;
 
     const backendUrl = Settings.get('backendUrl');
-    if (!backendUrl) { UI.openSettings(); UI.toast('Ustaw URL backendu w Ustawieniach', 4000); return; }
 
     if (!Store.active()) Store.create();
     Store.addMessage('user', msgText);

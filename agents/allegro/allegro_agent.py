@@ -30,7 +30,7 @@ class AllegroAgent(BaseAgent):
     """
 
     agent_name = "allegro"
-    model_override = None  # resolved to claude_model_fast in __init__
+    model_override = None  # resolved to gemini_model_fast in __init__
     system_prompt = (
         "You are an AI assistant specialized in managing an Allegro (Polish e-commerce) store. "
         "You have access to the store's orders, offers, and messaging system. "
@@ -43,7 +43,7 @@ class AllegroAgent(BaseAgent):
 
     def __init__(self):
         super().__init__()
-        self.model_override = self._settings.claude_model_fast
+        self.model_override = self._settings.gemini_model_fast
         self._allegro = AllegroService()
 
     async def run(

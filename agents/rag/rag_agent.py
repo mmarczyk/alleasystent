@@ -42,25 +42,28 @@ class RAGAgent(BaseAgent):
     def _get_tools(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": "search_knowledge_base",
-                "description": (
-                    "Search the store's knowledge base for product information, "
-                    "policies, FAQs, and shipping details."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query in any language.",
+                "type": "function",
+                "function": {
+                    "name": "search_knowledge_base",
+                    "description": (
+                        "Search the store's knowledge base for product information, "
+                        "policies, FAQs, and shipping details."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query in any language.",
+                            },
+                            "top_k": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return (1-10).",
+                                "default": 5,
+                            },
                         },
-                        "top_k": {
-                            "type": "integer",
-                            "description": "Maximum number of results to return (1-10).",
-                            "default": 5,
-                        },
+                        "required": ["query"],
                     },
-                    "required": ["query"],
                 },
             }
         ]
