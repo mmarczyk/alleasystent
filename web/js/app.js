@@ -95,7 +95,8 @@ const Store = (() => {
 const Backend = (() => {
   async function query(message, sessionId) {
     const backendUrl = Settings.get('backendUrl');
-    const res = await fetch(`${backendUrl}/query`, {
+    const url = backendUrl ? `${backendUrl}/query` : '/query';
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -282,7 +283,6 @@ const Chat = (() => {
     if (!msgText) return;
 
     const backendUrl = Settings.get('backendUrl');
-    if (!backendUrl) { UI.openSettings(); UI.toast('Ustaw URL backendu w Ustawieniach', 4000); return; }
 
     if (!Store.active()) Store.create();
     Store.addMessage('user', msgText);

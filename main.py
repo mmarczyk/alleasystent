@@ -22,6 +22,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from config.settings import get_settings
@@ -265,6 +266,13 @@ async def direct_query(body: DirectQueryRequest) -> dict:
         "agent": response.agent_type,
         "sources": response.sources,
     }
+
+
+# ── Static UI ─────────────────────────────────────────────────────────────────
+# Serve web/ at root — must be mounted AFTER all API routes so they take priority.
+_web_dir = pathlib.Path(__file__).parent / "web"
+if _web_dir.exists():
+    app.mount("/", StaticFiles(directory=str(_web_dir), html=True), name="ui")
 
 
 if __name__ == "__main__":
