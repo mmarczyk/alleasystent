@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v1';
+const CACHE = 'alleasystent-v2';
 const STATIC = [
   './', './index.html', './manifest.json',
   './css/app.css', './js/app.js'
@@ -17,6 +17,6 @@ self.addEventListener('activate', e =>
 );
 
 self.addEventListener('fetch', e => {
-  if (e.request.url.includes('anthropic.com') || e.request.url.includes('cdn.')) return;
+  if (e.request.url.includes('googleapis.com') || e.request.url.includes('cdn.')) return;
   e.respondWith(caches.match(e.request).then(c => c ?? fetch(e.request)));
 });
