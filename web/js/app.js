@@ -2,26 +2,6 @@
    AllEasystent Chat UI — main controller
    ═══════════════════════════════════════════════════ */
 
-// ── System prompt ────────────────────────────────
-const SYSTEM_PROMPTS = {
-  pl: `Jesteś AllEasystent — ekspert AI dla polskich właścicieli sklepów internetowych, specjalizujący się w platformie Allegro.
-
-Pomagasz w:
-- **Oferty i produkty**: tytuły SEO, opisy, parametry, zdjęcia, kategorie
-- **Sprzedaż**: strategie cenowe, promocje, Allegro Ads, analiza konkurencji
-- **Obsługa klienta**: szablony wiadomości, odpowiedzi na pytania, reklamacje i zwroty
-- **Logistyka**: metody wysyłki, Allegro Smart, pakowanie, zarządzanie magazynem
-- **Marketing**: kampanie, social media, cross-selling, upselling
-- **Analityka**: interpretacja statystyk, prognozowanie, optymalizacja konwersji
-- **Prawo e-commerce**: regulaminy, RODO, prawa konsumenta
-
-Odpowiadasz po polsku, profesjonalnie i konkretnie. Używasz formatowania markdown — nagłówków, list i pogrubień — gdy poprawia to czytelność. Podajesz gotowe do użycia szablony i przykłady. Jeśli pytanie dotyczy czegoś poza e-commerce, możesz odpowiedzieć, ale zaznacz że to nie jest Twoja główna specjalizacja.`,
-
-  en: `You are AllEasystent — an expert AI assistant for Polish online store owners, specializing in the Allegro platform.
-
-You help with product listings, pricing strategies, customer service, logistics, marketing, and e-commerce analytics. Be professional, concise, and provide actionable advice with ready-to-use templates when appropriate.`
-};
-
 // ── Marked.js config ─────────────────────────────
 if (typeof marked !== 'undefined') {
   marked.setOptions({
@@ -38,16 +18,19 @@ if (typeof marked !== 'undefined') {
 
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
-  const DEFAULTS = { apiKey: '', model: 'gemini-2.5-flash', lang: 'pl', style: 'professional' };
-  const VALID_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+  const DEFAULTS = { backendUrl: '' };
   let _s = { ...DEFAULTS };
 
   function load() {
     try { Object.assign(_s, JSON.parse(localStorage.getItem('ae_settings') || '{}')); } catch {}
-    if (!VALID_MODELS.includes(_s.model)) _s.model = DEFAULTS.model;
+    if (_s.backendUrl) _s.backendUrl = _s.backendUrl.replace(/\/$/, '');
     return _s;
   }
-  function save(vals) { Object.assign(_s, vals); localStorage.setItem('ae_settings', JSON.stringify(_s)); }
+  function save(vals) {
+    if (vals.backendUrl) vals.backendUrl = vals.backendUrl.replace(/\/$/, '');
+    Object.assign(_s, vals);
+    localStorage.setItem('ae_settings', JSON.stringify(_s));
+  }
   function get(k) { return _s[k]; }
   return { load, save, get, all: () => ({ ..._s }) };
 })();
@@ -108,55 +91,27 @@ const Store = (() => {
   return { load, create, active, setActive, addMessage, updateLastMessage, deleteConv, clearAll, all: () => convs };
 })();
 
-// ── Gemini API ───────────────────────────────────
-const Gemini = (() => {
-  const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-
-  async function* stream(messages, apiKey, model, systemPrompt) {
-    const contents = messages.map(m => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }]
-    }));
-
-    const res = await fetch(`${API_BASE}/${model}:streamGenerateContent?key=${encodeURIComponent(apiKey)}&alt=sse`, {
+// ── Backend API ──────────────────────────────────
+const Backend = (() => {
+  async function query(message, sessionId) {
+    const backendUrl = Settings.get('backendUrl');
+    const res = await fetch(`${backendUrl}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents,
-        generationConfig: { maxOutputTokens: 8192 }
+        message,
+        session_id: sessionId,
+        sender_id: 'web_user',
       })
     });
-
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || `HTTP ${res.status}`);
+      throw new Error(err.detail || `HTTP ${res.status}`);
     }
-
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const raw = line.slice(6).trim();
-        if (!raw) continue;
-        try {
-          const ev = JSON.parse(raw);
-          const text = ev.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) yield text;
-        } catch {}
-      }
-    }
+    const data = await res.json();
+    return data.response;
   }
-
-  return { stream };
+  return { query };
 })();
 
 // ── UI helpers ───────────────────────────────────
@@ -178,11 +133,7 @@ const UI = (() => {
   function openSettings() {
     document.getElementById('settings-overlay').classList.remove('hidden');
     document.getElementById('settings-panel').classList.remove('hidden');
-    const s = Settings.all();
-    document.getElementById('set-api-key').value = s.apiKey;
-    document.getElementById('set-model').value   = s.model;
-    document.getElementById('set-lang').value    = s.lang;
-    document.getElementById('set-style').value   = s.style;
+    document.getElementById('set-backend-url').value = Settings.get('backendUrl');
   }
 
   function closeSettings() {
@@ -191,21 +142,9 @@ const UI = (() => {
   }
 
   function saveSettings() {
-    const s = {
-      apiKey: document.getElementById('set-api-key').value.trim(),
-      model:  document.getElementById('set-model').value,
-      lang:   document.getElementById('set-lang').value,
-      style:  document.getElementById('set-style').value,
-    };
-    Settings.save(s);
-    document.getElementById('model-badge').textContent = s.model;
+    Settings.save({ backendUrl: document.getElementById('set-backend-url').value.trim() });
     closeSettings();
     toast('Ustawienia zapisane ✓');
-  }
-
-  function toggleKeyVisibility() {
-    const inp = document.getElementById('set-api-key');
-    inp.type = inp.type === 'password' ? 'text' : 'password';
   }
 
   function toggleSidebar() {
@@ -231,12 +170,12 @@ const UI = (() => {
     toast('Historia usunięta');
   }
 
-  return { toast, autoResize, openSettings, closeSettings, saveSettings, toggleKeyVisibility, toggleSidebar, exportChat, clearAllHistory };
+  return { toast, autoResize, openSettings, closeSettings, saveSettings, toggleSidebar, exportChat, clearAllHistory };
 })();
 
 // ── Chat engine ──────────────────────────────────
 const Chat = (() => {
-  let _streaming = false;
+  let _waiting = false;
 
   function renderSidebar() {
     const list = document.getElementById('sidebar-history');
@@ -298,21 +237,21 @@ const Chat = (() => {
 
     const div = document.createElement('div');
     div.className = 'msg msg-bot';
-    div.id = 'streaming-bubble';
+    div.id = 'waiting-bubble';
     div.innerHTML = `
       <div class="msg-avatar">🛒</div>
       <div class="msg-content">
-        <div class="msg-bubble" id="streaming-content">
+        <div class="msg-bubble" id="waiting-content">
           <div class="typing-dots"><span></span><span></span><span></span></div>
         </div>
       </div>`;
     container.appendChild(div);
     scrollBottom();
-    return document.getElementById('streaming-content');
+    return document.getElementById('waiting-content');
   }
 
-  function finalizeStreamBubble(fullText, ts) {
-    const bubble = document.getElementById('streaming-bubble');
+  function finalizeWaitingBubble(fullText, ts) {
+    const bubble = document.getElementById('waiting-bubble');
     if (!bubble) return;
     const idx = Store.active()?.messages.length - 1;
     const replacement = buildBubble('assistant', fullText, ts, idx);
@@ -337,20 +276,18 @@ const Chat = (() => {
   }
 
   async function send(text) {
-    if (_streaming) return;
+    if (_waiting) return;
     const input = document.getElementById('user-input');
     const msgText = (text || input.value).trim();
     if (!msgText) return;
 
-    const apiKey = Settings.get('apiKey');
-    if (!apiKey) { UI.openSettings(); UI.toast('Ustaw klucz API Gemini w Ustawieniach', 4000); return; }
+    const backendUrl = Settings.get('backendUrl');
+    if (!backendUrl) { UI.openSettings(); UI.toast('Ustaw URL backendu w Ustawieniach', 4000); return; }
 
-    // ensure active conversation
     if (!Store.active()) Store.create();
     Store.addMessage('user', msgText);
     input.value = ''; input.style.height = 'auto';
 
-    // render user message
     const container = document.getElementById('messages');
     const welcome = document.getElementById('welcome');
     if (container.contains(welcome)) container.removeChild(welcome);
@@ -359,53 +296,33 @@ const Chat = (() => {
     scrollBottom();
     renderSidebar();
 
-    // streaming
-    _streaming = true;
-    const sendBtn = document.getElementById('btn-send');
-    sendBtn.disabled = true;
+    _waiting = true;
+    document.getElementById('btn-send').disabled = true;
+    appendBotBubble();
 
-    const contentEl = appendBotBubble();
-    const model = Settings.get('model');
-    const lang  = Settings.get('lang');
-    const systemPrompt = buildSystemPrompt(lang, Settings.get('style'));
-
-    // build API messages (exclude last assistant placeholder)
-    const apiMsgs = Store.active().messages
-      .filter(m => m.role === 'user' || m.role === 'assistant')
-      .map(m => ({ role: m.role, content: m.content }));
-
-    let fullText = '';
+    const sessionId = Store.active().id;
     const ts = Date.now();
+    let fullText = '';
 
     try {
       Store.addMessage('assistant', '');
-      for await (const chunk of Gemini.stream(apiMsgs, apiKey, model, systemPrompt)) {
-        fullText += chunk;
-        contentEl.innerHTML = renderMarkdown(fullText) + '<span class="cursor-blink">▍</span>';
-        scrollBottom();
-        Store.updateLastMessage(fullText);
-      }
+      fullText = await Backend.query(msgText, sessionId);
+      Store.updateLastMessage(fullText);
     } catch (err) {
       fullText = `**Błąd:** ${err.message}`;
-      contentEl.innerHTML = `<span style="color:#fca5a5">${escHtml(err.message)}</span>`;
+      const contentEl = document.getElementById('waiting-content');
+      if (contentEl) contentEl.innerHTML = `<span style="color:#fca5a5">${escHtml(err.message)}</span>`;
       Store.updateLastMessage(fullText);
       UI.toast(`Błąd: ${err.message}`, 5000);
     } finally {
-      _streaming = false;
-      sendBtn.disabled = false;
-      finalizeStreamBubble(fullText, ts);
+      _waiting = false;
+      document.getElementById('btn-send').disabled = false;
+      finalizeWaitingBubble(fullText, ts);
       renderSidebar();
       if (typeof hljs !== 'undefined') {
         document.querySelectorAll('#messages pre code').forEach(b => hljs.highlightElement(b));
       }
     }
-  }
-
-  function buildSystemPrompt(lang, style) {
-    let prompt = SYSTEM_PROMPTS[lang] || SYSTEM_PROMPTS.pl;
-    if (style === 'concise') prompt += '\n\nOdpowiadaj zwięźle — maksymalnie kilka zdań lub krótka lista, chyba że temat wymaga więcej.';
-    if (style === 'friendly') prompt += '\n\nOdpowiadaj przyjaźnie i ciepło, możesz używać emotikonów.';
-    return prompt;
   }
 
   function handleKey(e) {
@@ -437,16 +354,13 @@ const Chat = (() => {
 
   function copyMessage(btn) {
     const bubble = btn.closest('.msg-content').querySelector('.msg-bubble');
-    const text = bubble.innerText;
-    navigator.clipboard?.writeText(text).then(() => UI.toast('Skopiowano ✓')).catch(() => UI.toast('Błąd kopiowania'));
+    navigator.clipboard?.writeText(bubble.innerText).then(() => UI.toast('Skopiowano ✓')).catch(() => UI.toast('Błąd kopiowania'));
   }
 
   async function regenerate() {
     const c = Store.active();
     if (!c || c.messages.length < 2) return;
-    // remove last assistant message
     c.messages.pop();
-    Store.updateLastMessage && null;
     localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
     renderMessages();
     const lastUser = [...c.messages].reverse().find(m => m.role === 'user');
@@ -461,20 +375,8 @@ window.addEventListener('DOMContentLoaded', () => {
   Settings.load();
   Store.load();
 
-  // apply saved settings to UI
-  document.getElementById('model-badge').textContent = Settings.get('model');
-
-  // render
-  Chat.renderSidebar && (() => {
-    const convs = Store.all();
-    if (!convs.length) Store.create('Nowa rozmowa');
-    // expose renderSidebar
-  })();
-
-  // PWA service worker
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
-  // Close sidebar on overlay click (mobile)
   document.addEventListener('click', e => {
     const sidebar = document.getElementById('sidebar');
     if (sidebar.classList.contains('open') &&
@@ -484,12 +386,9 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Initial render — access private renderSidebar/renderMessages via Chat
-  // (they're already called in the Chat IIFE public API)
   const convs = Store.all();
   if (!convs.length) Store.create('Nowa rozmowa');
 
-  // Render sidebar
   (() => {
     const list = document.getElementById('sidebar-history');
     const all = Store.all();
@@ -503,7 +402,6 @@ window.addEventListener('DOMContentLoaded', () => {
     : '<p style="color:var(--muted);font-size:.8rem;padding:.5rem .75rem">Brak rozmów</p>';
   })();
 
-  // Show welcome or messages
   const active = Store.active();
   if (!active || !active.messages.length) {
     document.getElementById('messages').appendChild(document.getElementById('welcome'));
@@ -514,8 +412,3 @@ window.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('user-input').focus();
 });
-
-// Add cursor blink style
-const style = document.createElement('style');
-style.textContent = '.cursor-blink { animation: blink .7s step-end infinite; } @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }';
-document.head.appendChild(style);
