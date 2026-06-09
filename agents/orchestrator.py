@@ -29,17 +29,16 @@ from services.gcp_service import FirestoreService
 logger = logging.getLogger(__name__)
 
 INTENT_SYSTEM_PROMPT = """
-You are an intent classifier for an e-commerce store AI assistant.
-Classify the user's message into exactly one of these intents:
+Classify the user's message. Reply with EXACTLY ONE of these labels and nothing else:
 
-- allegro_orders: questions about orders, shipping, delivery, tracking, returns, invoices
-- allegro_offers: questions about products, listings, prices, stock, offer management
-- allegro_messaging: requests to send messages to buyers or check buyer messages
-- allegro_account: questions about the seller account, billing, fees, statistics
-- general_knowledge: general product questions, FAQs, policies, store information
-- chitchat: greetings, small talk, off-topic messages, AND questions about what the assistant can do or what features it supports
+allegro_orders      — orders, shipping, delivery, tracking, returns, invoices, "zamówienia", "paczka"
+allegro_offers      — listings, prices, stock, offer management, "oferty", "cena", "stan magazynowy"
+allegro_messaging   — buyer messages, send message, "wiadomości", "napisz do kupującego"
+allegro_account     — seller account, fees, billing, statistics, "konto", "opłaty", "prowizja"
+general_knowledge   — product FAQs, store policies, shipping info
+chitchat            — greetings, small talk, questions about assistant capabilities/features
 
-Respond with ONLY the intent name, nothing else.
+Output the label only. No punctuation, no explanation.
 """.strip()
 
 
@@ -117,29 +116,38 @@ class Orchestrator:
         if history_text:
             prompt = f"Recent conversation:\n{history_text}\n\nNew message: {query}"
 
+        known_intents = [
+            "allegro_orders", "allegro_offers", "allegro_messaging",
+            "allegro_account", "general_knowledge", "chitchat",
+            *self._extra_agents.keys(),
+        ]
         try:
             resp = await self._client.chat.completions.create(
                 model=self._settings.gemini_model_fast,
-                max_tokens=20,
+                max_tokens=30,
                 messages=[
                     {"role": "system", "content": INTENT_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
             )
-            intent = resp.choices[0].message.content.strip().lower()
-            # Validate against known intents
-            known_intents = {
-                "allegro_orders", "allegro_offers", "allegro_messaging",
-                "allegro_account", "general_knowledge", "chitchat",
-            }
-            known_intents.update(self._extra_agents.keys())
-            if intent not in known_intents:
-                logger.warning("Unknown intent '%s', falling back to general_knowledge", intent)
-                return "general_knowledge"
-            return intent
+            raw = resp.choices[0].message.content.strip().lower()
+            logger.info("Intent classifier raw output: %r", raw)
+
+            # Exact match first
+            if raw in known_intents:
+                return raw
+
+            # Substring match — handles verbose output like "The intent is allegro_orders"
+            for ki in known_intents:
+                if ki in raw:
+                    logger.info("Intent matched via substring: %r -> %s", raw, ki)
+                    return ki
+
+            logger.warning("Unknown intent %r, falling back to allegro_orders for safety", raw)
+            return "allegro_orders"
         except Exception as exc:
             logger.error("Intent classification failed: %s", exc)
-            return "general_knowledge"
+            return "allegro_orders"
 
     async def _route(
         self,
