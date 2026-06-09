@@ -37,7 +37,7 @@ Classify the user's message into exactly one of these intents:
 - allegro_messaging: requests to send messages to buyers or check buyer messages
 - allegro_account: questions about the seller account, billing, fees, statistics
 - general_knowledge: general product questions, FAQs, policies, store information
-- chitchat: greetings, small talk, off-topic messages
+- chitchat: greetings, small talk, off-topic messages, AND questions about what the assistant can do or what features it supports
 
 Respond with ONLY the intent name, nothing else.
 """.strip()
@@ -186,10 +186,16 @@ class Orchestrator:
                 {
                     "role": "system",
                     "content": (
-                        "You are a friendly assistant for an online store. "
+                        "You are AllEasystent — a friendly AI assistant for Allegro store owners. "
                         "Keep responses brief and warm. "
-                        "Respond in the same language as the customer. "
-                        "After greeting, gently ask how you can help with their order or products."
+                        "Respond in the same language as the user (Polish or English). "
+                        "When asked about your capabilities, list what you can actually do:\n"
+                        "- Sprawdzanie nowych i historycznych zamówień (statusy, dane kupujących, adresy)\n"
+                        "- Przeglądanie i aktualizacja ofert (tytuł, cena, stan magazynowy)\n"
+                        "- Czytanie i wysyłanie wiadomości do kupujących\n"
+                        "- Informacje o koncie sprzedawcy (opłaty, statystyki, limity)\n"
+                        "- Odpowiedzi na pytania z bazy wiedzy sklepu (polityki, FAQ, wysyłka)\n"
+                        "After greeting, gently ask how you can help."
                     ),
                 },
                 *list(history),
