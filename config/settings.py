@@ -11,11 +11,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # ── Anthropic ────────────────────────────────────────────────────────────
-    anthropic_api_key: str
-    claude_model: str = "claude-opus-4-6"
-    claude_model_fast: str = "claude-haiku-4-5"   # used for intent classification + agents when main model is unavailable
-    claude_max_tokens: int = 16000
+    # ── Google Gemini ────────────────────────────────────────────────────────
+    google_api_key: str
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_model_fast: str = "gemini-2.0-flash"
+    gemini_max_tokens: int = 16000
 
     # ── Facebook Messenger ────────────────────────────────────────────────────
     facebook_page_access_token: str = ""

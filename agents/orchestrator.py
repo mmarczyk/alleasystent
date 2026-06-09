@@ -17,7 +17,7 @@ dispatching to the heavier specialized agents.
 import logging
 from typing import Any
 
-import anthropic
+from openai import AsyncOpenAI
 
 from agents.allegro.allegro_agent import AllegroAgent
 from agents.base_agent import BaseAgent
@@ -55,7 +55,10 @@ class Orchestrator:
 
     def __init__(self):
         self._settings = get_settings()
-        self._client = anthropic.AsyncAnthropic(api_key=self._settings.anthropic_api_key, max_retries=5)
+        self._client = AsyncOpenAI(
+            api_key=self._settings.google_api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
         self._firestore = FirestoreService()
         self._rag_agent = RAGAgent()
         self._allegro_agent = AllegroAgent()
@@ -111,13 +114,15 @@ class Orchestrator:
             prompt = f"Recent conversation:\n{history_text}\n\nNew message: {query}"
 
         try:
-            resp = await self._client.messages.create(
-                model="claude-haiku-4-5",  # fast, cheap classification
+            resp = await self._client.chat.completions.create(
+                model=self._settings.gemini_model_fast,
                 max_tokens=20,
-                system=INTENT_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
             )
-            intent = resp.content[0].text.strip().lower()
+            intent = resp.choices[0].message.content.strip().lower()
             # Validate against known intents
             known_intents = {
                 "allegro_orders", "allegro_offers", "allegro_messaging",
@@ -170,18 +175,22 @@ class Orchestrator:
         history: list[dict[str, str]],
     ) -> AgentResponse:
         """Handle greetings and small talk without hitting specialized agents."""
-        resp = await self._client.messages.create(
-            model=self._settings.claude_model,
+        resp = await self._client.chat.completions.create(
+            model=self._settings.gemini_model_fast,
             max_tokens=512,
-            system=(
-                "You are a friendly assistant for an online store. "
-                "Keep responses brief and warm. "
-                "Respond in the same language as the customer. "
-                "After greeting, gently ask how you can help with their order or products."
-            ),
-            messages=list(history) + [{"role": "user", "content": query}],
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a friendly assistant for an online store. "
+                        "Keep responses brief and warm. "
+                        "Respond in the same language as the customer. "
+                        "After greeting, gently ask how you can help with their order or products."
+                    ),
+                },
+                *list(history),
+                {"role": "user", "content": query},
+            ],
         )
-        text = next(
-            (b.text for b in resp.content if b.type == "text"), "Hello! How can I help you?"
-        )
+        text = resp.choices[0].message.content or "Hello! How can I help you?"
         return AgentResponse(text=text, agent_type="chitchat")
