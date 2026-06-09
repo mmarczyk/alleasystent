@@ -79,15 +79,15 @@ class AllegroAgent(BaseAgent):
             # Background polling — saves tokens to disk automatically when approved
             asyncio.create_task(self._allegro.poll_device_flow(device_code, interval))
             text = (
-                "To access your Allegro store I need authorization first.\n\n"
-                f"Please open this link and approve the request:\n{url}"
+                "Aby uzyskać dostęp do Twojego sklepu Allegro, potrzebuję autoryzacji.\n\n"
+                f"Otwórz poniższy link i zatwierdź dostęp:\n{url}"
             )
             if user_code:
-                text += f"\n\nIf prompted for a code, enter: **{user_code}**"
-            text += "\n\nOnce you've approved, send me your question again."
+                text += f"\n\nJeśli zostaniesz poproszony o kod, wpisz: **{user_code}**"
+            text += "\n\nPo zatwierdzeniu wyślij swoje pytanie jeszcze raz."
         except Exception as exc:
             logger.error("Failed to start Allegro device flow: %s", exc)
-            text = "Allegro authorization is required but could not be started due to an internal error. Please try again later."
+            text = "Wymagana autoryzacja Allegro, ale nie udało się jej uruchomić. Spróbuj ponownie za chwilę."
         return AgentResponse(text=text, agent_type=self.agent_name)
 
     async def _try_complete_auth(
@@ -109,10 +109,10 @@ class AllegroAgent(BaseAgent):
 
         return AgentResponse(
             text=(
-                "I wasn't able to confirm your Allegro authorization yet.\n\n"
-                "Did you open the link and approve the request on Allegro? "
-                "If yes, please send your question again and I'll try once more. "
-                "If not, please approve it first."
+                "Nie udało mi się jeszcze potwierdzić autoryzacji Allegro.\n\n"
+                "Czy otworzyłeś link i zatwierdziłeś dostęp na Allegro? "
+                "Jeśli tak, wyślij swoje pytanie jeszcze raz. "
+                "Jeśli nie, najpierw zatwierdź dostęp."
             ),
             agent_type=self.agent_name,
         )
@@ -126,7 +126,7 @@ class AllegroAgent(BaseAgent):
         except AllegroAuthError as exc:
             # Tokens expired mid-session; surface clearly (run() handles pre-check)
             logger.error("Allegro auth error during tool call: %s", exc)
-            return "Allegro authentication expired mid-session. Please re-authorize and retry."
+            return "Sesja Allegro wygasła. Wyślij dowolne pytanie, aby rozpocząć ponowną autoryzację."
         except AllegroAPIError as exc:
             logger.error("Allegro API error: %s", exc)
             return "An internal error occurred while contacting Allegro. Please try again."

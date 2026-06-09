@@ -100,12 +100,52 @@ class Orchestrator:
 
         return response
 
+    # ── Keyword pre-routing (no LLM call needed for obvious patterns) ──────────
+    _KEYWORD_MAP: list[tuple[list[str], str]] = [
+        # Capability / meta questions always → chitchat
+        (["funkcj", "możliwości", "co potrafisz", "co umiesz", "co możesz", "jakie masz",
+          "capabilities", "what can you", "what do you", "features", "help me", "pomoc"],
+         "chitchat"),
+        # Greetings
+        (["cześć", "hej", "witaj", "dzień dobry", "dobry wieczór", "siema",
+          "hello", "hi ", "hey "],
+         "chitchat"),
+        # Orders
+        (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
+          "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment"],
+         "allegro_orders"),
+        # Offers
+        (["ofert", "offer", "listing", "produkt", "cen", "price", "stock",
+          "stan magaz", "aktywn", "wystawion", "dodaj ofert"],
+         "allegro_offers"),
+        # Messaging
+        (["wiadomoś", "wiadomo", "message", "napisz do", "wyślij do", "kupując",
+          "buyer", "odpowiedz"],
+         "allegro_messaging"),
+        # Account
+        (["konto", "opłat", "prowizj", "statystyk", "rozliczen", "account",
+          "fees", "billing", "limit sprzedaży"],
+         "allegro_account"),
+    ]
+
+    def _keyword_classify(self, query: str) -> str | None:
+        q = query.lower()
+        for keywords, intent in self._KEYWORD_MAP:
+            if any(kw in q for kw in keywords):
+                logger.info("Keyword pre-route: %r -> %s", query[:60], intent)
+                return intent
+        return None
+
     async def _classify_intent(
         self,
         query: str,
         history: list[dict[str, str]],
     ) -> str:
-        """Use a fast Claude call to classify the query intent."""
+        # Fast keyword check — no LLM call needed for obvious patterns
+        keyword_intent = self._keyword_classify(query)
+        if keyword_intent:
+            return keyword_intent
+
         # Use a recent snippet of history for context (last 4 turns)
         history_snippet = history[-4:] if len(history) > 4 else history
         history_text = "\n".join(
@@ -143,8 +183,8 @@ class Orchestrator:
                     logger.info("Intent matched via substring: %r -> %s", raw, ki)
                     return ki
 
-            logger.warning("Unknown intent %r, falling back to allegro_orders for safety", raw)
-            return "allegro_orders"
+            logger.warning("Unknown intent %r, falling back to chitchat", raw)
+            return "chitchat"
         except Exception as exc:
             logger.error("Intent classification failed: %s", exc)
             return "allegro_orders"
