@@ -12,6 +12,7 @@ Entry point: FastAPI application with:
 
 import logging
 import os
+import pathlib
 
 # Disable ChromaDB telemetry before it is imported anywhere
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
@@ -50,7 +51,6 @@ async def lifespan(app: FastAPI):
     )
     # Ensure ChromaDB directory exists
     if settings.rag_backend == "chromadb":
-        import pathlib
         pathlib.Path(settings.chromadb_path).mkdir(parents=True, exist_ok=True)
     yield
     logger.info("AllEasystent shutting down")
