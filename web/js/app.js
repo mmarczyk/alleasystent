@@ -33,7 +33,7 @@ async function checkAuth() {
     // Show user info in sidebar if element exists
     const userEl = document.getElementById('user-info');
     if (userEl) {
-      userEl.innerHTML = `<img src="${user.picture}" style="width:28px;height:28px;border-radius:50%;flex-shrink:0"> <span style="overflow:hidden;text-overflow:ellipsis">${user.name}</span>`;
+      userEl.innerHTML = `<span style="font-size:1.1rem">🛒</span> <span style="overflow:hidden;text-overflow:ellipsis;font-weight:500">${user.name}</span>`;
     }
     return true;
   } catch (e) {

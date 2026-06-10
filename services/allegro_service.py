@@ -48,6 +48,42 @@ class AllegroAuthError(Exception):
     pass
 
 
+async def exchange_allegro_code(code: str) -> tuple[str, "AllegroTokens"]:
+    """
+    Exchange Allegro authorization code for tokens.
+    Returns (allegro_login, tokens) — login is used as the user_id.
+    """
+    settings = get_settings()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{settings.allegro_auth_url}/token",
+            auth=(settings.allegro_client_id, settings.allegro_client_secret),
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": settings.allegro_redirect_uri,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        tokens = AllegroTokens(
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            expires_at=datetime.utcnow() + timedelta(seconds=data["expires_in"] - 60),
+            token_type=data.get("token_type", "Bearer"),
+        )
+        me = await client.get(
+            f"{settings.allegro_api_url}/me",
+            headers={
+                "Authorization": f"Bearer {tokens.access_token}",
+                "Accept": "application/vnd.allegro.public.v1+json",
+            },
+        )
+        me.raise_for_status()
+        login: str = me.json().get("login", "unknown")
+    return login, tokens
+
+
 class AllegroAPIError(Exception):
     def __init__(self, status_code: int, detail: str):
         self.status_code = status_code

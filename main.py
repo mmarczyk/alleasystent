@@ -120,37 +120,61 @@ async def debug_redis(request: Request) -> dict:
         return {"redis_url_set": True, "connected": False, "error": str(exc)}
 
 
-# ── Auth endpoints ────────────────────────────────────────────────────────────
+# ── Auth (Allegro OAuth2 login) ───────────────────────────────────────────────
+#
+# Flow: /allegro/login → Allegro consent → /allegro/callback → JWT cookie → /
 
-@app.get("/auth/google", tags=["Auth"])
-async def auth_google(request: Request):
-    if not settings.google_oauth_client_id:
-        raise HTTPException(503, "Google OAuth not configured")
+@app.get("/allegro/login", tags=["Auth"])
+async def allegro_login():
+    """Redirect browser to Allegro OAuth2 consent page."""
+    if not settings.allegro_client_id:
+        raise HTTPException(503, "Allegro credentials not configured")
+    from urllib.parse import urlencode
     state = _secrets.token_urlsafe(32)
-    from services.auth_service import google_auth_url
-    url = google_auth_url(state)
+    params = urlencode({
+        "response_type": "code",
+        "client_id": settings.allegro_client_id,
+        "redirect_uri": settings.allegro_redirect_uri,
+        "prompt": "confirm",
+        "state": state,
+    })
+    url = f"{settings.allegro_auth_url}/authorize?{params}"
     response = RedirectResponse(url=url)
     response.set_cookie("oauth_state", state, httponly=True, max_age=300, samesite="lax")
     return response
 
 
-@app.get("/auth/google/callback", tags=["Auth"])
-async def auth_google_callback(request: Request, code: str = "", state: str = ""):
+@app.get("/allegro/callback", tags=["Auth"])
+async def allegro_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """Handle Allegro OAuth2 callback, create session, redirect to app."""
+    if error:
+        raise HTTPException(400, f"Allegro OAuth error: {error}")
     stored_state = request.cookies.get("oauth_state")
     if not stored_state or stored_state != state:
-        raise HTTPException(400, "Invalid OAuth state")
-    from services.auth_service import create_session_token, exchange_code
-    user = await exchange_code(code)
-    token = create_session_token(user)
+        raise HTTPException(400, "Invalid OAuth state — please try logging in again")
+    from services.allegro_service import AllegroService, exchange_allegro_code
+    from services.auth_service import create_session_token
+    try:
+        login, tokens = await exchange_allegro_code(code)
+    except Exception as exc:
+        logger.error("Allegro code exchange failed: %s", exc)
+        raise HTTPException(502, "Failed to exchange Allegro authorization code")
+    # Persist tokens to Redis under the user's Allegro login
+    service = AllegroService(user_id=login)
+    service._tokens = tokens
+    await service._save_tokens()
+    # Create JWT session
+    session_token = create_session_token({"sub": login, "name": login})
     response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(
-        "session", token,
+        "session", session_token,
         httponly=True,
         max_age=60 * 60 * 24 * 30,
         samesite="lax",
         secure=settings.is_production,
     )
     response.delete_cookie("oauth_state")
+    logger.info("Allegro login successful for user: %s", login)
     return response
 
 
@@ -165,102 +189,7 @@ async def auth_logout():
 async def auth_me(request: Request):
     from services.auth_service import get_current_user
     user = await get_current_user(request)
-    return {
-        "sub": user["sub"],
-        "email": user["email"],
-        "name": user["name"],
-        "picture": user["picture"],
-    }
-
-
-# ── Allegro OAuth2 device flow ────────────────────────────────────────────────
-#
-# New UX: owner opens /allegro/auth in the browser → gets redirected straight
-# to Allegro's consent page → approves → server detects it in the background.
-# No manual polling or copy-pasting codes required.
-
-import asyncio as _asyncio
-
-# Per-user auth state (keyed by user_id)
-_allegro_auth_state: dict[str, dict] = {}
-
-
-async def _background_poll(device_code: str, interval: int, user_id: str) -> None:
-    """Runs as an asyncio Task — polls Allegro until the owner approves or it times out."""
-    from services.allegro_service import AllegroAuthError, AllegroService
-
-    _allegro_auth_state[user_id]["status"] = "pending"
-    _allegro_auth_state[user_id]["error"] = None
-    service = AllegroService(user_id=user_id)
-    try:
-        success = await service.poll_device_flow(device_code, interval=interval)
-        _allegro_auth_state[user_id]["status"] = "authorized" if success else "expired"
-    except AllegroAuthError as exc:
-        _allegro_auth_state[user_id]["status"] = "error"
-        _allegro_auth_state[user_id]["error"] = str(exc)
-        logger.error("Allegro background auth failed: %s", exc)
-
-
-@app.get("/allegro/auth", tags=["Allegro"])
-async def allegro_start_auth(request: Request):
-    """
-    Start Allegro authorization.
-
-    Redirects the browser directly to Allegro's consent page (verification_uri_complete).
-    The server polls in the background; check /allegro/auth/status for the result.
-    """
-    from services.allegro_service import AllegroService
-    from services.auth_service import get_current_user
-
-    user = await get_current_user(request)
-    user_id = user["sub"]
-
-    if not settings.allegro_client_id:
-        raise HTTPException(status_code=503, detail="Allegro credentials not configured")
-
-    service = AllegroService(user_id=user_id)
-    flow = await service.start_device_flow()
-
-    device_code = flow.get("device_code", "")
-    interval = int(flow.get("interval", 5))
-    verification_uri = flow.get("verification_uri_complete") or flow.get("verification_uri", "")
-
-    if not verification_uri:
-        raise HTTPException(status_code=502, detail=f"Allegro did not return a verification URL. Response: {flow}")
-
-    # Ensure state entry exists before task starts
-    _allegro_auth_state[user_id] = {"status": "pending", "error": None}
-    # Kick off background polling so the server catches the approval automatically
-    _asyncio.create_task(_background_poll(device_code, interval, user_id))
-    logger.info("Allegro device flow started — redirecting to %s", verification_uri)
-
-    return RedirectResponse(url=verification_uri, status_code=302)
-
-
-@app.get("/allegro/auth/status", tags=["Allegro"])
-async def allegro_auth_status(request: Request) -> dict:
-    """
-    Check whether the background authorization has completed.
-
-    Statuses:
-      idle       — no auth started yet
-      pending    — waiting for owner to approve on Allegro
-      authorized — tokens saved, API calls will work
-      expired    — owner didn't approve in time; restart /allegro/auth
-      error      — something went wrong; see 'error' field
-    """
-    from services.allegro_service import AllegroService
-    from services.auth_service import get_current_user
-
-    user = await get_current_user(request)
-    user_id = user["sub"]
-
-    state = dict(_allegro_auth_state.get(user_id, {"status": "idle", "error": None}))
-    if state["status"] == "authorized":
-        # Double-check tokens are actually on disk / in memory
-        service = AllegroService(user_id=user_id)
-        state["authenticated"] = service._tokens is not None
-    return state
+    return {"sub": user["sub"], "name": user["name"]}
 
 
 # ── RAG Admin ─────────────────────────────────────────────────────────────────

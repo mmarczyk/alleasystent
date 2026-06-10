@@ -58,10 +58,6 @@ class Settings(BaseSettings):
     # Railway sets REDIS_URL automatically when a Redis service is added to the project.
     redis_url: str = ""
 
-    # ── Google OAuth ──────────────────────────────────────────────────────────
-    google_oauth_client_id: str = ""
-    google_oauth_client_secret: str = ""
-    google_oauth_redirect_uri: str = "http://localhost:8080/auth/google/callback"
     # ── JWT ───────────────────────────────────────────────────────────────────
     jwt_secret: str = ""
     jwt_expire_days: int = 30
