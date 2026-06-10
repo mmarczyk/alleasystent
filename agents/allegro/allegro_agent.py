@@ -52,9 +52,12 @@ class AllegroAgent(BaseAgent):
         conversation_history: list[dict[str, str]] | None = None,
         context: str | None = None,
     ) -> AgentResponse:
-        # No tokens at all
+        # Try to restore tokens from Redis when file storage was wiped (e.g. after redeploy)
         if self._allegro._tokens is None:
-            # A device flow was already started — try to complete it
+            await self._allegro._load_tokens_from_redis()
+
+        # Still no tokens — trigger auth flow
+        if self._allegro._tokens is None:
             if self._allegro._pending_device_code:
                 return await self._try_complete_auth(query, conversation_history, context)
             return await self._request_auth()
