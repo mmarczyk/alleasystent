@@ -316,10 +316,15 @@ class AllegroService:
         buyer_login: str | None = None,
         fulfillment_status: str | None = None,
         line_items_sent: list[str] | None = None,
+        bought_at_gte: str | None = None,
+        bought_at_lte: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> list[AllegroOrder]:
-        cache_key = f"{status}:{buyer_login}:{fulfillment_status}:{line_items_sent}:{limit}:{offset}"
+        cache_key = (
+            f"{status}:{buyer_login}:{fulfillment_status}:{line_items_sent}:"
+            f"{bought_at_gte}:{bought_at_lte}:{limit}:{offset}"
+        )
         cached = self._orders_list_cache.get(cache_key)
         if cached is not None:
             logger.debug("orders list cache hit: %s", cache_key)
@@ -334,10 +339,13 @@ class AllegroService:
             params["fulfillment.status"] = fulfillment_status
         if line_items_sent:
             params["fulfillment.shipmentSummary.lineItemsSent"] = line_items_sent
+        if bought_at_gte:
+            params["lineItems.boughtAt.gte"] = bought_at_gte
+        if bought_at_lte:
+            params["lineItems.boughtAt.lte"] = bought_at_lte
         data = await self._get("/order/checkout-forms", params=params)
         orders = [self._parse_order(o) for o in data.get("checkoutForms", [])]
         self._orders_list_cache.set(cache_key, orders)
-        # Also populate individual order cache from the list results
         for order in orders:
             self._order_cache.set(order.order_id, order)
         return orders
@@ -391,19 +399,47 @@ class AllegroService:
         self._invoice_cache.set(order_id, invoices)
         return invoices
 
-    async def get_orders_needing_invoice(self, limit: int = 50) -> list[AllegroOrder]:
+    async def get_orders_needing_invoice(
+        self,
+        month: int | None = None,
+        year: int | None = None,
+    ) -> list[AllegroOrder]:
         """
-        Return paid orders where the buyer requested an invoice but none has been uploaded yet.
-        Makes N+1 calls: one for the order list, then one per invoice-required order.
+        Return orders for the given month (default: current month) where:
+          - buyer requested an invoice (invoice.required=true, dontWant=false)
+          - seller hasn't uploaded one yet
+        Paginates through all orders for the month, then checks invoice status.
         """
-        data = await self._get("/order/checkout-forms", params={
-            "status": "READY_FOR_PROCESSING",
-            "limit": limit,
-        })
-        candidates = [
-            parsed for parsed in (self._parse_order(o) for o in data.get("checkoutForms", []))
-            if parsed.invoice_required
-        ]
+        import calendar
+        from datetime import date
+
+        today = date.today()
+        m = month or today.month
+        y = year or today.year
+        first_day = date(y, m, 1).isoformat() + "T00:00:00Z"
+        last_day = date(y, m, calendar.monthrange(y, m)[1]).isoformat() + "T23:59:59Z"
+
+        # Paginate through all orders for the month
+        all_orders: list[AllegroOrder] = []
+        page_size = 50
+        offset = 0
+        while True:
+            page = await self.get_orders(
+                status="READY_FOR_PROCESSING",
+                bought_at_gte=first_day,
+                bought_at_lte=last_day,
+                limit=page_size,
+                offset=offset,
+            )
+            all_orders.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+        # Client-side filter: buyer wants invoice
+        candidates = [o for o in all_orders if o.invoice_required]
+
+        # Keep only those without any uploaded invoice
         result = []
         for order in candidates:
             invoices = await self.get_order_invoices(order.order_id)

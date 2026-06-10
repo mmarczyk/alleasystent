@@ -201,17 +201,20 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_orders_pending_invoice",
             "description": (
-                "Find all paid orders where the buyer requested an invoice (VAT receipt) "
-                "but the seller has not yet uploaded one. "
+                "Find all paid orders for a given month where the buyer requested a VAT invoice "
+                "but the seller has not yet uploaded one. Defaults to the current month. "
                 "Use when asked about missing invoices or invoice obligations."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {
+                    "month": {
                         "type": "integer",
-                        "description": "Max orders to scan (1–50).",
-                        "default": 50,
+                        "description": "Month number (1–12). Defaults to current month.",
+                    },
+                    "year": {
+                        "type": "integer",
+                        "description": "4-digit year. Defaults to current year.",
                     },
                 },
             },

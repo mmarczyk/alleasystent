@@ -299,7 +299,8 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_orders_pending_invoice":
             orders = await self._allegro.get_orders_needing_invoice(
-                limit=min(int(tool_input.get("limit", 50)), 50)
+                month=tool_input.get("month"),
+                year=tool_input.get("year"),
             )
             if not orders:
                 return "Brak zamówień wymagających wystawienia faktury."
