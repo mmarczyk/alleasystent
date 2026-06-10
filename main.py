@@ -82,6 +82,28 @@ async def health() -> dict:
     return {"status": "ok", "env": settings.app_env}
 
 
+@app.get("/debug/redis", tags=["System"])
+async def debug_redis() -> dict:
+    """Diagnose Redis connection and token storage."""
+    redis_url = settings.redis_url
+    if not redis_url:
+        return {"redis_url_set": False, "note": "REDIS_URL env var is missing — set it in Railway"}
+
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(redis_url, decode_responses=True)
+        await r.ping()
+        token_exists = await r.exists("allegro:tokens") > 0
+        await r.aclose()
+        return {
+            "redis_url_set": True,
+            "connected": True,
+            "allegro_tokens_in_redis": token_exists,
+        }
+    except Exception as exc:
+        return {"redis_url_set": True, "connected": False, "error": str(exc)}
+
+
 # ── Allegro OAuth2 device flow ────────────────────────────────────────────────
 #
 # New UX: owner opens /allegro/auth in the browser → gets redirected straight
