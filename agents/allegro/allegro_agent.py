@@ -252,4 +252,45 @@ class AllegroAgent(BaseAgent):
                 )
             return "\n".join(lines)
 
+        if tool_name == "get_orders_delivery":
+            orders = await self._allegro.get_orders(
+                status=tool_input.get("status", "READY_FOR_PROCESSING"),
+                fulfillment_status=tool_input.get("fulfillment_status"),
+                limit=min(int(tool_input.get("limit", 20)), 50),
+            )
+            if not orders:
+                return "No orders found."
+            lines = []
+            for o in orders:
+                d = o.delivery
+                method = d.get("method", {}).get("name", "N/A")
+                tracking = (
+                    d.get("smart", {}).get("trackingCode")
+                    or d.get("trackingCode")
+                    or "brak"
+                )
+                pickup = d.get("pickupPoint", {})
+                pickup_info = f" | Punkt odbioru: {pickup.get('name', '')}" if pickup else ""
+                lines.append(
+                    f"Zamówienie {o.order_id} | Kupujący: {o.buyer_login} | "
+                    f"Dostawa: {method} | Numer śledzenia: {tracking}{pickup_info}"
+                )
+            return "\n".join(lines)
+
+        if tool_name == "get_orders_pending_invoice":
+            orders = await self._allegro.get_orders_needing_invoice(
+                limit=min(int(tool_input.get("limit", 50)), 50)
+            )
+            if not orders:
+                return "Brak zamówień wymagających wystawienia faktury."
+            lines = [f"Zamówień bez faktury: {len(orders)}\n"]
+            for o in orders:
+                items_str = ", ".join(f"{li.offer_name} x{li.quantity}" for li in o.line_items[:3])
+                lines.append(
+                    f"Zamówienie {o.order_id} | Kupujący: {o.buyer_login} ({o.buyer_email}) | "
+                    f"Kwota: {o.total_price} {o.currency} | Data: {o.created_at} | "
+                    f"Produkty: {items_str}"
+                )
+            return "\n".join(lines)
+
         return f"Unknown tool: {tool_name}"

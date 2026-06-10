@@ -72,6 +72,7 @@ class AllegroOrder(BaseModel):
     delivery: dict[str, Any] = Field(default_factory=dict)
     line_items: list[AllegroOrderLine] = Field(default_factory=list)
     billing_address: AllegroAddress = Field(default_factory=AllegroAddress)
+    invoice_required: bool = False
 
 
 class AllegroMessage(BaseModel):

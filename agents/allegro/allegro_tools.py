@@ -166,4 +166,55 @@ ALLEGRO_TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_orders_delivery",
+            "description": (
+                "List orders with their delivery method and tracking info. "
+                "Use when the user asks about delivery methods, carriers, or tracking numbers across orders."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by order status (default: READY_FOR_PROCESSING).",
+                        "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
+                    },
+                    "fulfillment_status": {
+                        "type": "string",
+                        "description": "Filter by fulfillment status.",
+                        "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max orders to return (1–50).",
+                        "default": 20,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_orders_pending_invoice",
+            "description": (
+                "Find all paid orders where the buyer requested an invoice (VAT receipt) "
+                "but the seller has not yet uploaded one. "
+                "Use when asked about missing invoices or invoice obligations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max orders to scan (1–50).",
+                        "default": 50,
+                    },
+                },
+            },
+        },
+    },
 ]

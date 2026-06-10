@@ -315,6 +315,8 @@ class AllegroService:
         ]
         summary = data.get("summary", {})
         total_amount = summary.get("totalToPay", {})
+        invoice = data.get("invoice", {})
+        invoice_required = bool(invoice.get("required")) and not bool(invoice.get("dontWant"))
         return AllegroOrder(
             order_id=data.get("id", ""),
             buyer_login=data.get("buyer", {}).get("login", ""),
@@ -326,7 +328,32 @@ class AllegroService:
             created_at=data.get("boughtAt", ""),
             delivery=data.get("delivery", {}),
             line_items=line_items,
+            invoice_required=invoice_required,
         )
+
+    async def get_order_invoices(self, order_id: str) -> list[dict[str, Any]]:
+        data = await self._get(f"/order/checkout-forms/{order_id}/invoices")
+        return data.get("invoices", [])
+
+    async def get_orders_needing_invoice(self, limit: int = 50) -> list[AllegroOrder]:
+        """
+        Return paid orders where the buyer requested an invoice but none has been uploaded yet.
+        Makes N+1 calls: one for the order list, then one per invoice-required order.
+        """
+        data = await self._get("/order/checkout-forms", params={
+            "status": "READY_FOR_PROCESSING",
+            "limit": limit,
+        })
+        candidates = [
+            parsed for parsed in (self._parse_order(o) for o in data.get("checkoutForms", []))
+            if parsed.invoice_required
+        ]
+        result = []
+        for order in candidates:
+            invoices = await self.get_order_invoices(order.order_id)
+            if not invoices:
+                result.append(order)
+        return result
 
     # ── Offers ────────────────────────────────────────────────────────────────
 
