@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -14,6 +15,33 @@ from config.settings import get_settings
 from models.allegro import AllegroOrder, AllegroOrderLine, AllegroTokens
 
 logger = logging.getLogger(__name__)
+
+
+class _TTLCache:
+    """Minimal in-memory TTL cache. Thread-safe enough for single-process async use."""
+
+    def __init__(self, ttl: float):
+        self._ttl = ttl
+        self._store: dict[str, tuple[Any, float]] = {}
+
+    def get(self, key: str) -> Any:
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        value, ts = entry
+        if monotonic() - ts > self._ttl:
+            del self._store[key]
+            return None
+        return value
+
+    def set(self, key: str, value: Any) -> None:
+        self._store[key] = (value, monotonic())
+
+    def invalidate(self, key: str) -> None:
+        self._store.pop(key, None)
+
+    def clear(self) -> None:
+        self._store.clear()
 
 
 class AllegroAuthError(Exception):
@@ -53,6 +81,12 @@ class AllegroService:
         self._init_redis()
         self._load_tokens()
         self._load_pending_device_code()
+        # Static order fields (items, price, buyer) don't change — 5 min TTL
+        self._order_cache: _TTLCache = _TTLCache(ttl=300.0)
+        # Order list results — 60 s TTL (new orders can arrive)
+        self._orders_list_cache: _TTLCache = _TTLCache(ttl=60.0)
+        # Invoice status per order — 2 min TTL
+        self._invoice_cache: _TTLCache = _TTLCache(ttl=120.0)
 
     def _init_redis(self) -> None:
         if not self._settings.redis_url:
@@ -285,6 +319,12 @@ class AllegroService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[AllegroOrder]:
+        cache_key = f"{status}:{buyer_login}:{fulfillment_status}:{line_items_sent}:{limit}:{offset}"
+        cached = self._orders_list_cache.get(cache_key)
+        if cached is not None:
+            logger.debug("orders list cache hit: %s", cache_key)
+            return cached
+
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if status:
             params["status"] = status
@@ -293,14 +333,24 @@ class AllegroService:
         if fulfillment_status:
             params["fulfillment.status"] = fulfillment_status
         if line_items_sent:
-            # Allegro accepts repeated params for multi-value filtering
             params["fulfillment.shipmentSummary.lineItemsSent"] = line_items_sent
         data = await self._get("/order/checkout-forms", params=params)
-        return [self._parse_order(o) for o in data.get("checkoutForms", [])]
+        orders = [self._parse_order(o) for o in data.get("checkoutForms", [])]
+        self._orders_list_cache.set(cache_key, orders)
+        # Also populate individual order cache from the list results
+        for order in orders:
+            self._order_cache.set(order.order_id, order)
+        return orders
 
     async def get_order(self, order_id: str) -> AllegroOrder:
+        cached = self._order_cache.get(order_id)
+        if cached is not None:
+            logger.debug("order cache hit: %s", order_id)
+            return cached
         data = await self._get(f"/order/checkout-forms/{order_id}")
-        return self._parse_order(data)
+        order = self._parse_order(data)
+        self._order_cache.set(order_id, order)
+        return order
 
     def _parse_order(self, data: dict) -> AllegroOrder:
         line_items = [
@@ -332,8 +382,14 @@ class AllegroService:
         )
 
     async def get_order_invoices(self, order_id: str) -> list[dict[str, Any]]:
+        cached = self._invoice_cache.get(order_id)
+        if cached is not None:
+            logger.debug("invoice cache hit: %s", order_id)
+            return cached
         data = await self._get(f"/order/checkout-forms/{order_id}/invoices")
-        return data.get("invoices", [])
+        invoices = data.get("invoices", [])
+        self._invoice_cache.set(order_id, invoices)
+        return invoices
 
     async def get_orders_needing_invoice(self, limit: int = 50) -> list[AllegroOrder]:
         """
