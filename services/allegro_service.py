@@ -32,9 +32,12 @@ class AllegroService:
 
     Authentication uses OAuth2 device flow (suitable for server-side apps).
     Tokens are refreshed automatically before expiry.
+    Token persistence: file (fast, ephemeral) + Firestore (survives redeployments).
     """
 
     _DEVICE_CODE_FILE = ".allegro_device_code"
+    _TOKENS_COLLECTION = "allegro_auth"
+    _TOKENS_DOC = "tokens"
 
     def __init__(self):
         self._settings = get_settings()
@@ -44,8 +47,20 @@ class AllegroService:
             base_url=self._settings.allegro_api_url,
             timeout=30.0,
         )
+        self._firestore_db = None
+        self._init_firestore()
         self._load_tokens()
         self._load_pending_device_code()
+
+    def _init_firestore(self) -> None:
+        if not self._settings.gcp_project_id:
+            return
+        try:
+            from google.cloud import firestore  # type: ignore[import-untyped]
+            self._firestore_db = firestore.AsyncClient(project=self._settings.gcp_project_id)
+            logger.info("AllegroService: Firestore ready for token persistence")
+        except Exception as exc:
+            logger.warning("AllegroService: Firestore unavailable (%s) — file-only token storage", exc)
 
     # ── Token management ──────────────────────────────────────────────────────
 
@@ -60,13 +75,37 @@ class AllegroService:
             except Exception as exc:
                 logger.warning("Failed to load Allegro tokens: %s", exc)
 
-    def _save_tokens(self) -> None:
+    async def _load_tokens_from_firestore(self) -> None:
+        if self._firestore_db is None:
+            return
+        try:
+            doc = await self._firestore_db.collection(self._TOKENS_COLLECTION).document(self._TOKENS_DOC).get()
+            if doc.exists:
+                data = doc.to_dict()
+                data["expires_at"] = datetime.fromisoformat(data["expires_at"])
+                self._tokens = AllegroTokens(**data)
+                logger.info("Loaded Allegro tokens from Firestore")
+        except Exception as exc:
+            logger.warning("Failed to load Allegro tokens from Firestore: %s", exc)
+
+    async def _save_tokens(self) -> None:
         if self._tokens is None:
             return
-        path = Path(self._settings.allegro_token_file)
         data = self._tokens.model_dump()
         data["expires_at"] = data["expires_at"].isoformat()
-        path.write_text(json.dumps(data, indent=2))
+        # File — fast local cache
+        try:
+            path = Path(self._settings.allegro_token_file)
+            path.write_text(json.dumps(data, indent=2))
+        except Exception as exc:
+            logger.warning("Could not write token file: %s", exc)
+        # Firestore — survives Railway redeployments
+        if self._firestore_db is not None:
+            try:
+                await self._firestore_db.collection(self._TOKENS_COLLECTION).document(self._TOKENS_DOC).set(data)
+                logger.info("Saved Allegro tokens to Firestore")
+            except Exception as exc:
+                logger.warning("Failed to save Allegro tokens to Firestore: %s", exc)
 
     def _load_pending_device_code(self) -> None:
         path = Path(self._DEVICE_CODE_FILE)
@@ -140,7 +179,7 @@ class AllegroService:
                         expires_at=datetime.utcnow() + timedelta(seconds=data["expires_in"] - 60),
                         token_type=data.get("token_type", "Bearer"),
                     )
-                    self._save_tokens()
+                    await self._save_tokens()
                     self._clear_pending_device_code()
                     logger.info("Allegro tokens obtained via device flow")
                     return True
@@ -208,6 +247,8 @@ class AllegroService:
             logger.info("Allegro tokens refreshed")
 
     async def _get_headers(self) -> dict[str, str]:
+        if self._tokens is None:
+            await self._load_tokens_from_firestore()
         if self._tokens is None:
             raise AllegroAuthError("Not authenticated. Run device flow first.")
         if self._tokens.is_expired():
