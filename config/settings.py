@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     allegro_token_store: Literal["file", "secret_manager"] = "file"
     allegro_token_file: str = ".allegro_tokens.json"
 
+    # ── Redis ─────────────────────────────────────────────────────────────────
+    # Railway sets REDIS_URL automatically when a Redis service is added to the project.
+    redis_url: str = ""
+
     # ── GCP ──────────────────────────────────────────────────────────────────
     gcp_project_id: str = ""
     gcp_region: str = "europe-central2"

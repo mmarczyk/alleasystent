@@ -21,6 +21,9 @@ google-cloud-pubsub==2.27.1
 google-cloud-secret-manager==2.21.1
 # google-cloud-aiplatform==1.73.0  # Uncomment for Vertex AI RAG
 
+# ── Redis (persistent storage — token cache + conversation history) ───────────
+redis[hiredis]>=5.0.0
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
 aiofiles==24.1.0
