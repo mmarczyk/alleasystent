@@ -16,6 +16,22 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gemini_model_fast: str = "gemini-2.0-flash"
     gemini_max_tokens: int = 16000
+    # Comma-separated rotation pools; empty = auto-derive from the two models above.
+    # Example: GEMINI_MODEL_POOL=gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash
+    gemini_model_pool: str = ""
+    gemini_model_fast_pool: str = ""
+
+    def model_pool(self) -> list[str]:
+        """Ordered pool for agents that use gemini_model."""
+        if self.gemini_model_pool:
+            return [m.strip() for m in self.gemini_model_pool.split(",") if m.strip()]
+        return list(dict.fromkeys([self.gemini_model, self.gemini_model_fast]))
+
+    def model_fast_pool(self) -> list[str]:
+        """Ordered pool for agents that use gemini_model_fast."""
+        if self.gemini_model_fast_pool:
+            return [m.strip() for m in self.gemini_model_fast_pool.split(",") if m.strip()]
+        return list(dict.fromkeys([self.gemini_model_fast, self.gemini_model]))
 
     # ── Facebook Messenger ────────────────────────────────────────────────────
     facebook_page_access_token: str = ""

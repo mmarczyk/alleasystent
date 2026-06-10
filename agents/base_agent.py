@@ -24,20 +24,49 @@ from models.conversation import AgentResponse
 logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 10
-_RETRY_DELAYS = (2, 4, 8)  # seconds between retries on 429
+# After exhausting all models in the pool, wait this many seconds before trying again.
+_BACKOFF_DELAYS = (2, 4, 8)
 
 
-async def _call_with_retry(coro_factory, label: str):
-    """Call an async factory (returns a coroutine) with exponential backoff on 429."""
-    for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
-        try:
-            return await coro_factory()
-        except RateLimitError:
-            if delay is None:
-                logger.error("%s: rate-limited after %d attempts, giving up", label, attempt)
-                raise
-            logger.warning("%s: rate-limited (attempt %d), retrying in %ds…", label, attempt, delay)
-            await asyncio.sleep(delay)
+async def _call_with_retry(
+    client: AsyncOpenAI,
+    model_pool: list[str],
+    label: str,
+    **api_kwargs,
+):
+    """
+    Call client.chat.completions.create with model rotation + exponential backoff on 429.
+
+    Strategy:
+      1. Try each model in model_pool in order.
+         On 429 → rotate to next model immediately (no wait).
+      2. After all models exhausted → wait (exponential backoff) → restart from first model.
+      3. After all backoff rounds exhausted → raise RateLimitError.
+    """
+    for backoff_round, delay in enumerate((*_BACKOFF_DELAYS, None)):
+        for model in model_pool:
+            try:
+                logger.debug("%s: calling model %s", label, model)
+                return await client.chat.completions.create(model=model, **api_kwargs)
+            except RateLimitError:
+                logger.warning("%s: 429 on %s, rotating to next model", label, model)
+
+        # All models in pool returned 429
+        if delay is None:
+            logger.error(
+                "%s: all models rate-limited after %d rounds, giving up",
+                label, backoff_round + 1,
+            )
+            raise RateLimitError(
+                message=f"{label}: all models in pool {model_pool} exhausted",
+                response=None,  # type: ignore[arg-type]
+                body=None,
+            )
+        logger.warning(
+            "%s: full pool rate-limited (round %d), backing off %ds",
+            label, backoff_round + 1, delay,
+        )
+        await asyncio.sleep(delay)
 
 
 class BaseAgent(ABC):
@@ -51,6 +80,15 @@ class BaseAgent(ABC):
             api_key=self._settings.google_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
+
+    def _get_model_pool(self) -> list[str]:
+        """Return rotation pool: starts with model_override/gemini_model, falls back to fast."""
+        if self.model_override:
+            pool = [self.model_override]
+            if self._settings.gemini_model_fast not in pool:
+                pool.append(self._settings.gemini_model_fast)
+            return pool
+        return self._settings.model_pool()
 
     @abstractmethod
     def _get_tools(self) -> list[dict[str, Any]]:
@@ -72,23 +110,23 @@ class BaseAgent(ABC):
         messages.append({"role": "user", "content": query})
 
         tools = self._get_tools()
-        model = self.model_override or self._settings.gemini_model
+        model_pool = self._get_model_pool()
 
         for iteration in range(MAX_ITERATIONS):
-            logger.debug("[%s] Iteration %d", self.agent_name, iteration + 1)
-            logger.info("[%s] Calling %s (iteration %d)…", self.agent_name, model, iteration + 1)
+            logger.info("[%s] Iteration %d, pool=%s", self.agent_name, iteration + 1, model_pool)
 
-            kwargs: dict[str, Any] = {
-                "model": model,
+            api_kwargs: dict[str, Any] = {
                 "messages": messages,
                 "max_tokens": self._settings.gemini_max_tokens,
             }
             if tools:
-                kwargs["tools"] = tools
+                api_kwargs["tools"] = tools
 
             response = await _call_with_retry(
-                lambda kw=kwargs: self._client.chat.completions.create(**kw),
+                self._client,
+                model_pool,
                 f"{self.agent_name}/iter{iteration+1}",
+                **api_kwargs,
             )
             choice = response.choices[0]
             msg = choice.message

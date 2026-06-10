@@ -168,12 +168,11 @@ class Orchestrator:
                 {"role": "user", "content": prompt},
             ]
             resp = await _call_with_retry(
-                lambda: self._client.chat.completions.create(
-                    model=self._settings.gemini_model_fast,
-                    max_tokens=30,
-                    messages=msgs,
-                ),
+                self._client,
+                self._settings.model_fast_pool(),
                 "orchestrator/intent",
+                max_tokens=30,
+                messages=msgs,
             )
             raw = resp.choices[0].message.content.strip().lower()
             logger.info("Intent classifier raw output: %r", raw)
@@ -253,12 +252,11 @@ class Orchestrator:
             {"role": "user", "content": query},
         ]
         resp = await _call_with_retry(
-            lambda: self._client.chat.completions.create(
-                model=self._settings.gemini_model_fast,
-                max_tokens=512,
-                messages=msgs,
-            ),
+            self._client,
+            self._settings.model_fast_pool(),
             "orchestrator/chitchat",
+            max_tokens=512,
+            messages=msgs,
         )
         text = resp.choices[0].message.content or "Hello! How can I help you?"
         return AgentResponse(text=text, agent_type="chitchat")
