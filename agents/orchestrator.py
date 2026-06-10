@@ -6,12 +6,9 @@ Orchestrator Agent — the central brain of the system.
 Responsibilities:
   1. Receive normalized IncomingMessage from any communication channel.
   2. Load/save conversation history from Firestore.
-  3. Run the RAG retriever to get relevant context.
-  4. Classify the query intent and route to the appropriate specialized agent.
+  3. Classify the query intent (keyword rules first, LLM fallback).
+  4. Route to the appropriate specialized agent.
   5. Return the AgentResponse.
-
-Routing logic uses a fast Claude call to classify the query intent before
-dispatching to the heavier specialized agents.
 """
 
 import logging
@@ -48,8 +45,8 @@ class Orchestrator:
     Routes incoming messages to the correct specialized agent.
 
     Agent pool:
-      - RAGAgent: knowledge base Q&A (always used for context enrichment)
-      - AllegroAgent: marketplace operations
+      - AllegroAgent: all Allegro marketplace operations (orders, offers, messages, account)
+      - RAGAgent: store knowledge base Q&A — only for general_knowledge intent, lazy-loaded
       (More agents can be registered via register_agent())
     """
 
@@ -60,18 +57,22 @@ class Orchestrator:
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
         self._firestore = FirestoreService()
-        self._rag_agent = RAGAgent()
         self._allegro_agent = AllegroAgent()
+        self._rag_agent: RAGAgent | None = None  # lazy — only loaded for general_knowledge
         self._extra_agents: dict[str, BaseAgent] = {}
+
+    def _get_rag_agent(self) -> RAGAgent:
+        """Return (and lazily create) the RAGAgent."""
+        if self._rag_agent is None:
+            self._rag_agent = RAGAgent()
+        return self._rag_agent
 
     def register_agent(self, intent_prefix: str, agent: BaseAgent) -> None:
         """Register an additional specialized agent for a custom intent prefix."""
         self._extra_agents[intent_prefix] = agent
 
     async def handle(self, message: IncomingMessage) -> AgentResponse:
-        """
-        Main entry point — process an incoming message end-to-end.
-        """
+        """Main entry point — process an incoming message end-to-end."""
         # 1. Load conversation history
         session = await self._firestore.get_or_create_session(
             session_id=message.session_id,
@@ -79,22 +80,14 @@ class Orchestrator:
             sender_id=message.sender_id,
         )
 
-        # 2. Retrieve RAG context (best-effort — never block a response)
-        try:
-            rag_context, sources = await self._rag_agent.retrieve(message.text)
-        except Exception as exc:
-            logger.warning("RAG retrieval failed, continuing without context: %s", exc)
-            rag_context, sources = "", []
-
-        # 3. Classify intent
+        # 2. Classify intent
         intent = await self._classify_intent(message.text, session.to_anthropic_messages())
-        logger.info("Classified intent: %s for message: %.60s...", intent, message.text)
+        logger.info("Intent: %s | message: %.60s…", intent, message.text)
 
-        # 4. Route to specialized agent
-        response = await self._route(intent, message, session.to_anthropic_messages(), rag_context)
-        response.sources = sources
+        # 3. Route to specialized agent
+        response = await self._route(intent, message, session.to_anthropic_messages())
 
-        # 5. Persist conversation
+        # 4. Persist conversation
         session.add_message(MessageRole.USER, message.text)
         session.add_message(MessageRole.ASSISTANT, response.text)
         await self._firestore.save_session(session)
@@ -198,32 +191,27 @@ class Orchestrator:
         intent: str,
         message: IncomingMessage,
         history: list[dict[str, str]],
-        rag_context: str,
     ) -> AgentResponse:
         """Dispatch to the appropriate agent based on intent."""
         # Extra registered agents
         for prefix, agent in self._extra_agents.items():
             if intent.startswith(prefix):
-                return await agent.run(message.text, history, rag_context or None)
+                return await agent.run(message.text, history)
 
-        # Allegro intents → AllegroAgent (with RAG context for product knowledge)
+        # Allegro intents → live API via AllegroAgent (no static context needed)
         if intent.startswith("allegro_"):
-            return await self._allegro_agent.run(
-                message.text,
-                history,
-                rag_context or None,
-            )
+            return await self._allegro_agent.run(message.text, history)
 
-        # General knowledge → RAGAgent
+        # Store knowledge (FAQs, policies) → RAGAgent (lazy-loaded)
         if intent == "general_knowledge":
-            return await self._rag_agent.run(message.text, history)
+            return await self._get_rag_agent().run(message.text, history)
 
-        # Chitchat → lightweight response
+        # Chitchat / capabilities
         if intent == "chitchat":
             return await self._handle_chitchat(message.text, history)
 
-        # Default fallback
-        return await self._rag_agent.run(message.text, history)
+        # Default fallback → chitchat (safe, no auth side-effects)
+        return await self._handle_chitchat(message.text, history)
 
     async def _handle_chitchat(
         self,
