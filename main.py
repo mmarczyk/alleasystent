@@ -89,7 +89,7 @@ async def health() -> dict:
 
 
 @app.get("/debug/redis", tags=["System"])
-async def debug_redis() -> dict:
+async def debug_redis(request: Request) -> dict:
     """Diagnose Redis connection and token storage."""
     redis_url = settings.redis_url
     if not redis_url:
@@ -99,12 +99,22 @@ async def debug_redis() -> dict:
         import redis.asyncio as aioredis
         r = aioredis.from_url(redis_url, decode_responses=True)
         await r.ping()
-        token_exists = await r.exists("allegro:tokens") > 0
+        # Find all allegro token keys (one per user)
+        keys = await r.keys("allegro:tokens:*")
         await r.aclose()
+        # Check if current user has tokens
+        current_user_key = None
+        try:
+            from services.auth_service import get_current_user
+            user = await get_current_user(request)
+            current_user_key = f"allegro:tokens:{user['sub']}"
+        except Exception:
+            pass
         return {
             "redis_url_set": True,
             "connected": True,
-            "allegro_tokens_in_redis": token_exists,
+            "allegro_token_keys": keys,
+            "current_user_has_tokens": current_user_key in keys if current_user_key else None,
         }
     except Exception as exc:
         return {"redis_url_set": True, "connected": False, "error": str(exc)}
