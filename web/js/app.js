@@ -16,6 +16,31 @@ if (typeof marked !== 'undefined') {
   });
 }
 
+// ── Auth check ────────────────────────────────────
+async function checkAuth() {
+  try {
+    const res = await fetch('/auth/me', { credentials: 'include' });
+    if (res.status === 401) {
+      document.getElementById('login-overlay').style.display = 'flex';
+      return false;
+    }
+    const user = await res.json();
+    // Store user info, update UI
+    window._currentUser = user;
+    // Hide overlay if somehow visible
+    const overlay = document.getElementById('login-overlay');
+    if (overlay) overlay.style.display = 'none';
+    // Show user info in sidebar if element exists
+    const userEl = document.getElementById('user-info');
+    if (userEl) {
+      userEl.innerHTML = `<img src="${user.picture}" style="width:28px;height:28px;border-radius:50%;flex-shrink:0"> <span style="overflow:hidden;text-overflow:ellipsis">${user.name}</span>`;
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
   const DEFAULTS = { backendUrl: '' };
@@ -98,6 +123,7 @@ const Backend = (() => {
     const url = backendUrl ? `${backendUrl}/query` : '/query';
     const res = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message,
@@ -371,9 +397,13 @@ const Chat = (() => {
 })();
 
 // ── Boot ─────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   Settings.load();
   Store.load();
+
+  // Check authentication first — show login overlay if not logged in
+  const authed = await checkAuth();
+  if (!authed) return;
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 

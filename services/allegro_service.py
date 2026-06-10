@@ -54,9 +54,6 @@ class AllegroAPIError(Exception):
         super().__init__(f"Allegro API error {status_code}: {detail}")
 
 
-_REDIS_TOKENS_KEY = "allegro:tokens"
-
-
 class AllegroService:
     """
     Wraps the Allegro REST API.
@@ -67,9 +64,8 @@ class AllegroService:
     otherwise local file fallback.
     """
 
-    _DEVICE_CODE_FILE = ".allegro_device_code"
-
-    def __init__(self):
+    def __init__(self, user_id: str | None = None):
+        self._user_id = user_id or "default"
         self._settings = get_settings()
         self._tokens: AllegroTokens | None = None
         self._pending_device_code: str | None = None
@@ -88,6 +84,19 @@ class AllegroService:
         # Invoice status per order — 2 min TTL
         self._invoice_cache: _TTLCache = _TTLCache(ttl=120.0)
 
+    @property
+    def _device_code_file(self) -> str:
+        return f".allegro_device_code_{self._user_id}"
+
+    @property
+    def _redis_tokens_key(self) -> str:
+        return f"allegro:tokens:{self._user_id}"
+
+    def _token_file(self) -> Path:
+        if self._user_id == "default":
+            return Path(self._settings.allegro_token_file)
+        return Path(f".allegro_tokens_{self._user_id}.json")
+
     def _init_redis(self) -> None:
         if not self._settings.redis_url:
             return
@@ -101,7 +110,7 @@ class AllegroService:
     # ── Token management ──────────────────────────────────────────────────────
 
     def _load_tokens(self) -> None:
-        path = Path(self._settings.allegro_token_file)
+        path = self._token_file()
         if path.exists():
             try:
                 data = json.loads(path.read_text())
@@ -115,7 +124,7 @@ class AllegroService:
         if self._redis is None:
             return
         try:
-            raw = await self._redis.get(_REDIS_TOKENS_KEY)
+            raw = await self._redis.get(self._redis_tokens_key)
             if raw:
                 data = json.loads(raw)
                 data["expires_at"] = datetime.fromisoformat(data["expires_at"])
@@ -131,19 +140,19 @@ class AllegroService:
         data["expires_at"] = data["expires_at"].isoformat()
         # File — fast local cache (ephemeral, but useful within a single deployment)
         try:
-            Path(self._settings.allegro_token_file).write_text(json.dumps(data, indent=2))
+            self._token_file().write_text(json.dumps(data, indent=2))
         except Exception as exc:
             logger.warning("Could not write token file: %s", exc)
         # Redis — persists across Railway redeployments
         if self._redis is not None:
             try:
-                await self._redis.set(_REDIS_TOKENS_KEY, json.dumps(data))
+                await self._redis.set(self._redis_tokens_key, json.dumps(data))
                 logger.info("Saved Allegro tokens to Redis")
             except Exception as exc:
                 logger.warning("Failed to save Allegro tokens to Redis: %s", exc)
 
     def _load_pending_device_code(self) -> None:
-        path = Path(self._DEVICE_CODE_FILE)
+        path = Path(self._device_code_file)
         if path.exists():
             try:
                 self._pending_device_code = path.read_text().strip() or None
@@ -151,11 +160,11 @@ class AllegroService:
                 logger.warning("Failed to load pending device code: %s", exc)
 
     def _save_pending_device_code(self) -> None:
-        Path(self._DEVICE_CODE_FILE).write_text(self._pending_device_code or "")
+        Path(self._device_code_file).write_text(self._pending_device_code or "")
 
     def _clear_pending_device_code(self) -> None:
         self._pending_device_code = None
-        path = Path(self._DEVICE_CODE_FILE)
+        path = Path(self._device_code_file)
         if path.exists():
             path.unlink()
 
@@ -249,7 +258,7 @@ class AllegroService:
                 expires_at=datetime.utcnow() + timedelta(seconds=data["expires_in"] - 60),
                 token_type=data.get("token_type", "Bearer"),
             )
-            self._save_tokens()
+            await self._save_tokens()
             self._clear_pending_device_code()
             logger.info("Allegro tokens obtained via device flow completion")
             return True
@@ -278,7 +287,7 @@ class AllegroService:
                 refresh_token=data["refresh_token"],
                 expires_at=datetime.utcnow() + timedelta(seconds=data["expires_in"] - 60),
             )
-            self._save_tokens()
+            await self._save_tokens()
             logger.info("Allegro tokens refreshed")
 
     async def _get_headers(self) -> dict[str, str]:

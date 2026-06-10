@@ -8,11 +8,13 @@ Entry point: FastAPI application with:
   - Allegro OAuth2 device flow endpoints
   - RAG indexing admin endpoints
   - Health check
+  - Google OAuth2 login
 """
 
 import logging
 import os
 import pathlib
+import secrets as _secrets
 
 # Disable ChromaDB telemetry before it is imported anywhere
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
@@ -20,9 +22,9 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -74,6 +76,10 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(facebook_router)
 
+# ── Module-level Orchestrator singleton (not re-created per request) ──────────
+from agents.orchestrator import Orchestrator
+_orchestrator = Orchestrator()
+
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
@@ -104,6 +110,59 @@ async def debug_redis() -> dict:
         return {"redis_url_set": True, "connected": False, "error": str(exc)}
 
 
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+
+@app.get("/auth/google", tags=["Auth"])
+async def auth_google(request: Request):
+    if not settings.google_oauth_client_id:
+        raise HTTPException(503, "Google OAuth not configured")
+    state = _secrets.token_urlsafe(32)
+    from services.auth_service import google_auth_url
+    url = google_auth_url(state)
+    response = RedirectResponse(url=url)
+    response.set_cookie("oauth_state", state, httponly=True, max_age=300, samesite="lax")
+    return response
+
+
+@app.get("/auth/google/callback", tags=["Auth"])
+async def auth_google_callback(request: Request, code: str = "", state: str = ""):
+    stored_state = request.cookies.get("oauth_state")
+    if not stored_state or stored_state != state:
+        raise HTTPException(400, "Invalid OAuth state")
+    from services.auth_service import create_session_token, exchange_code
+    user = await exchange_code(code)
+    token = create_session_token(user)
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie(
+        "session", token,
+        httponly=True,
+        max_age=60 * 60 * 24 * 30,
+        samesite="lax",
+        secure=settings.is_production,
+    )
+    response.delete_cookie("oauth_state")
+    return response
+
+
+@app.get("/auth/logout", tags=["Auth"])
+async def auth_logout():
+    response = RedirectResponse(url="/", status_code=302)
+    response.delete_cookie("session")
+    return response
+
+
+@app.get("/auth/me", tags=["Auth"])
+async def auth_me(request: Request):
+    from services.auth_service import get_current_user
+    user = await get_current_user(request)
+    return {
+        "sub": user["sub"],
+        "email": user["email"],
+        "name": user["name"],
+        "picture": user["picture"],
+    }
+
+
 # ── Allegro OAuth2 device flow ────────────────────────────────────────────────
 #
 # New UX: owner opens /allegro/auth in the browser → gets redirected straight
@@ -112,41 +171,44 @@ async def debug_redis() -> dict:
 
 import asyncio as _asyncio
 
-# Shared auth state (in-memory; single-process is fine for one-owner setups)
-_allegro_auth_state: dict = {"status": "idle", "error": None}
+# Per-user auth state (keyed by user_id)
+_allegro_auth_state: dict[str, dict] = {}
 
 
-async def _background_poll(device_code: str, interval: int) -> None:
+async def _background_poll(device_code: str, interval: int, user_id: str) -> None:
     """Runs as an asyncio Task — polls Allegro until the owner approves or it times out."""
     from services.allegro_service import AllegroAuthError, AllegroService
 
-    _allegro_auth_state["status"] = "pending"
-    _allegro_auth_state["error"] = None
-    service = AllegroService()
+    _allegro_auth_state[user_id]["status"] = "pending"
+    _allegro_auth_state[user_id]["error"] = None
+    service = AllegroService(user_id=user_id)
     try:
         success = await service.poll_device_flow(device_code, interval=interval)
-        _allegro_auth_state["status"] = "authorized" if success else "expired"
+        _allegro_auth_state[user_id]["status"] = "authorized" if success else "expired"
     except AllegroAuthError as exc:
-        _allegro_auth_state["status"] = "error"
-        _allegro_auth_state["error"] = str(exc)
+        _allegro_auth_state[user_id]["status"] = "error"
+        _allegro_auth_state[user_id]["error"] = str(exc)
         logger.error("Allegro background auth failed: %s", exc)
 
 
 @app.get("/allegro/auth", tags=["Allegro"])
-async def allegro_start_auth():
+async def allegro_start_auth(request: Request):
     """
     Start Allegro authorization.
 
     Redirects the browser directly to Allegro's consent page (verification_uri_complete).
     The server polls in the background; check /allegro/auth/status for the result.
     """
-    from fastapi.responses import RedirectResponse
     from services.allegro_service import AllegroService
+    from services.auth_service import get_current_user
+
+    user = await get_current_user(request)
+    user_id = user["sub"]
 
     if not settings.allegro_client_id:
         raise HTTPException(status_code=503, detail="Allegro credentials not configured")
 
-    service = AllegroService()
+    service = AllegroService(user_id=user_id)
     flow = await service.start_device_flow()
 
     device_code = flow.get("device_code", "")
@@ -156,15 +218,17 @@ async def allegro_start_auth():
     if not verification_uri:
         raise HTTPException(status_code=502, detail=f"Allegro did not return a verification URL. Response: {flow}")
 
+    # Ensure state entry exists before task starts
+    _allegro_auth_state[user_id] = {"status": "pending", "error": None}
     # Kick off background polling so the server catches the approval automatically
-    _asyncio.create_task(_background_poll(device_code, interval))
+    _asyncio.create_task(_background_poll(device_code, interval, user_id))
     logger.info("Allegro device flow started — redirecting to %s", verification_uri)
 
     return RedirectResponse(url=verification_uri, status_code=302)
 
 
 @app.get("/allegro/auth/status", tags=["Allegro"])
-async def allegro_auth_status() -> dict:
+async def allegro_auth_status(request: Request) -> dict:
     """
     Check whether the background authorization has completed.
 
@@ -176,11 +240,15 @@ async def allegro_auth_status() -> dict:
       error      — something went wrong; see 'error' field
     """
     from services.allegro_service import AllegroService
+    from services.auth_service import get_current_user
 
-    state = dict(_allegro_auth_state)
+    user = await get_current_user(request)
+    user_id = user["sub"]
+
+    state = dict(_allegro_auth_state.get(user_id, {"status": "idle", "error": None}))
     if state["status"] == "authorized":
         # Double-check tokens are actually on disk / in memory
-        service = AllegroService()
+        service = AllegroService(user_id=user_id)
         state["authenticated"] = service._tokens is not None
     return state
 
@@ -262,24 +330,25 @@ class DirectQueryRequest(BaseModel):
     sender_id: str = "api_user"
 
 
-@app.post("/query", tags=["Query"])
-async def direct_query(body: DirectQueryRequest) -> dict:
+@app.post("/query", tags=["Chat"])
+async def query(request_body: DirectQueryRequest, request: Request) -> dict:
     """
     Send a message directly to the orchestrator (bypassing Messenger).
     Useful for testing, admin dashboards, or other client integrations.
+    Requires authentication via session cookie.
     """
-    from agents.orchestrator import Orchestrator
     from models.conversation import ChannelType, IncomingMessage
+    from services.auth_service import get_current_user
 
-    orchestrator = Orchestrator()
+    user = await get_current_user(request)
     message = IncomingMessage(
+        text=request_body.message,
+        session_id=f"{user['sub']}:{request_body.session_id}",
         channel=ChannelType.API,
-        sender_id=body.sender_id,
-        session_id=body.session_id,
-        text=body.message,
+        sender_id=user["sub"],
     )
     try:
-        response = await orchestrator.handle(message)
+        response = await _orchestrator.handle(message, user_id=user["sub"])
     except Exception as exc:
         logger.exception("Orchestrator error: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error.")

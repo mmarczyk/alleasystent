@@ -57,7 +57,7 @@ class Orchestrator:
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
         self._firestore = FirestoreService()
-        self._allegro_agent = AllegroAgent()
+        self._allegro_agents: dict[str, AllegroAgent] = {}
         self._rag_agent: RAGAgent | None = None  # lazy — only loaded for general_knowledge
         self._extra_agents: dict[str, BaseAgent] = {}
 
@@ -67,11 +67,17 @@ class Orchestrator:
             self._rag_agent = RAGAgent()
         return self._rag_agent
 
+    def _get_allegro_agent(self, user_id: str | None = None) -> AllegroAgent:
+        key = user_id or "default"
+        if key not in self._allegro_agents:
+            self._allegro_agents[key] = AllegroAgent(user_id=user_id)
+        return self._allegro_agents[key]
+
     def register_agent(self, intent_prefix: str, agent: BaseAgent) -> None:
         """Register an additional specialized agent for a custom intent prefix."""
         self._extra_agents[intent_prefix] = agent
 
-    async def handle(self, message: IncomingMessage) -> AgentResponse:
+    async def handle(self, message: IncomingMessage, user_id: str | None = None) -> AgentResponse:
         """Main entry point — process an incoming message end-to-end."""
         # 1. Load conversation history
         session = await self._firestore.get_or_create_session(
@@ -85,7 +91,7 @@ class Orchestrator:
         logger.info("Intent: %s | message: %.60s…", intent, message.text)
 
         # 3. Route to specialized agent
-        response = await self._route(intent, message, session.to_anthropic_messages())
+        response = await self._route(intent, message, session.to_anthropic_messages(), user_id=user_id)
 
         # 4. Persist conversation
         session.add_message(MessageRole.USER, message.text)
@@ -191,6 +197,7 @@ class Orchestrator:
         intent: str,
         message: IncomingMessage,
         history: list[dict[str, str]],
+        user_id: str | None = None,
     ) -> AgentResponse:
         """Dispatch to the appropriate agent based on intent."""
         # Extra registered agents
@@ -200,7 +207,7 @@ class Orchestrator:
 
         # Allegro intents → live API via AllegroAgent (no static context needed)
         if intent.startswith("allegro_"):
-            return await self._allegro_agent.run(message.text, history)
+            return await self._get_allegro_agent(user_id).run(message.text, history)
 
         # Store knowledge (FAQs, policies) → RAGAgent (lazy-loaded)
         if intent == "general_knowledge":

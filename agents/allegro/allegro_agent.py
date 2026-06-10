@@ -41,10 +41,10 @@ class AllegroAgent(BaseAgent):
         "Do not make up or guess any order IDs or prices — always retrieve them via tools."
     )
 
-    def __init__(self):
+    def __init__(self, user_id: str | None = None):
         super().__init__()
         self.model_override = self._settings.gemini_model_fast
-        self._allegro = AllegroService()
+        self._allegro = AllegroService(user_id=user_id)
 
     async def run(
         self,
