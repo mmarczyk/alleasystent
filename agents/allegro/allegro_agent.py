@@ -134,6 +134,39 @@ class AllegroAgent(BaseAgent):
             logger.exception("Unexpected error in Allegro tool %s: %s", tool_name, exc)
             return "An internal error occurred. Please try again."
 
+    # ── Formatting helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_price(amount: float, currency: str = "PLN") -> str:
+        return f"{amount:.2f}".replace(".", ",") + f" {currency}"
+
+    _STATUS_ICON = {
+        "READY_FOR_PROCESSING": "🟢",
+        "BOUGHT": "🔵",
+        "FILLED_IN": "🟡",
+        "CANCELLED": "🔴",
+    }
+
+    @classmethod
+    def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
+        """Render a single order as a formatted markdown block."""
+        icon = cls._STATUS_ICON.get(o.status, "⚪")
+        price = cls._format_price(o.total_price, o.currency)
+        delivery = o.delivery.get("method", {}).get("name", "—")
+        link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
+        lines = [
+            f"{icon} **Zamówienie** `{o.order_id}`",
+            f"👤 Kupujący: **{o.buyer_login}**",
+            f"💰 Wartość: **{price}**",
+            f"🚚 Dostawa: {delivery}",
+        ]
+        if extra_lines:
+            lines.extend(extra_lines)
+        lines.append(f"🔗 [Link do zamówienia]({link})")
+        return "\n".join(lines)
+
+    # ── Tool dispatch ─────────────────────────────────────────────────────────
+
     async def _dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         if tool_name == "get_orders":
             orders = await self._allegro.get_orders(
@@ -144,16 +177,8 @@ class AllegroAgent(BaseAgent):
                 limit=min(int(tool_input.get("limit", 10)), 50),
             )
             if not orders:
-                return "No orders found matching the given criteria."
-            lines = []
-            for o in orders:
-                items_str = ", ".join(f"{li.offer_name} x{li.quantity}" for li in o.line_items[:3])
-                lines.append(
-                    f"Order {o.order_id} | Buyer: {o.buyer_login} | "
-                    f"Status: {o.status} | Total: {o.total_price} {o.currency} | "
-                    f"Items: {items_str}"
-                )
-            return "\n".join(lines)
+                return "Brak zamówień spełniających podane kryteria."
+            return "\n\n".join(self._order_block(o) for o in orders)
 
         if tool_name == "get_order_details":
             order = await self._allegro.get_order(tool_input["order_id"])
@@ -259,23 +284,21 @@ class AllegroAgent(BaseAgent):
                 limit=min(int(tool_input.get("limit", 20)), 50),
             )
             if not orders:
-                return "No orders found."
-            lines = []
+                return "Brak zamówień spełniających podane kryteria."
+            blocks = []
             for o in orders:
                 d = o.delivery
-                method = d.get("method", {}).get("name", "N/A")
                 tracking = (
                     d.get("smart", {}).get("trackingCode")
                     or d.get("trackingCode")
-                    or "brak"
+                    or "—"
                 )
                 pickup = d.get("pickupPoint", {})
-                pickup_info = f" | Punkt odbioru: {pickup.get('name', '')}" if pickup else ""
-                lines.append(
-                    f"Zamówienie {o.order_id} | Kupujący: {o.buyer_login} | "
-                    f"Dostawa: {method} | Numer śledzenia: {tracking}{pickup_info}"
-                )
-            return "\n".join(lines)
+                extra = [f"📦 Numer śledzenia: {tracking}"]
+                if pickup:
+                    extra.append(f"📍 Punkt odbioru: {pickup.get('name', '—')}")
+                blocks.append(self._order_block(o, extra_lines=extra))
+            return "\n\n".join(blocks)
 
         if tool_name == "get_orders_pending_invoice":
             orders = await self._allegro.get_orders_needing_invoice(
@@ -283,14 +306,17 @@ class AllegroAgent(BaseAgent):
             )
             if not orders:
                 return "Brak zamówień wymagających wystawienia faktury."
-            lines = [f"Zamówień bez faktury: {len(orders)}\n"]
+            header = f"🧾 **Zamówień bez faktury: {len(orders)}**\n"
+            blocks = []
             for o in orders:
-                items_str = ", ".join(f"{li.offer_name} x{li.quantity}" for li in o.line_items[:3])
-                lines.append(
-                    f"Zamówienie {o.order_id} | Kupujący: {o.buyer_login} ({o.buyer_email}) | "
-                    f"Kwota: {o.total_price} {o.currency} | Data: {o.created_at} | "
-                    f"Produkty: {items_str}"
-                )
-            return "\n".join(lines)
+                items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
+                extra = [
+                    f"📧 E-mail: {o.buyer_email}",
+                    f"🛍️ Produkty: {items_str}",
+                    f"📅 Data: {o.created_at[:10] if o.created_at else '—'}",
+                    "🧾 **Faktura: niewystawiona**",
+                ]
+                blocks.append(self._order_block(o, extra_lines=extra))
+            return header + "\n\n".join(blocks)
 
         return f"Unknown tool: {tool_name}"
