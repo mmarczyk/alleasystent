@@ -143,29 +143,23 @@ class AllegroAgent(BaseAgent):
     def _format_price(amount: float, currency: str = "PLN") -> str:
         return f"{amount:.2f}".replace(".", ",") + f" {currency}"
 
-    _STATUS_ICON = {
-        "READY_FOR_PROCESSING": "🟢",
-        "BOUGHT": "🔵",
-        "FILLED_IN": "🟡",
-        "CANCELLED": "🔴",
-    }
-
     @classmethod
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
-        """Render a single order as a formatted markdown block."""
-        icon = cls._STATUS_ICON.get(o.status, "⚪")
+        """Render a single order as a markdown bullet-point block."""
         price = cls._format_price(o.total_price, o.currency)
         delivery = o.delivery.get("method", {}).get("name", "—")
+        total_qty = sum(li.quantity for li in o.line_items)
         link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
         lines = [
-            f"{icon} **Zamówienie** `{o.order_id}`",
-            f"👤 Kupujący: **{o.buyer_login}**",
-            f"💰 Wartość: **{price}**",
-            f"🚚 Dostawa: {delivery}",
+            f"**Zamówienie** `{o.order_id}`",
+            f"- Kupujący: **{o.buyer_login}**",
+            f"- Wartość: **{price}**",
+            f"- Dostawa: {delivery}",
+            f"- Produkty: {total_qty} szt.",
         ]
         if extra_lines:
-            lines.extend(extra_lines)
-        lines.append(f"🔗 [Link do zamówienia]({link})")
+            lines.extend(f"- {l}" for l in extra_lines)
+        lines.append(f"- Link: {link}")
         return "\n".join(lines)
 
     # ── Tool dispatch ─────────────────────────────────────────────────────────
@@ -297,9 +291,9 @@ class AllegroAgent(BaseAgent):
                     or "—"
                 )
                 pickup = d.get("pickupPoint", {})
-                extra = [f"📦 Numer śledzenia: {tracking}"]
+                extra = [f"Numer śledzenia: {tracking}"]
                 if pickup:
-                    extra.append(f"📍 Punkt odbioru: {pickup.get('name', '—')}")
+                    extra.append(f"Punkt odbioru: {pickup.get('name', '—')}")
                 blocks.append(self._order_block(o, extra_lines=extra))
             return "\n\n".join(blocks)
 
@@ -309,15 +303,15 @@ class AllegroAgent(BaseAgent):
             )
             if not orders:
                 return "Brak zamówień wymagających wystawienia faktury."
-            header = f"🧾 **Zamówień bez faktury: {len(orders)}**\n"
+            header = f"**Zamówień bez faktury: {len(orders)}**\n"
             blocks = []
             for o in orders:
                 items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
                 extra = [
-                    f"📧 E-mail: {o.buyer_email}",
-                    f"🛍️ Produkty: {items_str}",
-                    f"📅 Data: {o.created_at[:10] if o.created_at else '—'}",
-                    "🧾 **Faktura: niewystawiona**",
+                    f"E-mail: {o.buyer_email}",
+                    f"Data: {o.created_at[:10] if o.created_at else '—'}",
+                    f"Produkty: {items_str}",
+                    "**Faktura: niewystawiona**",
                 ]
                 blocks.append(self._order_block(o, extra_lines=extra))
             return header + "\n\n".join(blocks)
