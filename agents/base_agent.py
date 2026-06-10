@@ -137,18 +137,12 @@ class BaseAgent(ABC):
                     agent_type=self.agent_name,
                 )
 
-            # Append assistant turn with tool calls
+            # Append assistant turn — serialize via model_dump() so Gemini-specific
+            # fields like thought_signature (required by thinking models) are preserved.
             messages.append({
                 "role": "assistant",
                 "content": msg.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in msg.tool_calls
-                ],
+                "tool_calls": [tc.model_dump(exclude_none=True) for tc in msg.tool_calls],
             })
 
             # Execute each tool and append results
