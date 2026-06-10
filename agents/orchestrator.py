@@ -17,7 +17,8 @@ dispatching to the heavier specialized agents.
 import logging
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
+from agents.base_agent import _call_with_retry
 
 from agents.allegro.allegro_agent import AllegroAgent
 from agents.base_agent import BaseAgent
@@ -162,13 +163,17 @@ class Orchestrator:
             *self._extra_agents.keys(),
         ]
         try:
-            resp = await self._client.chat.completions.create(
-                model=self._settings.gemini_model_fast,
-                max_tokens=30,
-                messages=[
-                    {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
+            msgs = [
+                {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+            resp = await _call_with_retry(
+                lambda: self._client.chat.completions.create(
+                    model=self._settings.gemini_model_fast,
+                    max_tokens=30,
+                    messages=msgs,
+                ),
+                "orchestrator/intent",
             )
             raw = resp.choices[0].message.content.strip().lower()
             logger.info("Intent classifier raw output: %r", raw)
@@ -227,29 +232,33 @@ class Orchestrator:
         history: list[dict[str, str]],
     ) -> AgentResponse:
         """Handle greetings and small talk without hitting specialized agents."""
-        resp = await self._client.chat.completions.create(
-            model=self._settings.gemini_model_fast,
-            max_tokens=512,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are AllEasystent — a friendly AI assistant for Allegro store owners. "
-                        "Keep responses brief and warm. "
-                        "When asked about your capabilities, list what you can actually do:\n"
-                        "- Sprawdzanie nowych i historycznych zamówień (statusy, dane kupujących, adresy)\n"
-                        "- Przeglądanie i aktualizacja ofert (tytuł, cena, stan magazynowy)\n"
-                        "- Czytanie i wysyłanie wiadomości do kupujących\n"
-                        "- Informacje o koncie sprzedawcy (opłaty, statystyki, limity)\n"
-                        "- Odpowiedzi na pytania z bazy wiedzy sklepu (polityki, FAQ, wysyłka)\n"
-                        "After greeting, gently ask how you can help.\n\n"
-                        "LANGUAGE RULE: If the user writes in Polish, respond entirely in Polish. "
-                        "If in English, respond in English. Never mix languages."
-                    ),
-                },
-                *list(history),
-                {"role": "user", "content": query},
-            ],
+        msgs = [
+            {
+                "role": "system",
+                "content": (
+                    "You are AllEasystent — a friendly AI assistant for Allegro store owners. "
+                    "Keep responses brief and warm. "
+                    "When asked about your capabilities, list what you can actually do:\n"
+                    "- Sprawdzanie nowych i historycznych zamówień (statusy, dane kupujących, adresy)\n"
+                    "- Przeglądanie i aktualizacja ofert (tytuł, cena, stan magazynowy)\n"
+                    "- Czytanie i wysyłanie wiadomości do kupujących\n"
+                    "- Informacje o koncie sprzedawcy (opłaty, statystyki, limity)\n"
+                    "- Odpowiedzi na pytania z bazy wiedzy sklepu (polityki, FAQ, wysyłka)\n"
+                    "After greeting, gently ask how you can help.\n\n"
+                    "LANGUAGE RULE: If the user writes in Polish, respond entirely in Polish. "
+                    "If in English, respond in English. Never mix languages."
+                ),
+            },
+            *list(history),
+            {"role": "user", "content": query},
+        ]
+        resp = await _call_with_retry(
+            lambda: self._client.chat.completions.create(
+                model=self._settings.gemini_model_fast,
+                max_tokens=512,
+                messages=msgs,
+            ),
+            "orchestrator/chitchat",
         )
         text = resp.choices[0].message.content or "Hello! How can I help you?"
         return AgentResponse(text=text, agent_type="chitchat")

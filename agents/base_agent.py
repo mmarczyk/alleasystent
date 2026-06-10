@@ -10,12 +10,13 @@ Tool definitions use OpenAI/Gemini format:
     {"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}
 """
 
+import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 
 from config.settings import get_settings
 from models.conversation import AgentResponse
@@ -23,6 +24,20 @@ from models.conversation import AgentResponse
 logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 10
+_RETRY_DELAYS = (2, 4, 8)  # seconds between retries on 429
+
+
+async def _call_with_retry(coro_factory, label: str):
+    """Call an async factory (returns a coroutine) with exponential backoff on 429."""
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
+        try:
+            return await coro_factory()
+        except RateLimitError:
+            if delay is None:
+                logger.error("%s: rate-limited after %d attempts, giving up", label, attempt)
+                raise
+            logger.warning("%s: rate-limited (attempt %d), retrying in %ds…", label, attempt, delay)
+            await asyncio.sleep(delay)
 
 
 class BaseAgent(ABC):
@@ -71,7 +86,10 @@ class BaseAgent(ABC):
             if tools:
                 kwargs["tools"] = tools
 
-            response = await self._client.chat.completions.create(**kwargs)
+            response = await _call_with_retry(
+                lambda kw=kwargs: self._client.chat.completions.create(**kw),
+                f"{self.agent_name}/iter{iteration+1}",
+            )
             choice = response.choices[0]
             msg = choice.message
 
