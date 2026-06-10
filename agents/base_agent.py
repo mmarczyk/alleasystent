@@ -171,7 +171,9 @@ class BaseAgent(ABC):
         )
 
     def _build_system_prompt(self, context: str | None) -> str:
+        from datetime import date
         parts = [self.system_prompt]
+        parts.append(f"Today's date: {date.today().isoformat()}")
         if context:
             parts.append(f"## Relevant context\n{context}")
         parts.append(
