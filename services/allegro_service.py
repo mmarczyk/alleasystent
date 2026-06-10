@@ -376,7 +376,7 @@ class AllegroService:
             total_price=float(total_amount.get("amount", 0)) if isinstance(total_amount, dict) else 0.0,
             currency=total_amount.get("currency", "PLN") if isinstance(total_amount, dict) else "PLN",
             created_at=data.get("boughtAt", ""),
-            delivery=data.get("delivery", {}),
+            delivery=data.get("delivery") or {},
             line_items=line_items,
             invoice_required=invoice_required,
         )
