@@ -412,8 +412,12 @@ class AllegroService:
         date_from: str,
         date_to: str,
     ) -> list[AllegroOrder]:
-        """Fetch all paid orders (READY_FOR_PROCESSING) in [date_from, date_to]. No cache — used for reporting."""
-        all_orders: list[AllegroOrder] = []
+        """Fetch paid orders where payment.finishedAt falls in [date_from, date_to] (both UTC ISO strings).
+
+        Allegro API only supports boughtAt filtering, so we fetch a wider window
+        and filter client-side by payment.finishedAt.
+        """
+        all_fetched: list[AllegroOrder] = []
         page_size = 50
         offset = 0
         while True:
@@ -427,17 +431,24 @@ class AllegroService:
             data = await self._get("/order/checkout-forms", params=params)
             page = [self._parse_order(o) for o in data.get("checkoutForms", [])]
             total_count = int(data.get("totalCount") or 0)
-            all_orders.extend(page)
+            all_fetched.extend(page)
             logger.info(
                 "get_all_paid_orders_in_period: page offset=%d → %d orders (total_count=%d, running=%d)",
-                offset, len(page), total_count, len(all_orders),
+                offset, len(page), total_count, len(all_fetched),
             )
             offset += page_size
             if total_count and offset >= total_count:
                 break
             if len(page) < page_size:
                 break
-        return all_orders
+
+        # Client-side filter by payment.finishedAt
+        result = [o for o in all_fetched if date_from <= (o.paid_at or "") <= date_to]
+        logger.info(
+            "get_all_paid_orders_in_period: %d fetched → %d after paid_at filter (%s – %s)",
+            len(all_fetched), len(result), date_from, date_to,
+        )
+        return result
 
     def _parse_order(self, data: dict) -> AllegroOrder:
         line_items = [
@@ -461,6 +472,7 @@ class AllegroService:
             status=data.get("status", ""),
             fulfillment_status=(data.get("fulfillment") or {}).get("status", ""),
             payment_status=((data.get("payment") or {}).get("paidAmount") or {}).get("currency", ""),
+            paid_at=(data.get("payment") or {}).get("finishedAt", ""),
             total_price=float(total_amount.get("amount", 0) or 0) if isinstance(total_amount, dict) else 0.0,
             currency=total_amount.get("currency", "PLN") if isinstance(total_amount, dict) else "PLN",
             created_at=data.get("boughtAt", ""),

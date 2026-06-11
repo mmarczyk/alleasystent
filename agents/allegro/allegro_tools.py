@@ -297,22 +297,23 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Return revenue summary for a specific time period: total revenue, order count, "
                 "average order value, and top-selling products by revenue. "
+                "Uses payment.finishedAt (actual payment date) for filtering — Allegro operates on UTC. "
                 "IMPORTANT: this tool REQUIRES a date range. "
                 "If the user's question does not clearly specify a period, you MUST ask them before calling. "
-                "For 'today', 'yesterday', 'day before yesterday': use 00:00:00–23:59:59 of that day (Polish time, UTC+2 in summer). "
-                "For 'last month' / 'this month': first day 00:00:00 to last day 23:59:59. "
-                "date_from and date_to must be ISO 8601 with timezone offset, e.g. '2026-06-01T00:00:00+02:00'."
+                "For 'today', 'yesterday', 'day before yesterday': use 00:00:00Z–23:59:59Z of that day in UTC. "
+                "For 'last month' / 'this month': first day 00:00:00Z to last day 23:59:59Z in UTC. "
+                "date_from and date_to must be ISO 8601 UTC strings, e.g. '2026-06-01T00:00:00Z'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "date_from": {
                         "type": "string",
-                        "description": "Start of period, ISO 8601 with timezone, e.g. '2026-06-01T00:00:00+02:00'.",
+                        "description": "Start of period in UTC, ISO 8601, e.g. '2026-06-01T00:00:00Z'.",
                     },
                     "date_to": {
                         "type": "string",
-                        "description": "End of period, ISO 8601 with timezone, e.g. '2026-06-30T23:59:59+02:00'.",
+                        "description": "End of period in UTC, ISO 8601, e.g. '2026-06-30T23:59:59Z'.",
                     },
                 },
                 "required": ["date_from", "date_to"],

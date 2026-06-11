@@ -70,6 +70,7 @@ class AllegroOrder(BaseModel):
     currency: str = "PLN"
     created_at: str = ""
     fulfillment_status: str = ""
+    paid_at: str = ""  # payment.finishedAt from Allegro
     delivery: dict[str, Any] = Field(default_factory=dict)
     line_items: list[AllegroOrderLine] = Field(default_factory=list)
     billing_address: AllegroAddress = Field(default_factory=AllegroAddress)
