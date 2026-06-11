@@ -211,7 +211,7 @@ ALLEGRO_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "get_account_info",
-            "description": "Get basic information about the seller's Allegro account.",
+            "description": "Get basic profile information about the seller's Allegro account (login, rating, subscription). Do NOT use for questions about orders, delivery, or couriers — use get_orders_delivery for those.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -233,26 +233,34 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_orders_delivery",
             "description": (
-                "List orders with their delivery method and tracking info. "
-                "Use when the user asks about delivery methods, carriers, or tracking numbers across orders."
+                "Show which courier / delivery method the buyer chose for each order. "
+                "Use whenever the user asks: which couriers are in pending orders, "
+                "which delivery methods were selected, tracking numbers, or any question "
+                "combining orders with shipping/courier/delivery. "
+                "Default (no filters): returns all unsent orders (status=READY_FOR_PROCESSING, "
+                "fulfillment_status not SENT/PICKED_UP). "
+                "For 'orders to send' / 'do wysłania' leave fulfillment_status empty."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "description": "Filter by order status (default: READY_FOR_PROCESSING).",
+                        "description": "Order status filter. Default: READY_FOR_PROCESSING.",
                         "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
                     },
                     "fulfillment_status": {
                         "type": "string",
-                        "description": "Filter by fulfillment status.",
+                        "description": (
+                            "Fulfillment status filter. Leave empty to get all unsent orders. "
+                            "Use SENT only when explicitly asking about already-shipped orders."
+                        ),
                         "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
                     },
                     "limit": {
                         "type": "integer",
                         "description": "Max orders to return (1–50).",
-                        "default": 20,
+                        "default": 50,
                     },
                 },
             },

@@ -9,7 +9,7 @@ to fetch/update data, and returns structured responses.
 
 import json
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 from agents.allegro.allegro_tools import ALLEGRO_TOOLS
@@ -403,27 +403,38 @@ class AllegroAgent(BaseAgent):
             return "\n".join(lines)
 
         if tool_name == "get_orders_delivery":
+            fulfillment_status = tool_input.get("fulfillment_status")
             orders = await self._allegro.get_orders(
                 status=tool_input.get("status", "READY_FOR_PROCESSING"),
-                fulfillment_status=tool_input.get("fulfillment_status"),
-                limit=min(int(tool_input.get("limit", 20)), 50),
+                fulfillment_status=fulfillment_status,
+                limit=min(int(tool_input.get("limit", 50)), 50),
             )
+            # When no fulfillment_status given, exclude already-sent orders
+            if not fulfillment_status:
+                orders = [o for o in orders if o.fulfillment_status not in ("SENT", "PICKED_UP", "CANCELLED")]
             if not orders:
-                return "Brak zamówień spełniających podane kryteria."
+                return "Brak zamówień do wysłania."
+            # Group by delivery method for a quick summary
+            courier_counts: Counter = Counter()
             blocks = []
             for o in orders:
                 d = o.delivery
+                method_name = (d.get("method") or {}).get("name") or "—"
+                courier_counts[method_name] += 1
                 tracking = (
                     d.get("smart", {}).get("trackingCode")
                     or d.get("trackingCode")
                     or "—"
                 )
                 pickup = d.get("pickupPoint", {})
-                extra = [f"Numer śledzenia: {tracking}"]
+                extra = [f"Kurier/dostawa: **{method_name}**", f"Numer śledzenia: {tracking}"]
                 if pickup:
                     extra.append(f"Punkt odbioru: {pickup.get('name', '—')}")
                 blocks.append(self._order_block(o, extra_lines=extra))
-            return "\n\n".join(blocks)
+            summary = "**Podsumowanie kurierów:**\n" + "\n".join(
+                f"- {method}: {count} zamówień" for method, count in courier_counts.most_common()
+            )
+            return summary + "\n\n---\n\n" + "\n\n".join(blocks)
 
         if tool_name == "get_orders_pending_invoice":
             orders = await self._allegro.get_orders_needing_invoice(
