@@ -210,7 +210,7 @@ class AllegroAgent(BaseAgent):
                 f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} × {li.price} {li.currency}"
                 for li in order.line_items
             )
-            delivery = order.delivery
+            delivery = order.delivery if isinstance(order.delivery, dict) else {}
             return (
                 f"Order ID: {order.order_id}\n"
                 f"Buyer: {order.buyer_login} ({order.buyer_email})\n"

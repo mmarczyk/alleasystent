@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AllegroTokens(BaseModel):
@@ -74,6 +74,11 @@ class AllegroOrder(BaseModel):
     line_items: list[AllegroOrderLine] = Field(default_factory=list)
     billing_address: AllegroAddress = Field(default_factory=AllegroAddress)
     invoice_required: bool = False
+
+    @field_validator("delivery", mode="before")
+    @classmethod
+    def coerce_delivery(cls, v: Any) -> dict[str, Any]:
+        return v if isinstance(v, dict) else {}
 
 
 class AllegroMessage(BaseModel):
