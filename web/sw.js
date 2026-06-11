@@ -1,6 +1,6 @@
-const CACHE = 'alleasystent-v3';
+const CACHE = 'alleasystent-v4';
 const STATIC = [
-  './', './index.html', './manifest.json',
+  './manifest.json',
   './css/app.css', './js/app.js'
 ];
 
@@ -17,6 +17,13 @@ self.addEventListener('activate', e =>
 );
 
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET' || e.request.url.includes('cdn.')) return;
+  if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  // Always fetch HTML from network so auth state is always fresh
+  if (url.pathname === '/' || url.pathname.endsWith('.html')) {
+    e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+    return;
+  }
+  if (url.hostname.includes('cdn.') || url.hostname !== self.location.hostname) return;
   e.respondWith(caches.match(e.request).then(c => c ?? fetch(e.request)));
 });
