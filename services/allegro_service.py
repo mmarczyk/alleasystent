@@ -428,7 +428,7 @@ class AllegroService:
             buyer_email=(data.get("buyer") or {}).get("email", ""),
             status=data.get("status", ""),
             fulfillment_status=(data.get("fulfillment") or {}).get("status", ""),
-            payment_status=(data.get("payment") or {}).get("paidAmount", ""),
+            payment_status=((data.get("payment") or {}).get("paidAmount") or {}).get("currency", ""),
             total_price=float(total_amount.get("amount", 0) or 0) if isinstance(total_amount, dict) else 0.0,
             currency=total_amount.get("currency", "PLN") if isinstance(total_amount, dict) else "PLN",
             created_at=data.get("boughtAt", ""),
