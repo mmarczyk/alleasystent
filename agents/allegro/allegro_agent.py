@@ -141,6 +141,18 @@ class AllegroAgent(BaseAgent):
     # ── Formatting helpers ────────────────────────────────────────────────────
 
     @staticmethod
+    def _dig(obj: Any, *keys: str, default: Any = None) -> Any:
+        """Safely navigate nested dicts. Any non-dict level returns default."""
+        cur = obj
+        for key in keys:
+            if not isinstance(cur, dict):
+                return default
+            cur = cur.get(key)
+            if cur is None:
+                return default
+        return cur if cur is not None else default
+
+    @staticmethod
     def _format_price(amount: float, currency: str = "PLN") -> str:
         return f"{amount:.2f}".replace(".", ",") + f" {currency}"
 
@@ -174,14 +186,15 @@ class AllegroAgent(BaseAgent):
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
         """Render a single order as a markdown bullet-point block."""
         price = cls._format_price(o.total_price, o.currency)
-        delivery = (o.delivery.get("method") or {}).get("name", "—")
+        d = o.delivery if isinstance(o.delivery, dict) else {}
+        delivery_name = cls._dig(d, "method", "name", default="—")
         total_qty = sum(li.quantity for li in o.line_items)
         link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
         lines = [
             f"**Zamówienie** `{o.order_id}`",
             f"- Kupujący: **{o.buyer_login}**",
             f"- Wartość: **{price}**",
-            f"- Dostawa: {delivery}",
+            f"- Dostawa: {delivery_name}",
             f"- Produkty: {total_qty} szt.",
         ]
         if extra_lines:
@@ -210,15 +223,20 @@ class AllegroAgent(BaseAgent):
                 f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} × {li.price} {li.currency}"
                 for li in order.line_items
             )
-            delivery = order.delivery if isinstance(order.delivery, dict) else {}
+            d = order.delivery if isinstance(order.delivery, dict) else {}
+            method_name = self._dig(d, "method", "name", default="N/A")
+            tracking = (
+                self._dig(d, "smart", "trackingCode", default=None)
+                or self._dig(d, "trackingCode", default="N/A")
+            )
             return (
                 f"Order ID: {order.order_id}\n"
                 f"Buyer: {order.buyer_login} ({order.buyer_email})\n"
                 f"Status: {order.status}\n"
                 f"Total: {order.total_price} {order.currency}\n"
                 f"Created: {order.created_at}\n"
-                f"Delivery method: {(delivery.get('method') or {}).get('name', 'N/A')}\n"
-                f"Delivery status: {(delivery.get('smart') or {}).get('trackingCode', 'N/A')}\n"
+                f"Delivery method: {method_name}\n"
+                f"Delivery status: {tracking}\n"
                 f"Items:\n{items_str}"
             )
 
@@ -418,18 +436,17 @@ class AllegroAgent(BaseAgent):
             courier_counts: Counter = Counter()
             blocks = []
             for o in orders:
-                d = o.delivery
-                method_name = (d.get("method") or {}).get("name") or "—"
+                d = o.delivery if isinstance(o.delivery, dict) else {}
+                method_name = self._dig(d, "method", "name", default="—")
                 courier_counts[method_name] += 1
                 tracking = (
-                    (d.get("smart") or {}).get("trackingCode")
-                    or d.get("trackingCode")
-                    or "—"
+                    self._dig(d, "smart", "trackingCode", default=None)
+                    or self._dig(d, "trackingCode", default="—")
                 )
-                pickup = d.get("pickupPoint") or {}
+                pickup_name = self._dig(d, "pickupPoint", "name", default=None)
                 extra = [f"Kurier/dostawa: **{method_name}**", f"Numer śledzenia: {tracking}"]
-                if pickup:
-                    extra.append(f"Punkt odbioru: {pickup.get('name', '—')}")
+                if pickup_name:
+                    extra.append(f"Punkt odbioru: {pickup_name}")
                 blocks.append(self._order_block(o, extra_lines=extra))
             summary = "**Podsumowanie kurierów:**\n" + "\n".join(
                 f"- {method}: {count} zamówień" for method, count in courier_counts.most_common()
