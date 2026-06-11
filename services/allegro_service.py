@@ -656,5 +656,29 @@ class AllegroService:
         data = await self._get("/billing/billing-entries", params={"limit": limit})
         return data.get("billingEntries", [])
 
+    async def get_billing_entries_in_period(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+        """Fetch all billing entries in a date range (paginated)."""
+        all_entries: list[dict[str, Any]] = []
+        page_size = 100
+        offset = 0
+        while True:
+            params = {
+                "occurredAt.gte": date_from,
+                "occurredAt.lte": date_to,
+                "limit": page_size,
+                "offset": offset,
+            }
+            data = await self._get("/billing/billing-entries", params=params)
+            entries = data.get("billingEntries", [])
+            all_entries.extend(entries)
+            logger.info(
+                "get_billing_entries_in_period: offset=%d → %d entries (total so far: %d)",
+                offset, len(entries), len(all_entries),
+            )
+            if len(entries) < page_size:
+                break
+            offset += page_size
+        return all_entries
+
     async def close(self) -> None:
         await self._client.aclose()

@@ -219,11 +219,30 @@ ALLEGRO_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "get_billing_summary",
-            "description": "Get recent billing/fee entries from Allegro.",
+            "description": (
+                "Get Allegro billing/fee entries with cost and refund breakdown. "
+                "Use for questions about Allegro costs, fees, commissions, promotions, or refunds. "
+                "When a time period is specified (or can be inferred — see get_sales_summary rules), "
+                "pass date_from/date_to to filter entries. "
+                "Without dates, returns the most recent entries. "
+                "Returns: total fees, total refunds/credits, net cost, and breakdown by fee type."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max entries to return.", "default": 10},
+                    "date_from": {
+                        "type": "string",
+                        "description": "Start of period in UTC ISO 8601, e.g. '2026-06-01T00:00:00Z'. Optional.",
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "End of period in UTC ISO 8601, e.g. '2026-06-30T23:59:59Z'. Optional.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max recent entries to return when no date range given (1–100).",
+                        "default": 50,
+                    },
                 },
             },
         },
@@ -295,9 +314,10 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_sales_summary",
             "description": (
-                "Return revenue summary for a specific time period: total revenue, order count, "
-                "average order value, and top-selling products by revenue. "
-                "Uses payment.finishedAt (actual payment date) for filtering — Allegro operates on UTC. "
+                "Return full earnings summary for a specific time period: revenue, Allegro fees, "
+                "net profit (revenue minus fees), order count, average order value, and top-selling products. "
+                "Also includes breakdown of Allegro costs (commissions, listing fees, promotions, refunds). "
+                "Uses payment.finishedAt (actual payment date) for order filtering — Allegro operates on UTC. "
                 "ALWAYS resolve common time expressions automatically — do NOT ask the user for clarification: "
                 "'dziś/today' → today 00:00:00Z–23:59:59Z; "
                 "'wczoraj/yesterday' → yesterday 00:00:00Z–23:59:59Z; "

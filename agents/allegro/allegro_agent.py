@@ -7,6 +7,7 @@ Receives queries from the orchestrator, uses Allegro API tools
 to fetch/update data, and returns structured responses.
 """
 
+import asyncio
 import json
 import logging
 from collections import Counter, defaultdict
@@ -369,9 +370,15 @@ class AllegroAgent(BaseAgent):
         if tool_name == "get_sales_summary":
             date_from = tool_input["date_from"]
             date_to = tool_input["date_to"]
-            logger.info("get_sales_summary: fetching orders %s → %s", date_from, date_to)
-            orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
-            logger.info("get_sales_summary: %d paid orders in period", len(orders))
+            logger.info("get_sales_summary: fetching orders and billing %s → %s", date_from, date_to)
+            orders, billing_entries = await asyncio.gather(
+                self._allegro.get_all_paid_orders_in_period(date_from, date_to),
+                self._allegro.get_billing_entries_in_period(date_from, date_to),
+            )
+            logger.info(
+                "get_sales_summary: %d paid orders, %d billing entries in period",
+                len(orders), len(billing_entries),
+            )
             if not orders:
                 return f"Brak opłaconych zamówień w okresie {date_from[:10]} – {date_to[:10]}."
             total_revenue = sum(o.total_price for o in orders)
@@ -387,12 +394,39 @@ class AllegroAgent(BaseAgent):
                 f"  {i+1}. **{name}** — {self._format_price(rev)}"
                 for i, (name, rev) in enumerate(top)
             )
+            # Billing breakdown
+            fee_by_type: dict[str, float] = {}
+            total_fees = 0.0
+            total_refunds = 0.0
+            for e in billing_entries:
+                amount = float((e.get("value") or {}).get("amount", 0) or 0)
+                type_desc = (e.get("type") or {}).get("description", "Inne")
+                if amount < 0:
+                    total_fees += abs(amount)
+                    fee_by_type[type_desc] = fee_by_type.get(type_desc, 0) + abs(amount)
+                elif amount > 0:
+                    total_refunds += amount
+            net_profit = total_revenue - total_fees + total_refunds
+            billing_lines = "\n".join(
+                f"  - {desc}: {self._format_price(amt)}"
+                for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
+            )
+            billing_section = ""
+            if billing_entries:
+                billing_section = (
+                    f"\n\n**Koszty Allegro** ({date_from[:10]} – {date_to[:10]})\n"
+                    f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
+                    + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
+                    + (f"{billing_lines}\n" if billing_lines else "")
+                    + f"\n**Zysk netto (przychód − opłaty): {self._format_price(net_profit)}**"
+                )
             return (
                 f"**Podsumowanie sprzedaży** ({date_from[:10]} – {date_to[:10]})\n\n"
                 f"- Liczba zamówień: **{order_count}**\n"
                 f"- Łączny przychód: **{self._format_price(total_revenue)}**\n"
                 f"- Średnia wartość zamówienia: **{self._format_price(avg_value)}**\n\n"
                 f"**Top produkty wg przychodu:**\n{top_lines}"
+                f"{billing_section}"
             )
 
         if tool_name == "get_offer_details":
@@ -442,19 +476,53 @@ class AllegroAgent(BaseAgent):
             )
 
         if tool_name == "get_billing_summary":
-            entries = await self._allegro.get_billing_entries(
-                limit=min(int(tool_input.get("limit", 10)), 50)
-            )
-            if not entries:
-                return "No billing entries found."
-            lines = []
-            for e in entries:
-                amount = e.get("value", {})
-                lines.append(
-                    f"{e.get('occurredAt', 'N/A')} | {e.get('type', {}).get('description', 'N/A')} | "
-                    f"{amount.get('amount', 'N/A')} {amount.get('currency', 'PLN')}"
+            date_from = tool_input.get("date_from")
+            date_to = tool_input.get("date_to")
+            if date_from and date_to:
+                entries = await self._allegro.get_billing_entries_in_period(date_from, date_to)
+                period_label = f"{date_from[:10]} – {date_to[:10]}"
+            else:
+                entries = await self._allegro.get_billing_entries(
+                    limit=min(int(tool_input.get("limit", 50)), 100)
                 )
-            return "\n".join(lines)
+                period_label = "ostatnie operacje"
+            if not entries:
+                return f"Brak wpisów rozliczeniowych ({period_label})."
+            fee_by_type: dict[str, float] = {}
+            total_fees = 0.0
+            total_refunds = 0.0
+            detail_lines = []
+            for e in entries:
+                amount_val = float((e.get("value") or {}).get("amount", 0) or 0)
+                currency = (e.get("value") or {}).get("currency", "PLN")
+                type_desc = (e.get("type") or {}).get("description", "Inne")
+                occurred = e.get("occurredAt", "")[:10]
+                order_id = (e.get("order") or {}).get("id", "")
+                order_ref = f" | zamówienie {order_id}" if order_id else ""
+                sign = "+" if amount_val > 0 else ""
+                detail_lines.append(
+                    f"{occurred} | {type_desc}{order_ref} | {sign}{amount_val:.2f} {currency}"
+                )
+                if amount_val < 0:
+                    total_fees += abs(amount_val)
+                    fee_by_type[type_desc] = fee_by_type.get(type_desc, 0) + abs(amount_val)
+                elif amount_val > 0:
+                    total_refunds += amount_val
+            net_cost = total_fees - total_refunds
+            breakdown = "\n".join(
+                f"  - {desc}: {self._format_price(amt)}"
+                for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
+            )
+            summary = (
+                f"**Koszty Allegro** ({period_label}) — {len(entries)} operacji\n\n"
+                f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
+                + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
+                + f"- Koszt netto: **{self._format_price(net_cost)}**\n\n"
+                + (f"**Podział wg rodzaju opłaty:**\n{breakdown}\n\n" if breakdown else "")
+                + f"**Szczegóły:**\n" + "\n".join(detail_lines[:50])
+                + (f"\n… i {len(detail_lines) - 50} więcej" if len(detail_lines) > 50 else "")
+            )
+            return summary
 
         if tool_name == "get_orders_delivery":
             fulfillment_status = tool_input.get("fulfillment_status")
