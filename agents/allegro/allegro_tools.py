@@ -314,9 +314,14 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_sales_summary",
             "description": (
-                "Return full earnings summary for a specific time period: revenue, Allegro fees, "
-                "net profit (revenue minus fees), order count, average order value, and top-selling products. "
-                "Also includes breakdown of Allegro costs (commissions, listing fees, promotions, refunds). "
+                "Return full earnings summary for a specific time period, with per-order cost breakdown. "
+                "USE THIS TOOL for ANY question about: earnings, revenue, profit, Allegro fees/commissions, "
+                "costs per order, net profit, 'ile zarobiłem', 'jakie mam koszty', 'prowizja per zamówienie', "
+                "'koszty dla każdego zamówienia', 'pokaż prowizje', 'ile Allegro wzięło', "
+                "'zarobek', 'przychód', 'zysk', 'koszty Allegro', 'opłaty per zamówienie'. "
+                "Returns: total revenue, Allegro fees, net profit (revenue minus fees), order count, "
+                "average order value, top-selling products, breakdown of fee types (commission, listing, etc.), "
+                "AND a per-order table showing revenue + Allegro cost + net profit for each individual order. "
                 "Uses payment.finishedAt (actual payment date) for order filtering — Allegro operates on UTC. "
                 "ALWAYS resolve common time expressions automatically — do NOT ask the user for clarification: "
                 "'dziś/today' → today 00:00:00Z–23:59:59Z; "

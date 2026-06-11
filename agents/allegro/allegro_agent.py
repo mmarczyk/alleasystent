@@ -40,7 +40,12 @@ class AllegroAgent(BaseAgent):
         "Present information clearly and concisely. "
         "When showing prices, always include the PLN currency. "
         "Respond in the same language as the user's question (Polish or English). "
-        "Do not make up or guess any order IDs or prices — always retrieve them via tools."
+        "Do not make up or guess any order IDs or prices — always retrieve them via tools. "
+        "IMPORTANT: For ANY question about earnings, revenue, profit, Allegro fees, commissions, "
+        "costs per order, or net profit — ALWAYS use the get_sales_summary tool. "
+        "This includes Polish phrases like: 'koszty dla zamówień', 'prowizja per zamówienie', "
+        "'ile zarobiłem', 'jakie mam koszty', 'pokaż opłaty', 'zysk netto'. "
+        "The get_sales_summary tool CAN show per-order cost breakdown — never say it cannot."
     )
 
     def __init__(self, user_id: str | None = None):
