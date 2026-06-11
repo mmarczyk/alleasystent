@@ -366,6 +366,35 @@ class AllegroAgent(BaseAgent):
                 )
             return "\n".join(lines)
 
+        if tool_name == "get_sales_summary":
+            date_from = tool_input["date_from"]
+            date_to = tool_input["date_to"]
+            logger.info("get_sales_summary: fetching orders %s → %s", date_from, date_to)
+            orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
+            logger.info("get_sales_summary: %d paid orders in period", len(orders))
+            if not orders:
+                return f"Brak opłaconych zamówień w okresie {date_from[:10]} – {date_to[:10]}."
+            total_revenue = sum(o.total_price for o in orders)
+            order_count = len(orders)
+            avg_value = total_revenue / order_count if order_count else 0
+            # Top products by revenue
+            product_revenue: dict[str, float] = {}
+            for o in orders:
+                for li in o.line_items:
+                    product_revenue[li.offer_name] = product_revenue.get(li.offer_name, 0) + li.price * li.quantity
+            top = sorted(product_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
+            top_lines = "\n".join(
+                f"  {i+1}. **{name}** — {self._format_price(rev)}"
+                for i, (name, rev) in enumerate(top)
+            )
+            return (
+                f"**Podsumowanie sprzedaży** ({date_from[:10]} – {date_to[:10]})\n\n"
+                f"- Liczba zamówień: **{order_count}**\n"
+                f"- Łączny przychód: **{self._format_price(total_revenue)}**\n"
+                f"- Średnia wartość zamówienia: **{self._format_price(avg_value)}**\n\n"
+                f"**Top produkty wg przychodu:**\n{top_lines}"
+            )
+
         if tool_name == "get_offer_details":
             offer = await self._allegro.get_offer(tool_input["offer_id"])
             return json.dumps(offer, ensure_ascii=False, indent=2)[:3000]

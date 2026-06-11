@@ -407,6 +407,38 @@ class AllegroService:
         self._order_cache.set(order_id, order)
         return order
 
+    async def get_all_paid_orders_in_period(
+        self,
+        date_from: str,
+        date_to: str,
+    ) -> list[AllegroOrder]:
+        """Fetch all paid orders (READY_FOR_PROCESSING) in [date_from, date_to]. No cache — used for reporting."""
+        all_orders: list[AllegroOrder] = []
+        page_size = 50
+        offset = 0
+        while True:
+            params: dict[str, Any] = {
+                "status": "READY_FOR_PROCESSING",
+                "lineItems.boughtAt.gte": date_from,
+                "lineItems.boughtAt.lte": date_to,
+                "limit": page_size,
+                "offset": offset,
+            }
+            data = await self._get("/order/checkout-forms", params=params)
+            page = [self._parse_order(o) for o in data.get("checkoutForms", [])]
+            total_count = int(data.get("totalCount") or 0)
+            all_orders.extend(page)
+            logger.info(
+                "get_all_paid_orders_in_period: page offset=%d → %d orders (total_count=%d, running=%d)",
+                offset, len(page), total_count, len(all_orders),
+            )
+            offset += page_size
+            if total_count and offset >= total_count:
+                break
+            if len(page) < page_size:
+                break
+        return all_orders
+
     def _parse_order(self, data: dict) -> AllegroOrder:
         line_items = [
             AllegroOrderLine(
