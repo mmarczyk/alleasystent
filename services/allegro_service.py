@@ -410,26 +410,26 @@ class AllegroService:
     def _parse_order(self, data: dict) -> AllegroOrder:
         line_items = [
             AllegroOrderLine(
-                offer_id=item.get("offer", {}).get("id", ""),
-                offer_name=item.get("offer", {}).get("name", ""),
+                offer_id=(item.get("offer") or {}).get("id", ""),
+                offer_name=(item.get("offer") or {}).get("name", ""),
                 quantity=item.get("quantity", 1),
-                price=float(item.get("price", {}).get("amount", 0)),
-                currency=item.get("price", {}).get("currency", "PLN"),
+                price=float((item.get("price") or {}).get("amount", 0) or 0),
+                currency=(item.get("price") or {}).get("currency", "PLN"),
             )
             for item in data.get("lineItems", [])
         ]
-        summary = data.get("summary", {})
-        total_amount = summary.get("totalToPay", {})
-        invoice = data.get("invoice", {})
+        summary = data.get("summary") or {}
+        total_amount = summary.get("totalToPay") or {}
+        invoice = data.get("invoice") or {}
         invoice_required = bool(invoice.get("required")) and not bool(invoice.get("dontWant"))
         return AllegroOrder(
             order_id=data.get("id", ""),
-            buyer_login=data.get("buyer", {}).get("login", ""),
-            buyer_email=data.get("buyer", {}).get("email", ""),
+            buyer_login=(data.get("buyer") or {}).get("login", ""),
+            buyer_email=(data.get("buyer") or {}).get("email", ""),
             status=data.get("status", ""),
             fulfillment_status=(data.get("fulfillment") or {}).get("status", ""),
-            payment_status=data.get("payment", {}).get("paidAmount", {}).get("currency", ""),
-            total_price=float(total_amount.get("amount", 0)) if isinstance(total_amount, dict) else 0.0,
+            payment_status=(data.get("payment") or {}).get("paidAmount", ""),
+            total_price=float(total_amount.get("amount", 0) or 0) if isinstance(total_amount, dict) else 0.0,
             currency=total_amount.get("currency", "PLN") if isinstance(total_amount, dict) else "PLN",
             created_at=data.get("boughtAt", ""),
             delivery=data.get("delivery") or {},
