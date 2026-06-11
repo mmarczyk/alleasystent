@@ -514,8 +514,8 @@ class AllegroService:
             params["name"] = name
         data = await self._get("/sale/offers", params=params)
         offers = data.get("offers", [])
-        # Allegro uses "count" (total matching, not page count) in this endpoint
-        total = int(data.get("count") or data.get("totalCount") or 0)
+        # totalCount = all matching records, count = records in this page
+        total = int(data.get("totalCount") or 0)
         return offers, total
 
     async def get_all_offers(self, publication_status: str = "ACTIVE") -> list[dict[str, Any]]:
