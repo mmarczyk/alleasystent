@@ -174,7 +174,7 @@ class AllegroAgent(BaseAgent):
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
         """Render a single order as a markdown bullet-point block."""
         price = cls._format_price(o.total_price, o.currency)
-        delivery = o.delivery.get("method", {}).get("name", "—")
+        delivery = (o.delivery.get("method") or {}).get("name", "—")
         total_qty = sum(li.quantity for li in o.line_items)
         link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
         lines = [
@@ -217,8 +217,8 @@ class AllegroAgent(BaseAgent):
                 f"Status: {order.status}\n"
                 f"Total: {order.total_price} {order.currency}\n"
                 f"Created: {order.created_at}\n"
-                f"Delivery method: {delivery.get('method', {}).get('name', 'N/A')}\n"
-                f"Delivery status: {delivery.get('smart', {}).get('trackingCode', 'N/A')}\n"
+                f"Delivery method: {(delivery.get('method') or {}).get('name', 'N/A')}\n"
+                f"Delivery status: {(delivery.get('smart') or {}).get('trackingCode', 'N/A')}\n"
                 f"Items:\n{items_str}"
             )
 
@@ -372,7 +372,7 @@ class AllegroAgent(BaseAgent):
             lines = []
             for t in threads:
                 lines.append(
-                    f"Thread {t.get('id')} | Subject: {t.get('subject', {}).get('name', 'N/A')} | "
+                    f"Thread {t.get('id')} | Subject: {(t.get('subject') or {}).get('name', 'N/A')} | "
                     f"Unread: {t.get('hasUnreadMessages', False)} | "
                     f"Last message: {t.get('lastMessageCreatedAt', 'N/A')}"
                 )
@@ -422,11 +422,11 @@ class AllegroAgent(BaseAgent):
                 method_name = (d.get("method") or {}).get("name") or "—"
                 courier_counts[method_name] += 1
                 tracking = (
-                    d.get("smart", {}).get("trackingCode")
+                    (d.get("smart") or {}).get("trackingCode")
                     or d.get("trackingCode")
                     or "—"
                 )
-                pickup = d.get("pickupPoint", {})
+                pickup = d.get("pickupPoint") or {}
                 extra = [f"Kurier/dostawa: **{method_name}**", f"Numer śledzenia: {tracking}"]
                 if pickup:
                     extra.append(f"Punkt odbioru: {pickup.get('name', '—')}")
