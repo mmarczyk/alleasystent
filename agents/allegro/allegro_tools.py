@@ -63,12 +63,74 @@ ALLEGRO_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "get_active_offers",
-            "description": "List the store's active Allegro offers with prices and stock levels.",
+            "description": (
+                "List ALL active Allegro offers (paginated, no limit). "
+                "Use for general 'show me my offers' questions. "
+                "For stock or price filtering use query_offers_by_stock / query_offers_by_price instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Optional: filter by offer name (partial match)."},
-                    "limit": {"type": "integer", "description": "Max offers to return (1–50).", "default": 10},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_offers_summary",
+            "description": (
+                "Return statistics for all active offers: total count, total stock, "
+                "stock distribution (out-of-stock / low / medium / high), "
+                "and price distribution buckets. Use for overview/summary questions."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_offers_by_stock",
+            "description": (
+                "Filter active offers by stock quantity. "
+                "Offers with the same name are aggregated — stock is summed across all listings of the same product. "
+                "Use for questions like 'offers with less than 10 items', 'out of stock offers', 'high stock offers'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_stock": {
+                        "type": "integer",
+                        "description": "Return products with total stock ≤ this value (inclusive).",
+                    },
+                    "min_stock": {
+                        "type": "integer",
+                        "description": "Return products with total stock ≥ this value (inclusive).",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_offers_by_price",
+            "description": (
+                "Filter active offers by price (PLN). "
+                "Use for questions like 'offers below 50 zł', 'most expensive offers', 'offers above 500 zł'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_price": {
+                        "type": "number",
+                        "description": "Return offers with price ≤ this value (PLN).",
+                    },
+                    "min_price": {
+                        "type": "number",
+                        "description": "Return offers with price ≥ this value (PLN).",
+                    },
                 },
             },
         },

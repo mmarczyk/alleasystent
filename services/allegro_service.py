@@ -119,6 +119,8 @@ class AllegroService:
         self._orders_list_cache: _TTLCache = _TTLCache(ttl=60.0)
         # Invoice status per order — 2 min TTL
         self._invoice_cache: _TTLCache = _TTLCache(ttl=120.0)
+        # Full offer catalogue — 5 min TTL (stock/prices change infrequently)
+        self._all_offers_cache: _TTLCache = _TTLCache(ttl=300.0)
 
     @property
     def _device_code_file(self) -> str:
@@ -510,6 +512,27 @@ class AllegroService:
             params["name"] = name
         data = await self._get("/sale/offers", params=params)
         return data.get("offers", [])
+
+    async def get_all_offers(self, publication_status: str = "ACTIVE") -> list[dict[str, Any]]:
+        """Fetch every offer with pagination. Cached for 5 minutes."""
+        cached = self._all_offers_cache.get(publication_status)
+        if cached is not None:
+            return cached
+        all_offers: list[dict[str, Any]] = []
+        offset = 0
+        page_size = 50
+        while True:
+            page = await self.get_offers(
+                publication_status=publication_status,
+                limit=page_size,
+                offset=offset,
+            )
+            all_offers.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        self._all_offers_cache.set(publication_status, all_offers)
+        return all_offers
 
     async def get_offer(self, offer_id: str) -> dict[str, Any]:
         return await self._get(f"/sale/offers/{offer_id}")

@@ -9,6 +9,7 @@ to fetch/update data, and returns structured responses.
 
 import json
 import logging
+from collections import defaultdict
 from typing import Any
 
 from agents.allegro.allegro_tools import ALLEGRO_TOOLS
@@ -143,6 +144,32 @@ class AllegroAgent(BaseAgent):
     def _format_price(amount: float, currency: str = "PLN") -> str:
         return f"{amount:.2f}".replace(".", ",") + f" {currency}"
 
+    @staticmethod
+    def _offer_fields(offer: dict) -> tuple[str, str, float, str, int]:
+        """Extract (id, name, price, currency, stock) from raw offer dict."""
+        oid = offer.get("id", "?")
+        name = offer.get("name", "N/A")
+        price_data = (offer.get("sellingMode") or {}).get("price") or {}
+        price = float(price_data.get("amount") or 0)
+        currency = price_data.get("currency", "PLN")
+        stock = int((offer.get("stock") or {}).get("available") or 0)
+        return oid, name, price, currency, stock
+
+    @classmethod
+    def _aggregate_offers_by_name(cls, offers: list[dict]) -> list[dict]:
+        """Group offers by name (case-insensitive), summing stock. Returns list of aggregated dicts."""
+        groups: dict[str, dict] = defaultdict(lambda: {"ids": [], "name": "", "price": 0.0, "currency": "PLN", "total_stock": 0})
+        for offer in offers:
+            oid, name, price, currency, stock = cls._offer_fields(offer)
+            key = name.strip().lower()
+            g = groups[key]
+            g["ids"].append(oid)
+            g["name"] = name
+            g["price"] = price
+            g["currency"] = currency
+            g["total_stock"] += stock
+        return sorted(groups.values(), key=lambda g: g["total_stock"])
+
     @classmethod
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
         """Render a single order as a markdown bullet-point block."""
@@ -196,20 +223,121 @@ class AllegroAgent(BaseAgent):
             )
 
         if tool_name == "get_active_offers":
-            offers = await self._allegro.get_offers(
-                name=tool_input.get("name"),
-                limit=min(int(tool_input.get("limit", 10)), 50),
-            )
+            name_filter = tool_input.get("name")
+            if name_filter:
+                offers = await self._allegro.get_offers(name=name_filter, limit=50)
+            else:
+                offers = await self._allegro.get_all_offers()
             if not offers:
-                return "No active offers found."
-            lines = []
+                return "Brak aktywnych ofert."
+            lines = [f"Łącznie **{len(offers)}** aktywnych ofert:\n"]
             for o in offers:
-                price = o.get("sellingMode", {}).get("price", {})
-                stock = o.get("stock", {})
+                oid, name, price, currency, stock = self._offer_fields(o)
                 lines.append(
-                    f"Offer {o.get('id')} | {o.get('name', 'N/A')} | "
-                    f"Price: {price.get('amount')} {price.get('currency', 'PLN')} | "
-                    f"Stock: {stock.get('available', 'N/A')}"
+                    f"- **{name}** (ID: `{oid}`) — "
+                    f"{self._format_price(price, currency)} — "
+                    f"stan: **{stock} szt.**"
+                )
+            return "\n".join(lines)
+
+        if tool_name == "get_offers_summary":
+            offers = await self._allegro.get_all_offers()
+            if not offers:
+                return "Brak aktywnych ofert."
+            total = len(offers)
+            total_stock = 0
+            stock_buckets = {"0 szt.": 0, "1–9 szt.": 0, "10–49 szt.": 0, "50–199 szt.": 0, "200+ szt.": 0}
+            price_buckets = {"do 50 zł": 0, "50–200 zł": 0, "200–500 zł": 0, "500+ zł": 0}
+            for o in offers:
+                _, _, price, _, stock = self._offer_fields(o)
+                total_stock += stock
+                if stock == 0:
+                    stock_buckets["0 szt."] += 1
+                elif stock < 10:
+                    stock_buckets["1–9 szt."] += 1
+                elif stock < 50:
+                    stock_buckets["10–49 szt."] += 1
+                elif stock < 200:
+                    stock_buckets["50–199 szt."] += 1
+                else:
+                    stock_buckets["200+ szt."] += 1
+                if price < 50:
+                    price_buckets["do 50 zł"] += 1
+                elif price < 200:
+                    price_buckets["50–200 zł"] += 1
+                elif price < 500:
+                    price_buckets["200–500 zł"] += 1
+                else:
+                    price_buckets["500+ zł"] += 1
+            stock_lines = "\n".join(f"  - {k}: **{v}** ofert" for k, v in stock_buckets.items() if v)
+            price_lines = "\n".join(f"  - {k}: **{v}** ofert" for k, v in price_buckets.items() if v)
+            return (
+                f"**Podsumowanie ofert**\n\n"
+                f"Łącznie aktywnych ofert: **{total}**\n"
+                f"Łączny stan magazynowy: **{total_stock:,} szt.**\n\n"
+                f"**Stany magazynowe:**\n{stock_lines}\n\n"
+                f"**Ceny:**\n{price_lines}"
+            )
+
+        if tool_name == "query_offers_by_stock":
+            max_stock = tool_input.get("max_stock")
+            min_stock = tool_input.get("min_stock")
+            offers = await self._allegro.get_all_offers()
+            aggregated = self._aggregate_offers_by_name(offers)
+            results = []
+            for g in aggregated:
+                s = g["total_stock"]
+                if max_stock is not None and s > max_stock:
+                    continue
+                if min_stock is not None and s < min_stock:
+                    continue
+                results.append(g)
+            if not results:
+                return "Brak produktów spełniających podane kryteria stanów magazynowych."
+            label = []
+            if max_stock is not None:
+                label.append(f"≤ {max_stock} szt.")
+            if min_stock is not None:
+                label.append(f"≥ {min_stock} szt.")
+            header = f"Znaleziono **{len(results)}** produktów ({', '.join(label) or 'wszystkie'}):\n"
+            lines = [header]
+            for g in results:
+                ids_str = ", ".join(f"`{i}`" for i in g["ids"])
+                ofert_str = f"({len(g['ids'])} {'oferta' if len(g['ids']) == 1 else 'ofert'})" if len(g["ids"]) > 1 else ""
+                lines.append(
+                    f"- **{g['name']}** {ofert_str}— "
+                    f"stan łącznie: **{g['total_stock']} szt.** — "
+                    f"{self._format_price(g['price'], g['currency'])} — "
+                    f"ID: {ids_str}"
+                )
+            return "\n".join(lines)
+
+        if tool_name == "query_offers_by_price":
+            max_price = tool_input.get("max_price")
+            min_price = tool_input.get("min_price")
+            offers = await self._allegro.get_all_offers()
+            results = []
+            for o in offers:
+                oid, name, price, currency, stock = self._offer_fields(o)
+                if max_price is not None and price > max_price:
+                    continue
+                if min_price is not None and price < min_price:
+                    continue
+                results.append((oid, name, price, currency, stock))
+            if not results:
+                return "Brak ofert spełniających podane kryteria cenowe."
+            results.sort(key=lambda x: x[2])
+            label = []
+            if min_price is not None:
+                label.append(f"≥ {self._format_price(min_price)}")
+            if max_price is not None:
+                label.append(f"≤ {self._format_price(max_price)}")
+            header = f"Znaleziono **{len(results)}** ofert ({', '.join(label) or 'wszystkie'}):\n"
+            lines = [header]
+            for oid, name, price, currency, stock in results:
+                lines.append(
+                    f"- **{name}** — **{self._format_price(price, currency)}** — "
+                    f"stan: {stock} szt. — ID: `{oid}`"
                 )
             return "\n".join(lines)
 
