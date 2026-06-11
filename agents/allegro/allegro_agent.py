@@ -243,18 +243,19 @@ class AllegroAgent(BaseAgent):
         if tool_name == "get_active_offers":
             name_filter = tool_input.get("name")
             if name_filter:
-                offers = await self._allegro.get_offers(name=name_filter, limit=50)
+                raw, _ = await self._allegro.get_offers(name=name_filter, limit=50)
             else:
-                offers = await self._allegro.get_all_offers()
-            if not offers:
+                raw = await self._allegro.get_all_offers()
+            if not raw:
                 return "Brak aktywnych ofert."
-            lines = [f"Łącznie **{len(offers)}** aktywnych ofert:\n"]
-            for o in offers:
-                oid, name, price, currency, stock = self._offer_fields(o)
+            aggregated = self._aggregate_offers_by_name(raw)
+            lines = [f"Łącznie **{len(raw)}** ofert / **{len(aggregated)}** unikalnych produktów:\n"]
+            for g in sorted(aggregated, key=lambda x: x["name"].lower()):
+                ids_str = ", ".join(f"`{i}`" for i in g["ids"])
+                price_str = self._format_price(g["price"], g["currency"])
                 lines.append(
-                    f"- **{name}** (ID: `{oid}`) — "
-                    f"{self._format_price(price, currency)} — "
-                    f"stan: **{stock} szt.**"
+                    f"- **{g['name']}** — {price_str} — "
+                    f"stan: **{g['total_stock']} szt.** — ID: {ids_str}"
                 )
             return "\n".join(lines)
 

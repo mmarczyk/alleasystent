@@ -503,7 +503,8 @@ class AllegroService:
         name: str | None = None,
         limit: int = 20,
         offset: int = 0,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Returns (offers, totalCount)."""
         params: dict[str, Any] = {
             "publication.status": publication_status,
             "limit": limit,
@@ -512,7 +513,7 @@ class AllegroService:
         if name:
             params["name"] = name
         data = await self._get("/sale/offers", params=params)
-        return data.get("offers", [])
+        return data.get("offers", []), int(data.get("totalCount", 0))
 
     async def get_all_offers(self, publication_status: str = "ACTIVE") -> list[dict[str, Any]]:
         """Fetch every offer with pagination. Cached for 5 minutes."""
@@ -522,15 +523,21 @@ class AllegroService:
         all_offers: list[dict[str, Any]] = []
         offset = 0
         page_size = 50
-        while True:
-            page = await self.get_offers(
+        # First page tells us totalCount
+        page, total_count = await self.get_offers(
+            publication_status=publication_status,
+            limit=page_size,
+            offset=0,
+        )
+        all_offers.extend(page)
+        offset = page_size
+        while offset < total_count:
+            page, _ = await self.get_offers(
                 publication_status=publication_status,
                 limit=page_size,
                 offset=offset,
             )
             all_offers.extend(page)
-            if len(page) < page_size:
-                break
             offset += page_size
         self._all_offers_cache.set(publication_status, all_offers)
         return all_offers

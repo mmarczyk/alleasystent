@@ -241,7 +241,7 @@ async def index_allegro_offers() -> dict:
 
     allegro = AllegroService()
     indexer = DocumentIndexer()
-    offers = await allegro.get_offers(limit=50)
+    offers, _ = await allegro.get_offers(limit=50)
     count = await indexer.index_allegro_offers(offers)
     return {"indexed_offers": count}
 
