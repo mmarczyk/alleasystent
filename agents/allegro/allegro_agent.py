@@ -246,9 +246,11 @@ class AllegroAgent(BaseAgent):
                 raw, _ = await self._allegro.get_offers(name=name_filter, limit=50)
             else:
                 raw = await self._allegro.get_all_offers()
+            logger.info("get_active_offers: %d raw offers fetched", len(raw))
             if not raw:
                 return "Brak aktywnych ofert."
             aggregated = self._aggregate_offers_by_name(raw)
+            logger.info("get_active_offers: %d unique products after name aggregation", len(aggregated))
             lines = [f"Łącznie **{len(raw)}** ofert / **{len(aggregated)}** unikalnych produktów:\n"]
             for g in sorted(aggregated, key=lambda x: x["name"].lower()):
                 ids_str = ", ".join(f"`{i}`" for i in g["ids"])
@@ -261,6 +263,7 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_offers_summary":
             offers = await self._allegro.get_all_offers()
+            logger.info("get_offers_summary: %d raw offers fetched", len(offers))
             if not offers:
                 return "Brak aktywnych ofert."
             total = len(offers)
@@ -302,7 +305,9 @@ class AllegroAgent(BaseAgent):
             max_stock = tool_input.get("max_stock")
             min_stock = tool_input.get("min_stock")
             offers = await self._allegro.get_all_offers()
+            logger.info("query_offers_by_stock: %d raw offers, max_stock=%s min_stock=%s", len(offers), max_stock, min_stock)
             aggregated = self._aggregate_offers_by_name(offers)
+            logger.info("query_offers_by_stock: %d unique products after aggregation", len(aggregated))
             results = []
             for g in aggregated:
                 s = g["total_stock"]
@@ -311,6 +316,7 @@ class AllegroAgent(BaseAgent):
                 if min_stock is not None and s < min_stock:
                     continue
                 results.append(g)
+            logger.info("query_offers_by_stock: %d products match the stock filter", len(results))
             if not results:
                 return "Brak produktów spełniających podane kryteria stanów magazynowych."
             label = []

@@ -522,6 +522,7 @@ class AllegroService:
         """Fetch every offer with pagination. Cached for 5 minutes."""
         cached = self._all_offers_cache.get(publication_status)
         if cached is not None:
+            logger.info("get_all_offers: returning %d offers from cache", len(cached))
             return cached
         all_offers: list[dict[str, Any]] = []
         page_size = 50
@@ -531,8 +532,12 @@ class AllegroService:
             offset=0,
         )
         all_offers.extend(page)
+        logger.info(
+            "get_all_offers: page 1 → %d offers, API total_count=%d (mode=%s)",
+            len(page), total_count, "count" if total_count else "fallback",
+        )
         if total_count == 0:
-            # totalCount not available — fall back to page-size heuristic
+            page_num = 2
             while len(page) == page_size:
                 page, _ = await self.get_offers(
                     publication_status=publication_status,
@@ -540,8 +545,13 @@ class AllegroService:
                     offset=len(all_offers),
                 )
                 all_offers.extend(page)
+                logger.info("get_all_offers: page %d → %d offers (running total: %d)", page_num, len(page), len(all_offers))
+                page_num += 1
         else:
+            pages_needed = -(-total_count // page_size)  # ceiling div
+            logger.info("get_all_offers: %d total offers, %d pages needed", total_count, pages_needed)
             offset = page_size
+            page_num = 2
             while offset < total_count:
                 page, _ = await self.get_offers(
                     publication_status=publication_status,
@@ -549,7 +559,10 @@ class AllegroService:
                     offset=offset,
                 )
                 all_offers.extend(page)
+                logger.info("get_all_offers: page %d/%d → %d offers (running total: %d)", page_num, pages_needed, len(page), len(all_offers))
                 offset += page_size
+                page_num += 1
+        logger.info("get_all_offers: done — %d offers fetched total", len(all_offers))
         self._all_offers_cache.set(publication_status, all_offers)
         return all_offers
 
