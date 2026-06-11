@@ -402,31 +402,60 @@ class AllegroAgent(BaseAgent):
                 f"  {i+1}. **{name}** — {self._format_price(rev)}"
                 for i, (name, rev) in enumerate(top)
             )
-            # Billing breakdown
-            fee_by_type: dict[str, float] = {}
-            total_fees = 0.0
-            total_refunds = 0.0
-            for e in billing_entries:
-                amount = float((e.get("value") or {}).get("amount", 0) or 0)
-                type_desc = (e.get("type") or {}).get("description", "Inne")
-                if amount < 0:
-                    total_fees += abs(amount)
-                    fee_by_type[type_desc] = fee_by_type.get(type_desc, 0) + abs(amount)
-                elif amount > 0:
-                    total_refunds += amount
-            net_profit = total_revenue - total_fees + total_refunds
-            billing_lines = "\n".join(
-                f"  - {desc}: {self._format_price(amt)}"
-                for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
-            )
             billing_section = ""
             if billing_entries:
+                # Group billing entries by order ID
+                fees_per_order: dict[str, float] = {}   # order_id → total fees (costs, positive value)
+                refunds_per_order: dict[str, float] = {}  # order_id → total refunds/credits
+                fee_by_type: dict[str, float] = {}
+                total_fees = 0.0
+                total_refunds = 0.0
+                for e in billing_entries:
+                    amount = float((e.get("value") or {}).get("amount", 0) or 0)
+                    type_desc = (e.get("type") or {}).get("description", "Inne")
+                    order_id = (e.get("order") or {}).get("id", "")
+                    if amount < 0:
+                        total_fees += abs(amount)
+                        fee_by_type[type_desc] = fee_by_type.get(type_desc, 0) + abs(amount)
+                        if order_id:
+                            fees_per_order[order_id] = fees_per_order.get(order_id, 0) + abs(amount)
+                    elif amount > 0:
+                        total_refunds += amount
+                        if order_id:
+                            refunds_per_order[order_id] = refunds_per_order.get(order_id, 0) + amount
+                net_profit = total_revenue - total_fees + total_refunds
+                billing_lines = "\n".join(
+                    f"  - {desc}: {self._format_price(amt)}"
+                    for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
+                )
+                # Per-order table (sorted by date)
+                order_rows = []
+                for o in sorted(orders, key=lambda x: x.paid_at or x.created_at):
+                    oid = o.order_id
+                    rev = o.total_price
+                    fees = fees_per_order.get(oid, 0.0)
+                    refunds = refunds_per_order.get(oid, 0.0)
+                    net = rev - fees + refunds
+                    date_str = (o.paid_at or o.created_at)[:10]
+                    buyer = o.buyer_login[:15] if o.buyer_login else "—"
+                    items_short = ", ".join(
+                        f"{li.offer_name[:25]}×{li.quantity}" for li in o.line_items[:2]
+                    ) + ("…" if len(o.line_items) > 2 else "")
+                    order_rows.append(
+                        f"  {date_str} | {buyer:<15} | przychód: {self._format_price(rev)} | "
+                        f"opłaty: {self._format_price(fees)} | zysk: {self._format_price(net)}"
+                        + (f"\n    {items_short}" if items_short else "")
+                    )
+                per_order_section = ""
+                if order_rows:
+                    per_order_section = "\n\n**Zestawienie per zamówienie:**\n" + "\n".join(order_rows)
                 billing_section = (
                     f"\n\n**Koszty Allegro** ({date_from[:10]} – {date_to[:10]})\n"
                     f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
                     + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
                     + f"\n**Zysk netto (przychód − opłaty): {self._format_price(net_profit)}**"
+                    + per_order_section
                 )
             elif billing_error:
                 billing_section = (
