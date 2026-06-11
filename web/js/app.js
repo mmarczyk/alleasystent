@@ -25,18 +25,16 @@ async function checkAuth() {
       return false;
     }
     const user = await res.json();
-    // Store user info, update UI
     window._currentUser = user;
-    // Hide overlay if somehow visible
-    const overlay = document.getElementById('login-overlay');
-    if (overlay) overlay.style.display = 'none';
-    // Show user info in sidebar if element exists
+    document.getElementById('login-overlay').style.display = 'none';
+    document.getElementById('app').style.display = '';
     const userEl = document.getElementById('user-info');
     if (userEl) {
       userEl.innerHTML = `<span style="font-size:1.1rem">🛒</span> <span style="overflow:hidden;text-overflow:ellipsis;font-weight:500">${user.name}</span>`;
     }
     return true;
   } catch (e) {
+    document.getElementById('login-overlay').style.display = 'flex';
     return false;
   }
 }
