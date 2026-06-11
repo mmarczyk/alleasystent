@@ -513,7 +513,10 @@ class AllegroService:
         if name:
             params["name"] = name
         data = await self._get("/sale/offers", params=params)
-        return data.get("offers", []), int(data.get("totalCount", 0))
+        offers = data.get("offers", [])
+        # Allegro uses "count" (total matching, not page count) in this endpoint
+        total = int(data.get("count") or data.get("totalCount") or 0)
+        return offers, total
 
     async def get_all_offers(self, publication_status: str = "ACTIVE") -> list[dict[str, Any]]:
         """Fetch every offer with pagination. Cached for 5 minutes."""
@@ -521,24 +524,32 @@ class AllegroService:
         if cached is not None:
             return cached
         all_offers: list[dict[str, Any]] = []
-        offset = 0
         page_size = 50
-        # First page tells us totalCount
         page, total_count = await self.get_offers(
             publication_status=publication_status,
             limit=page_size,
             offset=0,
         )
         all_offers.extend(page)
-        offset = page_size
-        while offset < total_count:
-            page, _ = await self.get_offers(
-                publication_status=publication_status,
-                limit=page_size,
-                offset=offset,
-            )
-            all_offers.extend(page)
-            offset += page_size
+        if total_count == 0:
+            # totalCount not available — fall back to page-size heuristic
+            while len(page) == page_size:
+                page, _ = await self.get_offers(
+                    publication_status=publication_status,
+                    limit=page_size,
+                    offset=len(all_offers),
+                )
+                all_offers.extend(page)
+        else:
+            offset = page_size
+            while offset < total_count:
+                page, _ = await self.get_offers(
+                    publication_status=publication_status,
+                    limit=page_size,
+                    offset=offset,
+                )
+                all_offers.extend(page)
+                offset += page_size
         self._all_offers_cache.set(publication_status, all_offers)
         return all_offers
 
