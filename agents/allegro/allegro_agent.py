@@ -371,10 +371,18 @@ class AllegroAgent(BaseAgent):
             date_from = tool_input["date_from"]
             date_to = tool_input["date_to"]
             logger.info("get_sales_summary: fetching orders and billing %s → %s", date_from, date_to)
-            orders, billing_entries = await asyncio.gather(
+            results = await asyncio.gather(
                 self._allegro.get_all_paid_orders_in_period(date_from, date_to),
                 self._allegro.get_billing_entries_in_period(date_from, date_to),
+                return_exceptions=True,
             )
+            orders = results[0] if not isinstance(results[0], BaseException) else []
+            billing_entries = results[1] if not isinstance(results[1], BaseException) else []
+            billing_error = results[1] if isinstance(results[1], BaseException) else None
+            if isinstance(results[0], BaseException):
+                raise results[0]
+            if billing_error:
+                logger.warning("get_sales_summary: billing fetch failed (%s), continuing without cost data", billing_error)
             logger.info(
                 "get_sales_summary: %d paid orders, %d billing entries in period",
                 len(orders), len(billing_entries),
@@ -419,6 +427,11 @@ class AllegroAgent(BaseAgent):
                     + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
                     + f"\n**Zysk netto (przychód − opłaty): {self._format_price(net_profit)}**"
+                )
+            elif billing_error:
+                billing_section = (
+                    "\n\n⚠️ Dane o kosztach Allegro niedostępne (brak uprawnień do rozliczeń). "
+                    "Zaloguj się ponownie przez /allegro/login, aby uzyskać dostęp do billing."
                 )
             return (
                 f"**Podsumowanie sprzedaży** ({date_from[:10]} – {date_to[:10]})\n\n"
@@ -478,14 +491,23 @@ class AllegroAgent(BaseAgent):
         if tool_name == "get_billing_summary":
             date_from = tool_input.get("date_from")
             date_to = tool_input.get("date_to")
-            if date_from and date_to:
-                entries = await self._allegro.get_billing_entries_in_period(date_from, date_to)
-                period_label = f"{date_from[:10]} – {date_to[:10]}"
-            else:
-                entries = await self._allegro.get_billing_entries(
-                    limit=min(int(tool_input.get("limit", 50)), 100)
-                )
-                period_label = "ostatnie operacje"
+            try:
+                if date_from and date_to:
+                    entries = await self._allegro.get_billing_entries_in_period(date_from, date_to)
+                    period_label = f"{date_from[:10]} – {date_to[:10]}"
+                else:
+                    entries = await self._allegro.get_billing_entries(
+                        limit=min(int(tool_input.get("limit", 50)), 100)
+                    )
+                    period_label = "ostatnie operacje"
+            except AllegroAPIError as exc:
+                if "403" in str(exc):
+                    return (
+                        "Brak dostępu do danych rozliczeniowych (błąd 403). "
+                        "Token OAuth nie zawiera uprawnienia `allegro:api:billing:read`. "
+                        "Zaloguj się ponownie przez /allegro/login, aby odświeżyć token z pełnymi uprawnieniami."
+                    )
+                raise
             if not entries:
                 return f"Brak wpisów rozliczeniowych ({period_label})."
             fee_by_type: dict[str, float] = {}
