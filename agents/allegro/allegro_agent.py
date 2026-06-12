@@ -41,14 +41,16 @@ class AllegroAgent(BaseAgent):
         "When showing prices, always include the PLN currency. "
         "Respond in the same language as the user's question (Polish or English). "
         "Do not make up or guess any order IDs or prices — always retrieve them via tools. "
-        "IMPORTANT routing rules for billing/cost questions: "
-        "1) Specific order ('koszty zamówienia X', 'prowizja dla tego zamówienia', 'wpisy billing dla zamówienia') "
-        "→ ALWAYS use get_order_details (fetches by order.id, shows individual entries per item). "
-        "2) Period summary ('koszty w tym miesiącu', 'ile zarobiłem w czerwcu', 'zarobek za tydzień') "
-        "→ use get_sales_summary. "
-        "3) Period billing only ('opłaty w czerwcu', 'prowizje w tym miesiącu') "
-        "→ use get_billing_summary. "
-        "NEVER mix billing entries across orders — get_billing_summary by date covers ALL orders."
+        "BILLING ENTRIES — CRITICAL RULE: When a tool returns billing entries, you MUST list "
+        "EVERY entry as a separate line EXACTLY as received. NEVER group, aggregate, merge, or "
+        "summarize entries by type. Each 'Prowizja od sprzedaży' for a different product is a "
+        "SEPARATE entry and must be shown as a separate row. Showing 2 rows when there are 5 "
+        "entries is WRONG. If the tool says '5 wpisów', show 5 rows, not 2. "
+        "BILLING ROUTING: "
+        "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
+        "2) Period earnings/profit → get_sales_summary. "
+        "3) Period billing only → get_billing_summary. "
+        "NEVER use get_billing_summary for a specific order — it covers ALL orders in date range."
     )
 
     def __init__(self, user_id: str | None = None):
@@ -250,24 +252,27 @@ class AllegroAgent(BaseAgent):
                 total_fees = 0.0
                 total_credits = 0.0
                 fee_lines = []
-                for e in billing_entries:
+                for i, e in enumerate(billing_entries, 1):
                     amount = float((e.get("value") or {}).get("amount", 0) or 0)
                     desc = (e.get("type") or {}).get("description", "Inne")
                     offer_name = (e.get("offer") or {}).get("name", "")
                     occurred = e.get("occurredAt", "")[:10]
-                    offer_part = f" [{offer_name}]" if offer_name else ""
-                    sign = "+" if amount > 0 else ""
-                    fee_lines.append(f"  {occurred} | {desc}{offer_part}: {sign}{amount:.2f} PLN")
+                    offer_part = f" — {offer_name}" if offer_name else ""
+                    sign = "+" if amount > 0 else "-"
+                    fee_lines.append(
+                        f"  Wpis {i}/{len(billing_entries)}: {occurred} | {desc}{offer_part} | {sign}{abs(amount):.2f} PLN"
+                    )
                     if amount < 0:
                         total_fees += abs(amount)
                     else:
                         total_credits += amount
                 net = order.total_price - total_fees + total_credits
                 billing_str = (
-                    f"\nKoszty Allegro ({len(billing_entries)} wpisów):\n" + "\n".join(fee_lines) +
-                    f"\n  — Łącznie opłaty: -{total_fees:.2f} PLN" +
-                    (f", zwroty: +{total_credits:.2f} PLN" if total_credits else "") +
-                    f"\n  — Zysk netto: {net:.2f} PLN"
+                    f"\n[BILLING: {len(billing_entries)} osobnych wpisów — wyświetl każdy wiersz oddzielnie]\n"
+                    + "\n".join(fee_lines)
+                    + f"\n  SUMA OPŁAT: -{total_fees:.2f} PLN"
+                    + (f" | ZWROTY: +{total_credits:.2f} PLN" if total_credits else "")
+                    + f" | ZYSK NETTO: {net:.2f} PLN"
                 )
             return (
                 f"Order ID: {order.order_id}\n"
