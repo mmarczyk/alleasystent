@@ -376,21 +376,44 @@ class AllegroAgent(BaseAgent):
             date_from = tool_input["date_from"]
             date_to = tool_input["date_to"]
             logger.info("get_sales_summary: fetching orders and billing %s → %s", date_from, date_to)
+            # Billing window is wider: delivery labels are printed after payment,
+            # so billing entries (occurredAt) may fall up to ~14 days after date_to.
+            from datetime import datetime, timedelta, timezone
+            dt_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+            billing_date_to = (dt_to + timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
             results = await asyncio.gather(
                 self._allegro.get_all_paid_orders_in_period(date_from, date_to),
-                self._allegro.get_billing_entries_in_period(date_from, date_to),
+                self._allegro.get_billing_entries_in_period(date_from, billing_date_to),
                 return_exceptions=True,
             )
             orders = results[0] if not isinstance(results[0], BaseException) else []
-            billing_entries = results[1] if not isinstance(results[1], BaseException) else []
+            all_billing = results[1] if not isinstance(results[1], BaseException) else []
             billing_error = results[1] if isinstance(results[1], BaseException) else None
             if isinstance(results[0], BaseException):
                 raise results[0]
             if billing_error:
                 logger.warning("get_sales_summary: billing fetch failed (%s), continuing without cost data", billing_error)
+            # Keep only billing entries that belong to our orders (matched by order.id)
+            order_ids = {o.order_id for o in orders}
+            billing_entries = [
+                e for e in all_billing
+                if (e.get("order") or {}).get("id") in order_ids
+                or not (e.get("order") or {}).get("id")  # entries without order ref (subscriptions etc.)
+            ]
+            # Entries without order.id but within the strict period (subscriptions, listing fees)
+            billing_entries_no_order = [
+                e for e in all_billing
+                if not (e.get("order") or {}).get("id")
+                and date_from <= e.get("occurredAt", "") <= date_to
+            ]
+            billing_entries_with_order = [
+                e for e in all_billing
+                if (e.get("order") or {}).get("id") in order_ids
+            ]
+            billing_entries = billing_entries_with_order + billing_entries_no_order
             logger.info(
-                "get_sales_summary: %d paid orders, %d billing entries in period",
-                len(orders), len(billing_entries),
+                "get_sales_summary: %d paid orders, %d billing entries (%d matched by order.id, %d no-order in period)",
+                len(orders), len(billing_entries), len(billing_entries_with_order), len(billing_entries_no_order),
             )
             if not orders:
                 return f"Brak opłaconych zamówień w okresie {date_from[:10]} – {date_to[:10]}."
@@ -527,7 +550,16 @@ class AllegroAgent(BaseAgent):
             date_to = tool_input.get("date_to")
             try:
                 if date_from and date_to:
-                    entries = await self._allegro.get_billing_entries_in_period(date_from, date_to)
+                    from datetime import datetime, timedelta
+                    dt_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+                    billing_date_to = (dt_to + timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    entries = await self._allegro.get_billing_entries_in_period(date_from, billing_date_to)
+                    # For entries with order.id, keep all; for no-order entries keep only in strict period
+                    entries = [
+                        e for e in entries
+                        if (e.get("order") or {}).get("id")
+                        or date_from <= e.get("occurredAt", "") <= date_to
+                    ]
                     period_label = f"{date_from[:10]} – {date_to[:10]}"
                 else:
                     entries = await self._allegro.get_billing_entries(
