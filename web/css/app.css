@@ -76,7 +76,7 @@ html, body {
 .form-group select {
   background: var(--bg); border: 1px solid var(--border);
   border-radius: var(--radius-sm); color: var(--text);
-  padding: .6rem .75rem; font-size: .95rem; outline: none;
+  padding: .6rem .75rem; font-size: 16px; outline: none;
   transition: border-color .2s;
 }
 .form-group input:focus,
@@ -324,7 +324,7 @@ select option { background: var(--bg2); }
 
 #user-input {
   flex: 1; background: none; border: none; color: var(--text);
-  font-size: .95rem; resize: none; outline: none;
+  font-size: 16px; resize: none; outline: none;
   max-height: 180px; overflow-y: auto; line-height: 1.5;
   font-family: inherit;
 }
