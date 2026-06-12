@@ -30,7 +30,6 @@ html, body {
   font-family: 'Segoe UI', system-ui, sans-serif;
   font-size: 15px; line-height: 1.6;
   -webkit-tap-highlight-color: transparent;
-  overscroll-behavior: none;
 }
 
 /* ── UTILS ──────────────────────────────────────── */
@@ -111,10 +110,9 @@ select option { background: var(--bg2); }
 /* ── APP LAYOUT ──────────────────────────────────── */
 .app {
   display: flex;
-  position: fixed;          /* anchored — never scrolls when iOS shifts page for keyboard */
-  inset: 0;
-  padding-bottom: var(--kb-h, 0px); /* keyboard height pushes content up */
-  box-sizing: border-box;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  bottom: var(--kb-h, 0px);  /* shrinks away from keyboard */
   overflow: hidden;
 }
 
@@ -186,7 +184,10 @@ select option { background: var(--bg2); }
 
 /* ── MESSAGES ────────────────────────────────────── */
 .messages {
-  flex: 1; overflow-y: auto;
+  flex: 1;
+  overflow-y: scroll;              /* 'scroll' not 'auto' — more reliable on iOS */
+  -webkit-overflow-scrolling: touch; /* smooth momentum scroll on older iOS */
+  touch-action: pan-y;             /* ensure vertical swipe is recognized as scroll */
   padding: 1.5rem 1rem;
   display: flex; flex-direction: column;
   gap: .75rem;

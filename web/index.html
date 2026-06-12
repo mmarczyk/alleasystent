@@ -13,21 +13,37 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script>
-    // iOS Safari keyboard fix: track keyboard height as (maxSeenHeight - currentHeight)
-    // and push app content up via --kb-h. The app itself uses position:fixed so it never
-    // scrolls with the page when iOS shifts content for the keyboard.
     (function () {
+      // 1. Keyboard height tracking — .app bottom follows the visual viewport
       var vp = window.visualViewport;
       var maxH = window.innerHeight;
-      function update() {
+      function updateKb() {
         var h = vp ? vp.height : window.innerHeight;
         if (h > maxH) maxH = h;
-        var kbH = Math.max(0, maxH - h);
-        document.documentElement.style.setProperty('--kb-h', kbH + 'px');
+        document.documentElement.style.setProperty('--kb-h', Math.max(0, maxH - h) + 'px');
       }
-      update();
-      if (vp) vp.addEventListener('resize', update);
-      window.addEventListener('resize', update);
+      updateKb();
+      if (vp) vp.addEventListener('resize', updateKb);
+      window.addEventListener('resize', updateKb);
+
+      // 2. Prevent iOS Safari autozoom on input focus.
+      // iOS zooms in when an input gains focus; it does not reliably undo the
+      // zoom afterwards. Setting maximum-scale=1 while focused blocks the zoom;
+      // removing it on blur restores normal pinch-zoom for everything else.
+      var vpMeta = document.querySelector('meta[name=viewport]');
+      var vpNormal  = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
+      var vpNoZoom  = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
+      document.addEventListener('focusin', function (e) {
+        if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
+          vpMeta.setAttribute('content', vpNoZoom);
+        }
+      });
+      document.addEventListener('focusout', function (e) {
+        if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
+          // Delay so iOS finishes its keyboard animation before we allow zoom again
+          setTimeout(function () { vpMeta.setAttribute('content', vpNormal); }, 300);
+        }
+      });
     })();
   </script>
 </head>

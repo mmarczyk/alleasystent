@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v7';
+const CACHE = 'alleasystent-v8';
 const STATIC = [
   './manifest.json',
   './css/app.css', './js/app.js'
