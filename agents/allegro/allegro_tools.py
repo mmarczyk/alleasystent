@@ -48,7 +48,12 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "get_order_details",
             "description": (
                 "Get full details of a specific Allegro order: items, buyer address, "
-                "delivery info, and payment status."
+                "delivery info, payment status, AND all Allegro billing entries for that order "
+                "(individual commission per item, delivery fees, any credits). "
+                "USE THIS for any question about costs/fees/profit of a SPECIFIC order — "
+                "e.g. 'jakie koszty miałem przy tym zamówieniu', 'podaj wpisy billing dla zamówienia X', "
+                "'ile prowizji zapłaciłem za to zamówienie'. "
+                "Uses order.id filter so results are exact — never mixes entries from other orders."
             ),
             "parameters": {
                 "type": "object",
@@ -220,12 +225,13 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_billing_summary",
             "description": (
-                "Get Allegro billing/fee entries with cost and refund breakdown. "
-                "Use for questions about Allegro costs, fees, commissions, promotions, or refunds. "
-                "When a time period is specified (or can be inferred — see get_sales_summary rules), "
-                "pass date_from/date_to to filter entries. "
-                "Without dates, returns the most recent entries. "
-                "Returns: total fees, total refunds/credits, net cost, and breakdown by fee type."
+                "Get Allegro billing entries aggregated across a TIME PERIOD (all orders combined). "
+                "Use ONLY for period-level questions: 'jakie koszty miałem w tym miesiącu', "
+                "'ile prowizji zapłaciłem w czerwcu', 'ostatnie opłaty na koncie'. "
+                "DO NOT use for a specific order — use get_order_details instead "
+                "(it filters by order.id and shows exact per-item entries). "
+                "When a period is given, pass date_from/date_to. Without dates, returns recent entries. "
+                "Returns: total fees, refunds/credits, net cost, breakdown by fee type, individual entries."
             ),
             "parameters": {
                 "type": "object",

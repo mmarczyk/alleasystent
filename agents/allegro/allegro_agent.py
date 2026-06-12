@@ -41,11 +41,14 @@ class AllegroAgent(BaseAgent):
         "When showing prices, always include the PLN currency. "
         "Respond in the same language as the user's question (Polish or English). "
         "Do not make up or guess any order IDs or prices — always retrieve them via tools. "
-        "IMPORTANT: For ANY question about earnings, revenue, profit, Allegro fees, commissions, "
-        "costs per order, or net profit — ALWAYS use the get_sales_summary tool. "
-        "This includes Polish phrases like: 'koszty dla zamówień', 'prowizja per zamówienie', "
-        "'ile zarobiłem', 'jakie mam koszty', 'pokaż opłaty', 'zysk netto'. "
-        "The get_sales_summary tool CAN show per-order cost breakdown — never say it cannot."
+        "IMPORTANT routing rules for billing/cost questions: "
+        "1) Specific order ('koszty zamówienia X', 'prowizja dla tego zamówienia', 'wpisy billing dla zamówienia') "
+        "→ ALWAYS use get_order_details (fetches by order.id, shows individual entries per item). "
+        "2) Period summary ('koszty w tym miesiącu', 'ile zarobiłem w czerwcu', 'zarobek za tydzień') "
+        "→ use get_sales_summary. "
+        "3) Period billing only ('opłaty w czerwcu', 'prowizje w tym miesiącu') "
+        "→ use get_billing_summary. "
+        "NEVER mix billing entries across orders — get_billing_summary by date covers ALL orders."
     )
 
     def __init__(self, user_id: str | None = None):
@@ -250,18 +253,21 @@ class AllegroAgent(BaseAgent):
                 for e in billing_entries:
                     amount = float((e.get("value") or {}).get("amount", 0) or 0)
                     desc = (e.get("type") or {}).get("description", "Inne")
+                    offer_name = (e.get("offer") or {}).get("name", "")
+                    occurred = e.get("occurredAt", "")[:10]
+                    offer_part = f" [{offer_name}]" if offer_name else ""
                     sign = "+" if amount > 0 else ""
-                    fee_lines.append(f"  - {desc}: {sign}{amount:.2f} PLN")
+                    fee_lines.append(f"  {occurred} | {desc}{offer_part}: {sign}{amount:.2f} PLN")
                     if amount < 0:
                         total_fees += abs(amount)
                     else:
                         total_credits += amount
                 net = order.total_price - total_fees + total_credits
                 billing_str = (
-                    f"\nKoszty Allegro:\n" + "\n".join(fee_lines) +
-                    f"\n  Łącznie opłaty: -{total_fees:.2f} PLN" +
+                    f"\nKoszty Allegro ({len(billing_entries)} wpisów):\n" + "\n".join(fee_lines) +
+                    f"\n  — Łącznie opłaty: -{total_fees:.2f} PLN" +
                     (f", zwroty: +{total_credits:.2f} PLN" if total_credits else "") +
-                    f"\n  Zysk netto: {net:.2f} PLN"
+                    f"\n  — Zysk netto: {net:.2f} PLN"
                 )
             return (
                 f"Order ID: {order.order_id}\n"
