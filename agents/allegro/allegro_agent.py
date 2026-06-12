@@ -224,7 +224,14 @@ class AllegroAgent(BaseAgent):
             return "\n\n".join(self._order_block(o) for o in orders)
 
         if tool_name == "get_order_details":
-            order = await self._allegro.get_order(tool_input["order_id"])
+            order, billing_entries = await asyncio.gather(
+                self._allegro.get_order(tool_input["order_id"]),
+                self._allegro.get_billing_entries_for_order(tool_input["order_id"]),
+                return_exceptions=True,
+            )
+            if isinstance(order, BaseException):
+                raise order
+            billing_entries = billing_entries if not isinstance(billing_entries, BaseException) else []
             items_str = "\n".join(
                 f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} × {li.price} {li.currency}"
                 for li in order.line_items
@@ -235,6 +242,27 @@ class AllegroAgent(BaseAgent):
                 self._dig(d, "smart", "trackingCode", default=None)
                 or self._dig(d, "trackingCode", default="N/A")
             )
+            billing_str = ""
+            if billing_entries:
+                total_fees = 0.0
+                total_credits = 0.0
+                fee_lines = []
+                for e in billing_entries:
+                    amount = float((e.get("value") or {}).get("amount", 0) or 0)
+                    desc = (e.get("type") or {}).get("description", "Inne")
+                    sign = "+" if amount > 0 else ""
+                    fee_lines.append(f"  - {desc}: {sign}{amount:.2f} PLN")
+                    if amount < 0:
+                        total_fees += abs(amount)
+                    else:
+                        total_credits += amount
+                net = order.total_price - total_fees + total_credits
+                billing_str = (
+                    f"\nKoszty Allegro:\n" + "\n".join(fee_lines) +
+                    f"\n  Łącznie opłaty: -{total_fees:.2f} PLN" +
+                    (f", zwroty: +{total_credits:.2f} PLN" if total_credits else "") +
+                    f"\n  Zysk netto: {net:.2f} PLN"
+                )
             return (
                 f"Order ID: {order.order_id}\n"
                 f"Buyer: {order.buyer_login} ({order.buyer_email})\n"
@@ -242,8 +270,9 @@ class AllegroAgent(BaseAgent):
                 f"Total: {order.total_price} {order.currency}\n"
                 f"Created: {order.created_at}\n"
                 f"Delivery method: {method_name}\n"
-                f"Delivery status: {tracking}\n"
+                f"Tracking: {tracking}\n"
                 f"Items:\n{items_str}"
+                f"{billing_str}"
             )
 
         if tool_name == "get_active_offers":
