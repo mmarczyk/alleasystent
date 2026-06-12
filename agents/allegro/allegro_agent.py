@@ -216,6 +216,7 @@ class AllegroAgent(BaseAgent):
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
     async def _dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
+        logger.info("DEBUG _dispatch: tool=%s input=%s", tool_name, tool_input)
         if tool_name == "get_orders":
             orders = await self._allegro.get_orders(
                 status=tool_input.get("status"),
@@ -229,6 +230,7 @@ class AllegroAgent(BaseAgent):
             return "\n\n".join(self._order_block(o) for o in orders)
 
         if tool_name == "get_order_details":
+            logger.info("DEBUG get_order_details called for order_id=%s", tool_input.get("order_id"))
             order, billing_entries = await asyncio.gather(
                 self._allegro.get_order(tool_input["order_id"]),
                 self._allegro.get_billing_entries_for_order(tool_input["order_id"]),

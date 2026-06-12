@@ -665,11 +665,25 @@ class AllegroService:
             params = {"order.id": order_id, "limit": page_size, "offset": offset}
             data = await self._get("/billing/billing-entries", params=params)
             entries = data.get("billingEntries", [])
+            logger.info(
+                "get_billing_entries_for_order %s offset=%d: API returned %d entries, raw keys: %s",
+                order_id, offset, len(entries),
+                list(data.keys()),
+            )
+            for idx, e in enumerate(entries):
+                logger.info(
+                    "  billing[%d]: occurredAt=%s type=%s offer=%s amount=%s",
+                    idx,
+                    e.get("occurredAt", "")[:10],
+                    (e.get("type") or {}).get("description", "?"),
+                    (e.get("offer") or {}).get("name", "—"),
+                    (e.get("value") or {}).get("amount", "?"),
+                )
             all_entries.extend(entries)
             if len(entries) < page_size:
                 break
             offset += page_size
-        logger.info("get_billing_entries_for_order %s: %d entries", order_id, len(all_entries))
+        logger.info("get_billing_entries_for_order %s TOTAL: %d entries", order_id, len(all_entries))
         return all_entries
 
     async def get_billing_entries_in_period(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
