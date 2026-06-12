@@ -14,35 +14,36 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script>
     (function () {
-      // 1. Keyboard height tracking — .app bottom follows the visual viewport
       var vp = window.visualViewport;
-      var maxH = window.innerHeight;
-      function updateKb() {
-        var h = vp ? vp.height : window.innerHeight;
-        if (h > maxH) maxH = h;
-        document.documentElement.style.setProperty('--kb-h', Math.max(0, maxH - h) + 'px');
-      }
-      updateKb();
-      if (vp) vp.addEventListener('resize', updateKb);
-      window.addEventListener('resize', updateKb);
+      var root = document.documentElement;
 
-      // 2. Prevent iOS Safari autozoom on input focus.
-      // iOS zooms in when an input gains focus; it does not reliably undo the
-      // zoom afterwards. Setting maximum-scale=1 while focused blocks the zoom;
-      // removing it on blur restores normal pinch-zoom for everything else.
-      var vpMeta = document.querySelector('meta[name=viewport]');
-      var vpNormal  = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
-      var vpNoZoom  = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
+      // Track the visual viewport position and size.
+      // iOS Safari scrolls the page when the keyboard opens, even for position:fixed
+      // elements — offsetTop captures that scroll so we can counteract it by
+      // pinning .app to exactly the visible rectangle.
+      function updateVV() {
+        if (!vp) return;
+        root.style.setProperty('--vv-top', vp.offsetTop + 'px');
+        root.style.setProperty('--vv-h',   vp.height    + 'px');
+      }
+      if (vp) {
+        vp.addEventListener('resize', updateVV);
+        vp.addEventListener('scroll', updateVV);
+      }
+      updateVV();
+
+      // Prevent iOS Safari autozoom on input focus (font-size<16px triggers it).
+      // maximum-scale=1 while focused blocks the zoom; restored on blur.
+      var vpMeta   = document.querySelector('meta[name=viewport]');
+      var vpNormal = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
+      var vpNoZoom = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
       document.addEventListener('focusin', function (e) {
-        if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
+        if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT')
           vpMeta.setAttribute('content', vpNoZoom);
-        }
       });
       document.addEventListener('focusout', function (e) {
-        if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
-          // Delay so iOS finishes its keyboard animation before we allow zoom again
+        if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT')
           setTimeout(function () { vpMeta.setAttribute('content', vpNormal); }, 300);
-        }
       });
     })();
   </script>

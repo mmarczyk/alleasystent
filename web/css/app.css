@@ -111,8 +111,9 @@ select option { background: var(--bg2); }
 .app {
   display: flex;
   position: fixed;
-  top: 0; left: 0; right: 0;
-  bottom: var(--kb-h, 0px);  /* shrinks away from keyboard */
+  top: var(--vv-top, 0px);   /* follows visualViewport.offsetTop (iOS page scroll) */
+  left: 0; right: 0;
+  height: var(--vv-h, 100dvh); /* follows visualViewport.height (keyboard shrinks this) */
   overflow: hidden;
 }
 
