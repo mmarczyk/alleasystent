@@ -51,7 +51,7 @@ html, body {
 .settings-panel {
   position: fixed; top: 0; right: 0;
   width: min(400px, 100vw);
-  height: 100vh; height: 100dvh; height: var(--vvh, 100dvh);
+  height: 100dvh; height: 100vh;
   background: var(--bg2); border-left: 1px solid var(--border);
   z-index: 50; display: flex; flex-direction: column;
   transform: translateX(0); transition: transform .25s ease;
@@ -111,9 +111,10 @@ select option { background: var(--bg2); }
 /* ── APP LAYOUT ──────────────────────────────────── */
 .app {
   display: flex;
-  height: 100vh;           /* fallback */
-  height: 100dvh;          /* modern browsers — updates when keyboard appears */
-  height: var(--vvh, 100dvh); /* JS-driven via visualViewport for older iOS */
+  position: fixed;          /* anchored — never scrolls when iOS shifts page for keyboard */
+  inset: 0;
+  padding-bottom: var(--kb-h, 0px); /* keyboard height pushes content up */
+  box-sizing: border-box;
   overflow: hidden;
 }
 
