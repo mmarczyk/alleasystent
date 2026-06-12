@@ -18,6 +18,7 @@ from typing import Any
 
 from openai import AsyncOpenAI, RateLimitError
 
+from agents.tool_gap_analyzer import analyze_for_tool_gap
 from config.settings import get_settings
 from models.conversation import AgentResponse
 
@@ -132,8 +133,21 @@ class BaseAgent(ABC):
             msg = choice.message
 
             if not msg.tool_calls:
+                final_text = msg.content or ""
+                if tools:
+                    asyncio.create_task(
+                        analyze_for_tool_gap(
+                            client=self._client,
+                            model=self._settings.gemini_model_fast,
+                            query=query,
+                            response=final_text,
+                            existing_tool_names=[
+                                t["function"]["name"] for t in tools
+                            ],
+                        )
+                    )
                 return AgentResponse(
-                    text=msg.content or "",
+                    text=final_text,
                     agent_type=self.agent_name,
                 )
 
