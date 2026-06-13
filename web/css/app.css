@@ -401,3 +401,12 @@ select option { background: var(--bg2); }
   color: var(--success); border-radius: var(--radius-sm);
   padding: .35rem .75rem; font-size: .82rem; font-weight: 600; margin-top: .5rem;
 }
+
+.btn-invoice-monitoring {
+  display: inline-flex; align-items: center; gap: .4rem;
+  background: var(--success); color: #fff;
+  border: none; border-radius: var(--radius-sm);
+  padding: .5rem 1rem; font-size: .88rem; font-weight: 600;
+  cursor: pointer; margin-top: .5rem; transition: filter .15s;
+}
+.btn-invoice-monitoring:hover { filter: brightness(1.12); }

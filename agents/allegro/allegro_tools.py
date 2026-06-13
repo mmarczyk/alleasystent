@@ -369,4 +369,17 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_invoice_monitoring",
+            "description": (
+                "Present the user with a button to enable automatic VAT invoice monitoring. "
+                "Call this AFTER get_orders_pending_invoice when the user asks about invoices, "
+                "missing invoices, or wants to be notified when new orders require a VAT invoice. "
+                "Do NOT call multiple times in one conversation."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]

@@ -319,6 +319,36 @@ async def allegro_order_events(request: Request, since: str | None = None):
     return result
 
 
+
+@app.get("/allegro/pending-invoices", tags=["Allegro"])
+async def allegro_pending_invoices(request: Request):
+    """Return paid orders from the current month that require a VAT invoice but haven't received one."""
+    from datetime import date
+    from services.auth_service import get_current_user
+    from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
+
+    user = await get_current_user(request)
+    service = AllegroService(user_id=user["sub"])
+    if service._tokens is None:
+        await service._load_tokens_from_redis()
+    if service._tokens is None:
+        raise HTTPException(401, "Not authenticated with Allegro")
+    try:
+        today = date.today()
+        orders = await service.get_orders_needing_invoice(month=today.month, year=today.year)
+    except AllegroAuthError:
+        raise HTTPException(401, "Allegro auth error")
+    except AllegroAPIError as exc:
+        raise HTTPException(502, str(exc))
+    return {
+        "orders": [
+            {"order_id": o.order_id, "buyer": o.buyer_login, "total": o.total_price}
+            for o in orders
+        ],
+        "count": len(orders),
+    }
+
+
 # ── Static UI ─────────────────────────────────────────────────────────────────
 # Serve web/ at root — must be mounted AFTER all API routes so they take priority.
 _web_dir = pathlib.Path(__file__).parent / "web"

@@ -714,4 +714,11 @@ class AllegroAgent(BaseAgent):
                 "[ORDER_MONITORING_BTN]"
             )
 
+        if tool_name == "suggest_invoice_monitoring":
+            return (
+                "Mogę co 15 minut sprawdzać, czy pojawiły się nowe zamówienia wymagające faktury VAT, "
+                "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
+                "[INVOICE_MONITORING_BTN]"
+            )
+
         return f"Unknown tool: {tool_name}"
