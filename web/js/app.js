@@ -173,19 +173,30 @@ const OrderMonitor = (() => {
   function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
 
   async function enable() {
-    const granted = await Notifications.requestPermission();
-    if (!granted) {
-      UI.toast('Włącz powiadomienia w ustawieniach przeglądarki i spróbuj ponownie.', 5000);
-      return false;
+    // Try for permission but don't block — in-app toast works without it
+    if (Notifications.supported() && Notification.permission === 'default') {
+      await Notifications.requestPermission();
     }
     localStorage.setItem(ENABLED_KEY, '1');
-    _startPolling();
+    // Save current latest event ID as baseline — do NOT notify about existing orders
+    await _saveBaseline();
+    // Start timer; no immediate _check() since baseline was just initialized
+    if (_timer) clearInterval(_timer);
+    _timer = setInterval(_check, 5 * 60 * 1000);
     UI.toast('✓ Monitoring zamówień włączony (co 5 minut)');
-    // Update any visible buttons
     document.querySelectorAll('.btn-monitoring').forEach(btn => {
       btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring aktywny</span>';
     });
     return true;
+  }
+
+  async function _saveBaseline() {
+    try {
+      const res = await fetch('/allegro/order-events', { credentials: 'include' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.last_event_id) localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
+    } catch (e) {}
   }
 
   function disable() {
@@ -195,37 +206,32 @@ const OrderMonitor = (() => {
 
   async function _check() {
     try {
-      const lastId = localStorage.getItem(LAST_EVT_KEY) || '';
-      const url = '/allegro/order-events' + (lastId ? `?since=${encodeURIComponent(lastId)}` : '');
-      const res = await fetch(url, { credentials: 'include' });
+      const lastId = localStorage.getItem(LAST_EVT_KEY);
+      if (!lastId) {
+        // No baseline yet — initialize it and wait for next poll
+        await _saveBaseline();
+        return;
+      }
+      const res = await fetch(`/allegro/order-events?since=${encodeURIComponent(lastId)}`, { credentials: 'include' });
       if (!res.ok) return;
       const data = await res.json();
       if (data.last_event_id) localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
       const count = (data.new_orders || []).length;
       if (count > 0) {
         const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
-        Notifications.notify(
-          'AllEasystent — Nowe zamówienie!',
-          `Masz ${count} nowe ${label} do realizacji.`
-        );
+        const msg = `Masz ${count} nowe ${label} do realizacji!`;
+        Notifications.notify('AllEasystent — Nowe zamówienie!', msg);
+        UI.toast(`🛒 ${msg}`, 10000);  // in-app fallback — always shown
       }
-    } catch (e) { /* network error — retry next tick */ }
-  }
-
-  function _startPolling() {
-    if (_timer) clearInterval(_timer);
-    _check();
-    _timer = setInterval(_check, 5 * 60 * 1000);
+    } catch (e) {}
   }
 
   function init() {
     if (!isEnabled()) return;
-    if (!Notifications.supported() || Notification.permission !== 'granted') {
-      // Permission was revoked — silently disable
-      disable();
-      return;
-    }
-    _startPolling();
+    // Don't disable just because notifications are unavailable — in-app toast still works
+    if (_timer) clearInterval(_timer);
+    _check(); // immediate check — catches orders that arrived while page was closed
+    _timer = setInterval(_check, 5 * 60 * 1000);
   }
 
   return { isEnabled, enable, disable, init };
@@ -249,13 +255,12 @@ const InvoiceMonitor = (() => {
   }
 
   async function enable() {
-    const granted = await Notifications.requestPermission();
-    if (!granted) {
-      UI.toast('Włącz powiadomienia w ustawieniach przeglądarki i spróbuj ponownie.', 5000);
-      return false;
+    // Try for permission but don't block — in-app toast works without it
+    if (Notifications.supported() && Notification.permission === 'default') {
+      await Notifications.requestPermission();
     }
     localStorage.setItem(ENABLED_KEY, '1');
-    _startPolling();
+    _startPolling(); // first check notifies about ALL currently pending invoices
     UI.toast('✓ Monitoring faktur włączony (co 15 minut)');
     document.querySelectorAll('.btn-invoice-monitoring').forEach(btn => {
       btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
@@ -284,11 +289,10 @@ const InvoiceMonitor = (() => {
       _saveNotified(notified);
       const count = newOnes.length;
       const label = count === 1 ? 'zamówienie wymaga' : count < 5 ? 'zamówienia wymagają' : 'zamówień wymaga';
-      Notifications.notify(
-        'AllEasystent — Faktura VAT!',
-        `${count} ${label} wystawienia faktury VAT.`
-      );
-    } catch (e) { /* network error — retry next tick */ }
+      const msg = `${count} ${label} wystawienia faktury VAT.`;
+      Notifications.notify('AllEasystent — Faktura VAT!', msg);
+      UI.toast(`🧾 ${msg}`, 10000);  // in-app fallback — always shown
+    } catch (e) {}
   }
 
   function _startPolling() {
@@ -299,10 +303,7 @@ const InvoiceMonitor = (() => {
 
   function init() {
     if (!isEnabled()) return;
-    if (!Notifications.supported() || Notification.permission !== 'granted') {
-      disable();
-      return;
-    }
+    // Don't disable just because notifications are unavailable — in-app toast still works
     _startPolling();
   }
 
