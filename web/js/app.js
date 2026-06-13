@@ -139,6 +139,98 @@ const Backend = (() => {
   return { query };
 })();
 
+// ── Notifications ────────────────────────────────
+const Notifications = (() => {
+  function supported() { return 'Notification' in window; }
+
+  async function requestPermission() {
+    if (!supported()) return false;
+    if (Notification.permission === 'granted') return true;
+    const result = await Notification.requestPermission();
+    return result === 'granted';
+  }
+
+  function notify(title, body) {
+    if (!supported() || Notification.permission !== 'granted') return;
+    try {
+      new Notification(title, {
+        body: body.replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120),
+        icon: 'icons/icon-192.svg',
+        tag: 'alleasystent-msg',
+      });
+    } catch (e) {}
+  }
+
+  return { supported, requestPermission, notify };
+})();
+
+// ── Order monitor ────────────────────────────────
+const OrderMonitor = (() => {
+  const ENABLED_KEY  = 'ae_monitor_enabled';
+  const LAST_EVT_KEY = 'ae_monitor_last_event';
+  let _timer = null;
+
+  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
+
+  async function enable() {
+    const granted = await Notifications.requestPermission();
+    if (!granted) {
+      UI.toast('Włącz powiadomienia w ustawieniach przeglądarki i spróbuj ponownie.', 5000);
+      return false;
+    }
+    localStorage.setItem(ENABLED_KEY, '1');
+    _startPolling();
+    UI.toast('✓ Monitoring zamówień włączony (co 5 minut)');
+    // Update any visible buttons
+    document.querySelectorAll('.btn-monitoring').forEach(btn => {
+      btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring aktywny</span>';
+    });
+    return true;
+  }
+
+  function disable() {
+    localStorage.removeItem(ENABLED_KEY);
+    if (_timer) { clearInterval(_timer); _timer = null; }
+  }
+
+  async function _check() {
+    try {
+      const lastId = localStorage.getItem(LAST_EVT_KEY) || '';
+      const url = '/allegro/order-events' + (lastId ? `?since=${encodeURIComponent(lastId)}` : '');
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.last_event_id) localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
+      const count = (data.new_orders || []).length;
+      if (count > 0) {
+        const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
+        Notifications.notify(
+          'AllEasystent — Nowe zamówienie!',
+          `Masz ${count} nowe ${label} do realizacji.`
+        );
+      }
+    } catch (e) { /* network error — retry next tick */ }
+  }
+
+  function _startPolling() {
+    if (_timer) clearInterval(_timer);
+    _check();
+    _timer = setInterval(_check, 5 * 60 * 1000);
+  }
+
+  function init() {
+    if (!isEnabled()) return;
+    if (!Notifications.supported() || Notification.permission !== 'granted') {
+      // Permission was revoked — silently disable
+      disable();
+      return;
+    }
+    _startPolling();
+  }
+
+  return { isEnabled, enable, disable, init };
+})();
+
 // ── UI helpers ───────────────────────────────────
 const UI = (() => {
   let _toastT = null;
@@ -281,6 +373,14 @@ const Chat = (() => {
     const idx = Store.active()?.messages.length - 1;
     const replacement = buildBubble('assistant', fullText, ts, idx);
     bubble.replaceWith(replacement);
+    // Replace [ORDER_MONITORING_BTN] marker with interactive button or active badge
+    const monitorMarker = replacement.querySelector('.msg-bubble');
+    if (monitorMarker && monitorMarker.innerHTML.includes('[ORDER_MONITORING_BTN]')) {
+      const btnHtml = OrderMonitor.isEnabled()
+        ? '<span class="monitoring-badge">✓ Monitoring zamówień aktywny</span>'
+        : '<button class="btn-monitoring" onclick="OrderMonitor.enable()">🔔 Włącz monitoring zamówień</button>';
+      monitorMarker.innerHTML = monitorMarker.innerHTML.replace('[ORDER_MONITORING_BTN]', btnHtml);
+    }
     if (typeof hljs !== 'undefined') {
       replacement.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
     }
@@ -346,6 +446,10 @@ const Chat = (() => {
       if (typeof hljs !== 'undefined') {
         document.querySelectorAll('#messages pre code').forEach(b => hljs.highlightElement(b));
       }
+      // Notify if the tab was in the background when the response arrived
+      if (document.hidden && fullText && !fullText.startsWith('**Błąd:**')) {
+        Notifications.notify('AllEasystent', fullText);
+      }
     }
   }
 
@@ -402,6 +506,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Check authentication first — show login overlay if not logged in
   const authed = await checkAuth();
   if (!authed) return;
+
+  OrderMonitor.init();
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 

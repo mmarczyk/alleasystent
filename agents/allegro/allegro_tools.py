@@ -356,4 +356,17 @@ ALLEGRO_TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_order_monitoring",
+            "description": (
+                "Present the user with a button to enable automatic background order monitoring. "
+                "Call this AFTER get_orders or get_orders_delivery when the user is asking about "
+                "new/pending orders or wants to be notified about incoming orders. "
+                "Do NOT call multiple times in one conversation — only the first time orders are shown."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]

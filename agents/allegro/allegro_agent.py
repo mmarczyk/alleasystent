@@ -707,4 +707,11 @@ class AllegroAgent(BaseAgent):
                 blocks.append(self._order_block(o, extra_lines=extra))
             return header + "\n\n".join(blocks)
 
+        if tool_name == "suggest_order_monitoring":
+            return (
+                "Mogę automatycznie sprawdzać nowe zamówienia co 5 minut i wysyłać Ci powiadomienia "
+                "w przeglądarce — nawet gdy ta zakładka jest w tle.\n\n"
+                "[ORDER_MONITORING_BTN]"
+            )
+
         return f"Unknown tool: {tool_name}"

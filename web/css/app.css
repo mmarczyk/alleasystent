@@ -384,3 +384,20 @@ select option { background: var(--bg2); }
 @media (min-width: 769px) {
   .topbar { display: none; }
 }
+
+/* ── ORDER MONITORING ─────────────────────────── */
+.btn-monitoring {
+  display: inline-flex; align-items: center; gap: .4rem;
+  background: var(--primary); color: #fff;
+  border: none; border-radius: var(--radius-sm);
+  padding: .5rem 1rem; font-size: .88rem; font-weight: 600;
+  cursor: pointer; margin-top: .5rem; transition: background .15s;
+}
+.btn-monitoring:hover { background: var(--primary-d); }
+
+.monitoring-badge {
+  display: inline-flex; align-items: center; gap: .35rem;
+  background: rgba(16,185,129,.15); border: 1px solid rgba(16,185,129,.4);
+  color: var(--success); border-radius: var(--radius-sm);
+  padding: .35rem .75rem; font-size: .82rem; font-weight: 600; margin-top: .5rem;
+}

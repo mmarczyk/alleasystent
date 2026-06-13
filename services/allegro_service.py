@@ -710,5 +710,28 @@ class AllegroService:
             offset += page_size
         return all_entries
 
+    async def get_order_events(self, since_event_id: str | None = None) -> dict[str, Any]:
+        """Fetch new BOUGHT order events since a given event ID (for background order monitoring)."""
+        params: dict[str, Any] = {"limit": 50, "type[]": "BOUGHT"}
+        if since_event_id:
+            params["from"] = since_event_id
+        data = await self._get("/order/events", params=params)
+        events = data.get("events", [])
+        last_event_id = events[-1]["id"] if events else since_event_id
+        new_orders = [
+            {
+                "event_id": e["id"],
+                "order_id": (e.get("order") or {}).get("id"),
+                "occurred_at": e.get("occurredAt"),
+            }
+            for e in events
+            if e.get("type") == "BOUGHT"
+        ]
+        return {
+            "new_orders": new_orders,
+            "last_event_id": last_event_id,
+            "count": len(new_orders),
+        }
+
     async def close(self) -> None:
         await self._client.aclose()
