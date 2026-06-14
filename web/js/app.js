@@ -173,16 +173,18 @@ const OrderMonitor = (() => {
   function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
 
   async function enable() {
-    // Try for permission but don't block — in-app toast works without it
+    console.log('[OrderMonitor] enable() called');
     if (Notifications.supported() && Notification.permission === 'default') {
-      await Notifications.requestPermission();
+      const perm = await Notifications.requestPermission();
+      console.log('[OrderMonitor] notification permission:', perm);
+    } else {
+      console.log('[OrderMonitor] notification permission already:', Notifications.supported() ? Notification.permission : 'API not supported');
     }
     localStorage.setItem(ENABLED_KEY, '1');
-    // Save current latest event ID as baseline — do NOT notify about existing orders
     await _saveBaseline();
-    // Start timer; no immediate _check() since baseline was just initialized
     if (_timer) clearInterval(_timer);
     _timer = setInterval(_check, 5 * 60 * 1000);
+    console.log('[OrderMonitor] timer started, interval 5 min');
     UI.toast('✓ Monitoring zamówień włączony (co 5 minut)');
     document.querySelectorAll('.btn-monitoring').forEach(btn => {
       btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring aktywny</span>';
@@ -192,46 +194,73 @@ const OrderMonitor = (() => {
 
   async function _saveBaseline() {
     try {
+      console.log('[OrderMonitor] saving baseline (no since= param)…');
       const res = await fetch('/allegro/order-events', { credentials: 'include' });
+      console.log('[OrderMonitor] baseline HTTP', res.status);
       if (!res.ok) return;
       const data = await res.json();
-      if (data.last_event_id) localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
-    } catch (e) {}
+      console.log('[OrderMonitor] baseline response:', JSON.stringify(data));
+      if (data.last_event_id) {
+        localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
+        console.log('[OrderMonitor] baseline saved, last_event_id =', data.last_event_id);
+      } else {
+        console.warn('[OrderMonitor] baseline response has no last_event_id');
+      }
+    } catch (e) {
+      console.error('[OrderMonitor] baseline fetch error:', e);
+    }
   }
 
   function disable() {
+    console.log('[OrderMonitor] disabled');
     localStorage.removeItem(ENABLED_KEY);
     if (_timer) { clearInterval(_timer); _timer = null; }
   }
 
   async function _check() {
+    const lastId = localStorage.getItem(LAST_EVT_KEY);
+    console.log('[OrderMonitor] _check() lastId =', lastId, new Date().toISOString());
+    if (!lastId) {
+      console.warn('[OrderMonitor] no baseline — saving one and skipping this tick');
+      await _saveBaseline();
+      return;
+    }
     try {
-      const lastId = localStorage.getItem(LAST_EVT_KEY);
-      if (!lastId) {
-        // No baseline yet — initialize it and wait for next poll
-        await _saveBaseline();
+      const url = `/allegro/order-events?since=${encodeURIComponent(lastId)}`;
+      const res = await fetch(url, { credentials: 'include' });
+      console.log('[OrderMonitor] poll HTTP', res.status, 'url:', url);
+      if (!res.ok) {
+        console.error('[OrderMonitor] poll failed, status:', res.status);
         return;
       }
-      const res = await fetch(`/allegro/order-events?since=${encodeURIComponent(lastId)}`, { credentials: 'include' });
-      if (!res.ok) return;
       const data = await res.json();
+      console.log('[OrderMonitor] poll response:', JSON.stringify(data));
       if (data.last_event_id) localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
       const count = (data.new_orders || []).length;
       if (count > 0) {
         const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
         const msg = `Masz ${count} nowe ${label} do realizacji!`;
+        console.log('[OrderMonitor] NEW ORDERS DETECTED:', count, data.new_orders);
         Notifications.notify('AllEasystent — Nowe zamówienie!', msg);
-        UI.toast(`🛒 ${msg}`, 10000);  // in-app fallback — always shown
+        UI.toast(`🛒 ${msg}`, 10000);
+      } else {
+        console.log('[OrderMonitor] no new orders');
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('[OrderMonitor] poll error:', e);
+    }
   }
 
   function init() {
-    if (!isEnabled()) return;
-    // Don't disable just because notifications are unavailable — in-app toast still works
+    const enabled = isEnabled();
+    const lastId  = localStorage.getItem(LAST_EVT_KEY);
+    console.log('[OrderMonitor] init() enabled =', enabled, 'lastId =', lastId,
+      'notif =', Notifications.supported() ? Notification.permission : 'unsupported');
+    if (!enabled) return;
     if (_timer) clearInterval(_timer);
-    _check(); // immediate check — catches orders that arrived while page was closed
+    _check();
     _timer = setInterval(_check, 5 * 60 * 1000);
+    console.log('[OrderMonitor] polling started');
   }
 
   return { isEnabled, enable, disable, init };
