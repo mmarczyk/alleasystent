@@ -341,7 +341,7 @@ class AllegroService:
             "Content-Type": "application/vnd.allegro.public.v1+json",
         }
 
-    async def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
+    async def _get(self, path: str, params: dict | list | None = None) -> dict[str, Any]:
         headers = await self._get_headers()
         resp = await self._client.get(path, headers=headers, params=params)
         if resp.status_code >= 400:
@@ -715,23 +715,42 @@ class AllegroService:
         data = await self._get("/order/carriers")
         return data.get("carriers", [])
 
-    async def get_order_events(self, since_event_id: str | None = None) -> dict[str, Any]:
+    async def get_order_events(
+        self,
+        since_event_id: str | None = None,
+        min_occurred_at: str | None = None,
+    ) -> dict[str, Any]:
         """Fetch new BOUGHT order events since a given event ID (for background order monitoring)."""
-        params: dict[str, Any] = {"limit": 50, "type[]": "BOUGHT"}
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+
+        # Build params as list of tuples — httpx preserves [] in key names
+        params_list: list[tuple[str, str]] = [("type[]", "READY_FOR_PROCESSING"), ("limit", "100")]
         if since_event_id:
-            params["from"] = since_event_id
-        data = await self._get("/order/events", params=params)
+            params_list.append(("from", since_event_id))
+        data = await self._get("/order/events", params=params_list)
         events = data.get("events", [])
+        _log.debug("[OrderEvents] raw count=%d since=%s min_at=%s first=%s",
+                   len(events), since_event_id, min_occurred_at,
+                   events[0] if events else None)
+
         last_event_id = events[-1]["id"] if events else since_event_id
-        new_orders = [
-            {
+        new_orders = []
+        for e in events:
+            if e.get("type") != "BOUGHT":
+                continue
+            occurred = e.get("occurredAt", "")
+            # Filter by minimum timestamp to avoid replaying historical events
+            if min_occurred_at and occurred and occurred < min_occurred_at:
+                continue
+            order_obj = e.get("order") or {}
+            checkout = order_obj.get("checkoutForm") or {}
+            order_id = checkout.get("id") or order_obj.get("id")
+            new_orders.append({
                 "event_id": e["id"],
-                "order_id": (e.get("order") or {}).get("id"),
-                "occurred_at": e.get("occurredAt"),
-            }
-            for e in events
-            if e.get("type") == "BOUGHT"
-        ]
+                "order_id": order_id,
+                "occurred_at": occurred,
+            })
         return {
             "new_orders": new_orders,
             "last_event_id": last_event_id,
