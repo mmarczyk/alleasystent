@@ -320,15 +320,19 @@ const OrderMonitor = (() => {
         )
       );
 
-      const noun = orders.length === 1 ? 'nowe zamówienie' : `${orders.length} nowe zamówienia`;
-      const lines = orders.map((o, i) => {
+      const header = orders.length === 1
+        ? '🛒 **Nowe zamówienie do realizacji**'
+        : `🛒 **${orders.length} nowe zamówienia do realizacji**`;
+
+      const blocks = orders.map((o, i) => {
         const d = details[i];
-        if (!d) return `- **${String(o.order_id || '').slice(0, 8)}…** — brak szczegółów`;
-        const items = (d.items || []).map(it => `${it.name} ×${it.quantity}`).join(', ');
-        const total = `${Number(d.total_price).toFixed(2)} ${d.currency || 'PLN'}`;
-        return `- **${d.buyer_login}** · ${total} · ${d.delivery_method}\n  ${items}`;
-      }).join('\n');
-      const text = `🛒 **Monitoring zamówień** — wykryto ${noun} gotowe do realizacji:\n\n${lines}`;
+        if (!d) return `**${String(o.order_id || '').slice(0, 8)}…** — brak szczegółów`;
+        const total = `${Number(d.total_price).toFixed(2)} zł`;
+        const itemLines = (d.items || []).map(it => `  • ${it.name} ×${it.quantity}`).join('\n');
+        return `👤 **${d.buyer_login}** · ${total}\n📦 ${d.delivery_method}\n${itemLines}`;
+      }).join('\n\n---\n\n');
+
+      const text = `${header}\n\n${blocks}`;
 
       // Add message directly to the captured conversation (bypasses Store.active() state)
       const conv = Store.all().find(c => c.id === targetConvId);
