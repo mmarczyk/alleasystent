@@ -240,6 +240,7 @@ const OrderMonitor = (() => {
         console.log('[OrderMonitor] NEW ORDERS DETECTED:', count, data.new_orders);
         Notifications.notify('AllEasystent — Nowe zamówienie!', msg);
         UI.toast(`🛒 ${msg}`, 10000);
+        _injectChatMessage(data.new_orders);
       } else {
         console.log('[OrderMonitor] no new orders');
       }
@@ -258,6 +259,20 @@ const OrderMonitor = (() => {
     _check();
     _timer = setInterval(_check, 5 * 60 * 1000);
     console.log('[OrderMonitor] polling started');
+  }
+
+  function _injectChatMessage(orders) {
+    try {
+      if (!Store.active()) Chat.newConversation();
+      const lines = orders.map(o => {
+        const id = o.order_id ? `**${String(o.order_id).slice(0, 8)}…**` : `event ${o.event_id}`;
+        return `- ${id}`;
+      }).join('\n');
+      const noun = orders.length === 1 ? 'nowe zamówienie' : `${orders.length} nowe zamówienia`;
+      const text = `🛒 **Monitoring zamówień** — wykryto ${noun} gotowe do realizacji:\n\n${lines}\n\nMożesz zapytać mnie o szczegóły tych zamówień.`;
+      Store.addMessage('assistant', text);
+      Chat.renderMessages();
+    } catch (e) { console.error('[OrderMonitor] chat inject error:', e); }
   }
 
   return { isEnabled, enable, disable, init };
