@@ -57,7 +57,9 @@ class AllegroAgent(BaseAgent):
         "you MUST call suggest_order_monitoring or suggest_invoice_monitoring — this shows a clickable "
         "button in the UI that the user must press to activate browser-side monitoring. "
         "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
-        "as a standalone promise — you cannot do this. Always call the tool and tell the user to click the button."
+        "as a standalone promise — you cannot do this. Always call the tool and tell the user to click the button. "
+        "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
+        "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way."
     )
 
     def __init__(self, user_id: str | None = None):
@@ -762,14 +764,14 @@ class AllegroAgent(BaseAgent):
             return (
                 "Mogę automatycznie sprawdzać nowe zamówienia co 5 minut i wysyłać Ci powiadomienia "
                 "w przeglądarce — nawet gdy ta zakładka jest w tle.\n\n"
-                "[ORDER_MONITORING_BTN]"
+                '<button class="btn-monitoring" onclick="OrderMonitor.enable()">🔔 Włącz monitoring zamówień</button>'
             )
 
         if tool_name == "suggest_invoice_monitoring":
             return (
                 "Mogę co 15 minut sprawdzać, czy pojawiły się nowe zamówienia wymagające faktury VAT, "
                 "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
-                "[INVOICE_MONITORING_BTN]"
+                '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>'
             )
 
         return f"Unknown tool: {tool_name}"
