@@ -263,8 +263,10 @@ const OrderMonitor = (() => {
 
   async function _injectChatMessage(orders) {
     try {
+      // Ensure a conversation exists and capture its ID BEFORE any await
       if (!Store.active()) Chat.newConversation();
-      // Fetch full details for each new order in parallel
+      const targetConvId = Store.active().id;
+
       const details = await Promise.all(
         orders.map(o => o.order_id
           ? fetch(`/allegro/orders/${encodeURIComponent(o.order_id)}`, { credentials: 'include' })
@@ -273,6 +275,7 @@ const OrderMonitor = (() => {
           : Promise.resolve(null)
         )
       );
+
       const noun = orders.length === 1 ? 'nowe zamówienie' : `${orders.length} nowe zamówienia`;
       const lines = orders.map((o, i) => {
         const d = details[i];
@@ -282,6 +285,9 @@ const OrderMonitor = (() => {
         return `- **${d.buyer_login}** · ${total} · ${d.delivery_method}\n  ${items}`;
       }).join('\n');
       const text = `🛒 **Monitoring zamówień** — wykryto ${noun} gotowe do realizacji:\n\n${lines}`;
+
+      // setActive ensures we're on the captured conversation, then add message
+      Store.setActive(targetConvId);
       Store.addMessage('assistant', text);
       Chat.renderMessages();
     } catch (e) { console.error('[OrderMonitor] chat inject error:', e); }
@@ -680,9 +686,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   const authed = await checkAuth();
   if (!authed) return;
 
-  OrderMonitor.init();
-  InvoiceMonitor.init();
-
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   document.addEventListener('click', e => {
@@ -719,4 +722,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   document.getElementById('user-input').focus();
+
+  // Init monitors AFTER full UI setup so chat injection finds a ready DOM
+  OrderMonitor.init();
+  InvoiceMonitor.init();
 });
