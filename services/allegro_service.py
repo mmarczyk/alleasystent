@@ -710,6 +710,11 @@ class AllegroService:
             offset += page_size
         return all_entries
 
+    async def get_carriers(self) -> list[dict[str, Any]]:
+        """Return list of available Allegro carriers (id + name)."""
+        data = await self._get("/order/carriers")
+        return data.get("carriers", [])
+
     async def get_order_events(self, since_event_id: str | None = None) -> dict[str, Any]:
         """Fetch new BOUGHT order events since a given event ID (for background order monitoring)."""
         params: dict[str, Any] = {"limit": 50, "type[]": "BOUGHT"}

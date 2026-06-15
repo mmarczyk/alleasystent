@@ -200,6 +200,29 @@ class AllegroAgent(BaseAgent):
             g["total_stock"] += stock
         return sorted(groups.values(), key=lambda g: g["total_stock"])
 
+    # Tracking URL templates keyed by Allegro carrier ID prefix
+    _TRACKING_URLS: dict[str, str] = {
+        "INPOST":          "https://inpost.pl/sledzenie-przesylek?number={code}",
+        "DHL":             "https://www.dhl.com/pl-pl/home/tracking.html?tracking-id={code}&submit=1",
+        "DPD":             "https://www.dpd.com.pl/tracking?q={code}",
+        "GLS":             "https://gls-group.eu/PL/pl/sledzenie-paczek?match={code}",
+        "POCZTA_POLSKA":   "https://emonitoring.poczta-polska.pl/?numer={code}",
+        "ORLEN":           "https://orlenpaczka.pl/sledz-paczke/?nr={code}",
+        "UPS":             "https://www.ups.com/track?tracknum={code}",
+        "FEDEX":           "https://www.fedex.com/apps/fedextrack/?tracknumbers={code}",
+    }
+
+    @classmethod
+    def _tracking_url(cls, carrier_id: str, code: str) -> str | None:
+        """Return tracking URL for a carrier+code pair, or None if unknown carrier."""
+        if not code or code == "—":
+            return None
+        carrier_upper = (carrier_id or "").upper()
+        for prefix, template in cls._TRACKING_URLS.items():
+            if carrier_upper.startswith(prefix):
+                return template.format(code=code)
+        return None
+
     @classmethod
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
         """Render a single order as a markdown bullet-point block."""
@@ -208,10 +231,12 @@ class AllegroAgent(BaseAgent):
         delivery_name = cls._dig(d, "method", "name", default="—")
         total_qty = sum(li.quantity for li in o.line_items)
         link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
+        fulfillment = o.fulfillment_status or "—"
         lines = [
             f"**Zamówienie** `{o.order_id}`",
             f"- Kupujący: **{o.buyer_login}**",
             f"- Wartość: **{price}**",
+            f"- Status realizacji: **{fulfillment}**",
             f"- Dostawa: {delivery_name}",
             f"- Produkty: {total_qty} szt.",
         ]
@@ -663,29 +688,48 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_orders_delivery":
             fulfillment_status = tool_input.get("fulfillment_status")
-            orders = await self._allegro.get_orders(
-                status=tool_input.get("status", "READY_FOR_PROCESSING"),
-                fulfillment_status=fulfillment_status,
-                limit=min(int(tool_input.get("limit", 50)), 50),
+            orders, carriers_raw = await asyncio.gather(
+                self._allegro.get_orders(
+                    status=tool_input.get("status", "READY_FOR_PROCESSING"),
+                    fulfillment_status=fulfillment_status,
+                    limit=min(int(tool_input.get("limit", 50)), 50),
+                ),
+                self._allegro.get_carriers(),
+                return_exceptions=True,
             )
-            # When no fulfillment_status given, exclude already-sent orders
+            if isinstance(orders, BaseException):
+                raise orders
+            carriers_raw = carriers_raw if not isinstance(carriers_raw, BaseException) else []
+            # Build id→name map from carriers endpoint
+            carrier_map: dict[str, str] = {c["id"]: c.get("name", c["id"]) for c in carriers_raw}
+
             if not fulfillment_status:
                 orders = [o for o in orders if o.fulfillment_status not in ("SENT", "PICKED_UP", "CANCELLED")]
             if not orders:
                 return "Brak zamówień do wysłania."
-            # Group by delivery method for a quick summary
             courier_counts: Counter = Counter()
             blocks = []
             for o in orders:
                 d = o.delivery if isinstance(o.delivery, dict) else {}
-                method_name = self._dig(d, "method", "name", default="—")
+                carrier_id = self._dig(d, "method", "id", default="")
+                # Prefer name from carriers endpoint, fall back to order's method.name
+                method_name = carrier_map.get(carrier_id) or self._dig(d, "method", "name", default="—")
                 courier_counts[method_name] += 1
                 tracking = (
                     self._dig(d, "smart", "trackingCode", default=None)
                     or self._dig(d, "trackingCode", default="—")
                 )
                 pickup_name = self._dig(d, "pickupPoint", "name", default=None)
-                extra = [f"Kurier/dostawa: **{method_name}**", f"Numer śledzenia: {tracking}"]
+                tracking_url = self._tracking_url(carrier_id, tracking)
+                tracking_str = (
+                    f"[{tracking}]({tracking_url})" if tracking_url and tracking != "—"
+                    else tracking
+                )
+                extra = [
+                    f"Kurier/dostawa: **{method_name}**",
+                    f"Status: **{o.fulfillment_status or '—'}**",
+                    f"Numer śledzenia: {tracking_str}",
+                ]
                 if pickup_name:
                     extra.append(f"Punkt odbioru: {pickup_name}")
                 blocks.append(self._order_block(o, extra_lines=extra))
