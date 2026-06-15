@@ -330,10 +330,14 @@ const OrderMonitor = (() => {
       }).join('\n');
       const text = `🛒 **Monitoring zamówień** — wykryto ${noun} gotowe do realizacji:\n\n${lines}`;
 
-      // setActive ensures we're on the captured conversation, then add message
-      Store.setActive(targetConvId);
-      Store.addMessage('assistant', text);
-      Chat.renderMessages();
+      // Add message directly to the captured conversation (bypasses Store.active() state)
+      const conv = Store.all().find(c => c.id === targetConvId);
+      if (!conv) return;
+      conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
+      localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
+
+      // Render after current call stack clears so all boot code is definitely done
+      setTimeout(() => Chat.loadConversation(targetConvId), 0);
     } catch (e) { console.error('[OrderMonitor] chat inject error:', e); }
   }
 
@@ -404,6 +408,7 @@ const InvoiceMonitor = (() => {
   function _injectChatMessage(orders) {
     try {
       if (!Store.active()) Chat.newConversation();
+      const targetConvId = Store.active().id;
       const lines = orders.map(o => {
         const buyer = o.buyer || '—';
         const amount = o.total != null ? ` · ${Number(o.total).toFixed(2)} zł` : '';
@@ -411,8 +416,11 @@ const InvoiceMonitor = (() => {
       }).join('\n');
       const noun = orders.length === 1 ? 'zamówienie wymagające' : `${orders.length} zamówień wymagających`;
       const text = `🧾 **Monitoring faktur** — wykryto ${noun} faktury VAT:\n\n${lines}\n\nPamiętaj o wystawieniu faktury dla każdego z nich.`;
-      Store.addMessage('assistant', text);
-      Chat.renderMessages();
+      const conv = Store.all().find(c => c.id === targetConvId);
+      if (!conv) return;
+      conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
+      localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
+      setTimeout(() => Chat.loadConversation(targetConvId), 0);
     } catch (e) {}
   }
 
