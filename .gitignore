@@ -13,3 +13,5 @@ build/
 .venv/
 venv/
 .claude/
+web/js/vendor/
+web/css/vendor/

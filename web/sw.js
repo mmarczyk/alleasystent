@@ -1,29 +1,73 @@
-const CACHE = 'alleasystent-v21';
-const STATIC = [
+const CACHE = 'alleasystent-v22';
+
+// Everything needed to render the UI shell without a network request
+const SHELL = [
+  './',
   './manifest.json',
-  './css/app.css', './js/app.js'
+  './css/app.css',
+  './css/vendor/github-dark.min.css',
+  './js/app.js',
+  './js/vendor/marked.min.js',
+  './js/vendor/highlight.min.js',
+  './icons/icon-192.svg',
+  './icons/icon-512.svg',
 ];
 
+// Pre-cache the entire shell on install so the app is instantly available
 self.addEventListener('install', e =>
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(STATIC)).then(() => self.skipWaiting()))
+  e.waitUntil(
+    caches.open(CACHE)
+      .then(c => c.addAll(SHELL))
+      .then(() => self.skipWaiting())
+  )
 );
 
+// Drop old caches and take control of all clients immediately
 self.addEventListener('activate', e =>
   e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
   )
 );
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  // Always fetch HTML from network so auth state is always fresh
+
+  // API & auth — always network, never cache
+  if (
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/allegro/') ||
+    url.pathname.startsWith('/auth/') ||
+    url.pathname.startsWith('/chat')
+  ) return;
+
+  // App shell HTML — network-first so auth state stays fresh;
+  // fall back to cached shell so the UI opens even when offline
   if (url.pathname === '/' || url.pathname.endsWith('.html')) {
-    e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+    e.respondWith(
+      fetch(e.request)
+        .then(r => {
+          caches.open(CACHE).then(c => c.put(e.request, r.clone()));
+          return r;
+        })
+        .catch(() => caches.match('./'))
+    );
     return;
   }
-  if (url.hostname.includes('cdn.') || url.hostname !== self.location.hostname) return;
-  e.respondWith(caches.match(e.request).then(c => c ?? fetch(e.request)));
+
+  // Static assets (CSS, JS, icons, vendor) — cache-first, update in background
+  e.respondWith(
+    caches.open(CACHE).then(cache =>
+      cache.match(e.request).then(cached => {
+        const fromNetwork = fetch(e.request).then(r => {
+          if (r.ok) cache.put(e.request, r.clone());
+          return r;
+        }).catch(() => cached);
+        // Return cached immediately; network response updates cache in background
+        return cached ?? fromNetwork;
+      })
+    )
+  );
 });
