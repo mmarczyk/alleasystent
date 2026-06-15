@@ -61,7 +61,11 @@ class AllegroAgent(BaseAgent):
         "When the user asks to DISABLE / turn off / stop monitoring or notifications, "
         "call disable_order_monitoring or disable_invoice_monitoring — NEVER explain that you cannot do it. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
-        "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way."
+        "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way. "
+        "NEW ORDERS — CRITICAL: When the user asks about 'nowe zamówienia', 'nowe', 'oczekujące', or new/pending orders, "
+        "you MUST call get_orders with fulfillment_status=NEW. Never omit fulfillment_status for new order queries. "
+        "PAGINATION — CRITICAL: Always request at least limit=50 for get_orders unless the user explicitly asks for fewer. "
+        "Never default to 10 when the user asks to see 'wszystkie' or an unspecified list of orders."
     )
 
     def __init__(self, user_id: str | None = None):
@@ -259,7 +263,7 @@ class AllegroAgent(BaseAgent):
                 buyer_login=tool_input.get("buyer_login"),
                 fulfillment_status=tool_input.get("fulfillment_status"),
                 line_items_sent=tool_input.get("line_items_sent"),
-                limit=min(int(tool_input.get("limit", 10)), 50),
+                limit=min(int(tool_input.get("limit", 50)), 100),
             )
             if not orders:
                 return "Brak zamówień spełniających podane kryteria."

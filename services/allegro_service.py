@@ -365,7 +365,7 @@ class AllegroService:
         line_items_sent: list[str] | None = None,
         bought_at_gte: str | None = None,
         bought_at_lte: str | None = None,
-        limit: int = 20,
+        limit: int = 100,
         offset: int = 0,
     ) -> list[AllegroOrder]:
         cache_key = (
@@ -377,25 +377,39 @@ class AllegroService:
             logger.debug("orders list cache hit: %s", cache_key)
             return cached
 
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        base_params: dict[str, Any] = {}
         if status:
-            params["status"] = status
+            base_params["status"] = status
         if buyer_login:
-            params["buyer.login"] = buyer_login
+            base_params["buyer.login"] = buyer_login
         if fulfillment_status:
-            params["fulfillment.status"] = fulfillment_status
+            base_params["fulfillment.status"] = fulfillment_status
         if line_items_sent:
-            params["fulfillment.shipmentSummary.lineItemsSent"] = line_items_sent
+            base_params["fulfillment.shipmentSummary.lineItemsSent"] = line_items_sent
         if bought_at_gte:
-            params["lineItems.boughtAt.gte"] = bought_at_gte
+            base_params["lineItems.boughtAt.gte"] = bought_at_gte
         if bought_at_lte:
-            params["lineItems.boughtAt.lte"] = bought_at_lte
-        data = await self._get("/order/checkout-forms", params=params)
-        orders = [self._parse_order(o) for o in data.get("checkoutForms", [])]
-        self._orders_list_cache.set(cache_key, orders)
-        for order in orders:
+            base_params["lineItems.boughtAt.lte"] = bought_at_lte
+
+        # Auto-paginate — Allegro returns up to 100 per page
+        all_orders: list[AllegroOrder] = []
+        page_size = min(limit, 100)
+        cur_offset = offset
+        while len(all_orders) < limit:
+            params = {**base_params, "limit": page_size, "offset": cur_offset}
+            data = await self._get("/order/checkout-forms", params=params)
+            forms = data.get("checkoutForms", [])
+            total_count = int(data.get("totalCount", 0))
+            all_orders.extend(self._parse_order(o) for o in forms)
+            if len(all_orders) >= total_count or len(forms) < page_size:
+                break
+            cur_offset += page_size
+
+        result = all_orders[:limit]
+        self._orders_list_cache.set(cache_key, result)
+        for order in result:
             self._order_cache.set(order.order_id, order)
-        return orders
+        return result
 
     async def get_order(self, order_id: str) -> AllegroOrder:
         cached = self._order_cache.get(order_id)

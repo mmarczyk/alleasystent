@@ -6,10 +6,12 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_orders",
             "description": (
-                "List recent orders from Allegro. "
-                "For new/pending orders use status=READY_FOR_PROCESSING, fulfillment_status=NEW, "
-                "line_items_sent=[NONE]. "
-                "Returns order IDs, buyer info, status, and totals."
+                "List orders from Allegro. "
+                "MANDATORY for 'nowe zamówienia' / new/pending orders: "
+                "status=READY_FOR_PROCESSING AND fulfillment_status=NEW AND line_items_sent=[NONE]. "
+                "NEVER omit fulfillment_status=NEW when the user asks about new orders. "
+                "Always use limit=50 or higher unless user explicitly asks for fewer. "
+                "Returns order IDs, buyer info, fulfillment status, and totals."
             ),
             "parameters": {
                 "type": "object",
@@ -35,8 +37,8 @@ ALLEGRO_TOOLS: list[dict] = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max orders to return (1–50).",
-                        "default": 10,
+                        "description": "Max orders to return (1–100). Default 50 — always fetch at least 50 to avoid missing orders.",
+                        "default": 50,
                     },
                 },
             },
