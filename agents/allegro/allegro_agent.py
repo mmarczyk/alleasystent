@@ -50,7 +50,14 @@ class AllegroAgent(BaseAgent):
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit → get_sales_summary. "
         "3) Period billing only → get_billing_summary. "
-        "NEVER use get_billing_summary for a specific order — it covers ALL orders in date range."
+        "NEVER use get_billing_summary for a specific order — it covers ALL orders in date range. "
+        "MONITORING — CRITICAL: You CANNOT monitor orders or invoices yourself. You have NO ability "
+        "to run background tasks, check anything automatically, or send proactive messages. "
+        "When the user asks to enable monitoring, be notified, or wants automatic order/invoice alerts, "
+        "you MUST call suggest_order_monitoring or suggest_invoice_monitoring — this shows a clickable "
+        "button in the UI that the user must press to activate browser-side monitoring. "
+        "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
+        "as a standalone promise — you cannot do this. Always call the tool and tell the user to click the button."
     )
 
     def __init__(self, user_id: str | None = None):

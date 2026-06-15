@@ -401,6 +401,7 @@ const UI = (() => {
 // ── Chat engine ──────────────────────────────────
 const Chat = (() => {
   let _waiting = false;
+  let _welcomeEl = null;  // persistent ref so GC never collects the node
 
   function renderSidebar() {
     const list = document.getElementById('sidebar-history');
@@ -418,11 +419,13 @@ const Chat = (() => {
   function renderMessages() {
     const c = Store.active();
     const container = document.getElementById('messages');
-    const welcome = document.getElementById('welcome');
+    // Always resolve via cache — getElementById returns null after the node
+    // has been removed from DOM by a previous container.innerHTML = ''
+    if (!_welcomeEl) _welcomeEl = document.getElementById('welcome');
     container.innerHTML = '';
 
     if (!c || !c.messages.length) {
-      container.appendChild(welcome);
+      if (_welcomeEl) container.appendChild(_welcomeEl);
       return;
     }
 
