@@ -445,9 +445,36 @@ const Chat = (() => {
     }
 
     c.messages.forEach((m, i) => {
-      container.appendChild(buildBubble(m.role, m.content, m.ts, i));
+      const el = buildBubble(m.role, m.content, m.ts, i);
+      container.appendChild(el);
+      _applyMonitoringState(el);
     });
     scrollBottom();
+  }
+
+  function _applyMonitoringState(bubbleEl) {
+    const inner = bubbleEl.querySelector('.msg-bubble');
+    if (!inner) return;
+    // Fallback for old text markers (LLM paraphrasing)
+    if (inner.innerHTML.includes('[ORDER_MONITORING_BTN]')) {
+      inner.innerHTML = inner.innerHTML.replace('[ORDER_MONITORING_BTN]',
+        '<button class="btn-monitoring" onclick="OrderMonitor.enable()">🔔 Włącz monitoring zamówień</button>');
+    }
+    if (inner.innerHTML.includes('[INVOICE_MONITORING_BTN]')) {
+      inner.innerHTML = inner.innerHTML.replace('[INVOICE_MONITORING_BTN]',
+        '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>');
+    }
+    // Replace enable-buttons with active badge if monitoring is already on
+    if (OrderMonitor.isEnabled()) {
+      inner.querySelectorAll('.btn-monitoring').forEach(btn => {
+        btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring zamówień aktywny</span>';
+      });
+    }
+    if (InvoiceMonitor.isEnabled()) {
+      inner.querySelectorAll('.btn-invoice-monitoring').forEach(btn => {
+        btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
+      });
+    }
   }
 
   function buildBubble(role, content, ts, index) {
@@ -499,22 +526,7 @@ const Chat = (() => {
     const idx = Store.active()?.messages.length - 1;
     const replacement = buildBubble('assistant', fullText, ts, idx);
     bubble.replaceWith(replacement);
-    // Replace special action markers with interactive buttons or active badges
-    const monitorMarker = replacement.querySelector('.msg-bubble');
-    if (monitorMarker) {
-      if (monitorMarker.innerHTML.includes('[ORDER_MONITORING_BTN]')) {
-        const btnHtml = OrderMonitor.isEnabled()
-          ? '<span class="monitoring-badge">✓ Monitoring zamówień aktywny</span>'
-          : '<button class="btn-monitoring" onclick="OrderMonitor.enable()">🔔 Włącz monitoring zamówień</button>';
-        monitorMarker.innerHTML = monitorMarker.innerHTML.replace('[ORDER_MONITORING_BTN]', btnHtml);
-      }
-      if (monitorMarker.innerHTML.includes('[INVOICE_MONITORING_BTN]')) {
-        const btnHtml = InvoiceMonitor.isEnabled()
-          ? '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>'
-          : '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>';
-        monitorMarker.innerHTML = monitorMarker.innerHTML.replace('[INVOICE_MONITORING_BTN]', btnHtml);
-      }
-    }
+    _applyMonitoringState(replacement);
     if (typeof hljs !== 'undefined') {
       replacement.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
     }
