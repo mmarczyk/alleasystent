@@ -414,6 +414,59 @@ async def allegro_pending_invoices(request: Request):
     }
 
 
+# ── Web Push ─────────────────────────────────────────────────────────────────
+
+@app.get("/push/vapid-public-key", tags=["Push"])
+async def push_vapid_key():
+    """Return the VAPID public key so the browser can subscribe to push."""
+    if not settings.vapid_public_key:
+        raise HTTPException(503, "Push notifications not configured — set VAPID_PUBLIC_KEY")
+    return {"publicKey": settings.vapid_public_key}
+
+
+@app.post("/push/subscribe", tags=["Push"])
+async def push_subscribe(request: Request):
+    """Store a browser push subscription for the current user."""
+    from services.auth_service import get_current_user
+    from services.push_service import save_subscription
+    user = await get_current_user(request)
+    body = await request.json()
+    await save_subscription(user["sub"], body)
+    return {"status": "subscribed"}
+
+
+@app.delete("/push/subscribe", tags=["Push"])
+async def push_unsubscribe(request: Request):
+    """Remove a push subscription (user revoked permission or unsubscribed)."""
+    from services.auth_service import get_current_user
+    from services.push_service import remove_subscription
+    user = await get_current_user(request)
+    body = await request.json()
+    await remove_subscription(user["sub"], body.get("endpoint", ""))
+    return {"status": "unsubscribed"}
+
+
+@app.post("/push/notify", tags=["Push"])
+async def push_notify(request: Request):
+    """Send a Web Push notification to all devices of the current user.
+
+    Called by the client-side monitors when they detect new orders/invoices.
+    The backend fans out the push to every subscribed device for this user,
+    so the notification reaches iOS PWA, Android, and other desktop tabs.
+    """
+    from services.auth_service import get_current_user
+    from services.push_service import send_push
+    user = await get_current_user(request)
+    body = await request.json()
+    await send_push(
+        user_id=user["sub"],
+        title=body.get("title", "AllEasystent"),
+        body=body.get("body", ""),
+        url=body.get("url", "/"),
+    )
+    return {"status": "sent"}
+
+
 # ── Static UI ─────────────────────────────────────────────────────────────────
 # Serve web/ at root — must be mounted AFTER all API routes so they take priority.
 _web_dir = pathlib.Path(__file__).parent / "web"

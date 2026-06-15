@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     rag_top_k: int = 5
 
+    # ── Web Push (VAPID) ──────────────────────────────────────────────────────
+    # Generate once with: python generate_vapid_keys.py
+    # Then add VAPID_PRIVATE_KEY, VAPID_PUBLIC_KEY, VAPID_EMAIL to Railway vars.
+    vapid_private_key: str = ""  # PEM-encoded EC private key
+    vapid_public_key: str = ""   # base64url uncompressed P-256 public key (for browser)
+    vapid_email: str = "mailto:admin@alleasystent.app"
+
     # ── Application ───────────────────────────────────────────────────────────
     app_env: Literal["development", "production"] = "development"
     log_level: str = "INFO"

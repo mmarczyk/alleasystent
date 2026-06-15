@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v26';
+const CACHE = 'alleasystent-v27';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
@@ -31,6 +31,34 @@ self.addEventListener('activate', e =>
       .then(() => self.clients.claim())
   )
 );
+
+// ── Web Push ──────────────────────────────────────────────────────────────────
+
+self.addEventListener('push', e => {
+  const data = e.data?.json() ?? {};
+  e.waitUntil(
+    self.registration.showNotification(data.title ?? 'AllEasystent', {
+      body: data.body ?? '',
+      icon: './icons/icon-192.svg',
+      badge: './icons/icon-192.svg',
+      data: { url: data.url ?? '/' },
+      vibrate: [200, 100, 200],
+    })
+  );
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const url = e.notification.data?.url ?? '/';
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
+      const origin = self.location.origin;
+      const target = new URL(url, origin).href;
+      const existing = cs.find(c => c.url === target || c.url.startsWith(origin));
+      return existing ? existing.focus() : clients.openWindow(url);
+    })
+  );
+});
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;

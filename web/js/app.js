@@ -183,29 +183,86 @@ const Backend = (() => {
   return { query };
 })();
 
-// ── Notifications ────────────────────────────────
-const Notifications = (() => {
-  function supported() { return 'Notification' in window; }
+// ── Web Push ─────────────────────────────────────
+const WebPush = (() => {
+  const SUB_KEY = 'ae_push_subscribed';
 
-  async function requestPermission() {
-    if (!supported()) return false;
-    if (Notification.permission === 'granted') return true;
-    const result = await Notification.requestPermission();
-    return result === 'granted';
+  function isSupported() {
+    return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   }
 
-  function notify(title, body) {
-    if (!supported() || Notification.permission !== 'granted') return;
+  function _urlBase64ToUint8Array(b64) {
+    const pad = '='.repeat((4 - b64.length % 4) % 4);
+    const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+  }
+
+  async function subscribe() {
+    if (!isSupported()) return false;
     try {
-      new Notification(title, {
-        body: body.replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120),
-        icon: 'icons/icon-192.svg',
-        tag: 'alleasystent-msg',
+      const keyRes = await fetch('/push/vapid-public-key', { credentials: 'include' });
+      if (!keyRes.ok) return false;
+      const { publicKey } = await keyRes.json();
+
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') return false;
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: _urlBase64ToUint8Array(publicKey),
+        });
+      }
+      await fetch('/push/subscribe', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub.toJSON()),
       });
-    } catch (e) {}
+      localStorage.setItem(SUB_KEY, '1');
+      return true;
+    } catch (e) {
+      console.error('[WebPush] subscribe error:', e);
+      return false;
+    }
   }
 
-  return { supported, requestPermission, notify };
+  async function sendNotification(title, body, url) {
+    const cleanBody = String(body).replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (localStorage.getItem(SUB_KEY)) {
+      // Fire-and-forget — backend fans out to all user devices (including iOS PWA)
+      fetch('/push/notify', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body: cleanBody, url: url ?? '/' }),
+      }).catch(() => {});
+      return;
+    }
+    // Fallback: direct Notification API (desktop only, not iOS)
+    if (Notification.permission === 'granted') {
+      try { new Notification(title, { body: cleanBody, icon: 'icons/icon-192.svg' }); } catch {}
+    }
+  }
+
+  async function init() {
+    // Re-register subscription on startup so backend always has a fresh endpoint
+    if (!isSupported() || !localStorage.getItem(SUB_KEY)) return;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (!sub) { localStorage.removeItem(SUB_KEY); return; }
+      await fetch('/push/subscribe', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub.toJSON()),
+      }).catch(() => {});
+    } catch {}
+  }
+
+  return { isSupported, subscribe, sendNotification, init };
 })();
 
 // ── Order monitor ────────────────────────────────
@@ -218,12 +275,7 @@ const OrderMonitor = (() => {
 
   async function enable() {
     console.log('[OrderMonitor] enable() called');
-    if (Notifications.supported() && Notification.permission === 'default') {
-      const perm = await Notifications.requestPermission();
-      console.log('[OrderMonitor] notification permission:', perm);
-    } else {
-      console.log('[OrderMonitor] notification permission already:', Notifications.supported() ? Notification.permission : 'API not supported');
-    }
+    await WebPush.subscribe();
     localStorage.setItem(ENABLED_KEY, '1');
     await _saveBaseline();
     if (_timer) clearInterval(_timer);
@@ -282,7 +334,7 @@ const OrderMonitor = (() => {
         const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
         const msg = `Masz ${count} nowe ${label} do realizacji!`;
         console.log('[OrderMonitor] NEW ORDERS DETECTED:', count, data.new_orders);
-        Notifications.notify('AllEasystent — Nowe zamówienie!', msg);
+        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg);
         UI.toast(`🛒 ${msg}`, 10000);
         _injectChatMessage(data.new_orders);
       } else {
@@ -366,10 +418,7 @@ const InvoiceMonitor = (() => {
   }
 
   async function enable() {
-    // Try for permission but don't block — in-app toast works without it
-    if (Notifications.supported() && Notification.permission === 'default') {
-      await Notifications.requestPermission();
-    }
+    await WebPush.subscribe();
     localStorage.setItem(ENABLED_KEY, '1');
     _startPolling(); // first check notifies about ALL currently pending invoices
     UI.toast('✓ Monitoring faktur włączony (co 15 minut)');
@@ -401,7 +450,7 @@ const InvoiceMonitor = (() => {
       const count = newOnes.length;
       const label = count === 1 ? 'zamówienie wymaga' : count < 5 ? 'zamówienia wymagają' : 'zamówień wymaga';
       const msg = `${count} ${label} wystawienia faktury VAT.`;
-      Notifications.notify('AllEasystent — Faktura VAT!', msg);
+      WebPush.sendNotification('AllEasystent — Faktura VAT!', msg);
       UI.toast(`🧾 ${msg}`, 10000);  // in-app fallback — always shown
 
       // Inject assistant message into chat
@@ -683,7 +732,7 @@ const Chat = (() => {
       }
       // Notify if the tab was in the background when the response arrived
       if (document.hidden && fullText && !fullText.startsWith('**Błąd:**')) {
-        Notifications.notify('AllEasystent', fullText);
+        WebPush.sendNotification('AllEasystent', fullText);
       }
     }
   }
@@ -794,6 +843,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   document.getElementById('user-input').focus();
+
+  // Re-register push subscription with backend (token may have rotated)
+  WebPush.init();
 
   // Init monitors AFTER full UI setup so chat injection finds a ready DOM
   OrderMonitor.init();
