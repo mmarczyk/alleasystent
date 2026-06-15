@@ -318,6 +318,24 @@ const InvoiceMonitor = (() => {
       const msg = `${count} ${label} wystawienia faktury VAT.`;
       Notifications.notify('AllEasystent — Faktura VAT!', msg);
       UI.toast(`🧾 ${msg}`, 10000);  // in-app fallback — always shown
+
+      // Inject assistant message into chat
+      _injectChatMessage(newOnes);
+    } catch (e) {}
+  }
+
+  function _injectChatMessage(orders) {
+    try {
+      if (!Store.active()) Chat.newConversation();
+      const lines = orders.map(o => {
+        const buyer = o.buyer || '—';
+        const amount = o.total != null ? ` · ${Number(o.total).toFixed(2)} zł` : '';
+        return `- **${String(o.order_id).slice(0, 8)}…** · ${buyer}${amount}`;
+      }).join('\n');
+      const noun = orders.length === 1 ? 'zamówienie wymagające' : `${orders.length} zamówień wymagających`;
+      const text = `🧾 **Monitoring faktur** — wykryto ${noun} faktury VAT:\n\n${lines}\n\nPamiętaj o wystawieniu faktury dla każdego z nich.`;
+      Store.addMessage('assistant', text);
+      Chat.renderMessages();
     } catch (e) {}
   }
 
