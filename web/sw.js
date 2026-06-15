@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v23';
+const CACHE = 'alleasystent-v24';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
@@ -13,13 +13,14 @@ const SHELL = [
   './icons/icon-512.svg',
 ];
 
+// Allow the page to trigger an immediate SW swap via postMessage
+self.addEventListener('message', e => {
+  if (e.data?.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
 // Pre-cache the entire shell on install so the app is instantly available
 self.addEventListener('install', e =>
-  e.waitUntil(
-    caches.open(CACHE)
-      .then(c => c.addAll(SHELL))
-      .then(() => self.skipWaiting())
-  )
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)))
 );
 
 // Drop old caches and take control of all clients immediately

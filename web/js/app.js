@@ -16,10 +16,53 @@ if (typeof marked !== 'undefined') {
   });
 }
 
+// ── Update detector ───────────────────────────────
+const AppUpdater = (() => {
+  let _knownInstance = null;
+  let _bannerShown = false;
+
+  function _showBanner() {
+    if (_bannerShown) return;
+    _bannerShown = true;
+    const banner = document.createElement('div');
+    banner.id = 'update-banner';
+    banner.style.cssText = [
+      'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:9999',
+      'background:#2563eb', 'color:#fff', 'text-align:center',
+      'padding:.6rem 1rem', 'font-size:.9rem', 'font-weight:500',
+      'display:flex', 'align-items:center', 'justify-content:center', 'gap:.75rem',
+    ].join(';');
+    banner.innerHTML = '🔄 Dostępna nowa wersja aplikacji. '
+      + '<button onclick="AppUpdater.reload()" style="background:#fff;color:#2563eb;border:none;'
+      + 'border-radius:4px;padding:.25rem .75rem;font-weight:700;cursor:pointer">Odśwież teraz</button>';
+    document.body.prepend(banner);
+    // Auto-reload after 10 s if user hasn't clicked
+    setTimeout(() => AppUpdater.reload(), 10000);
+  }
+
+  function check(headers) {
+    const inst = headers?.get?.('X-Server-Instance');
+    if (!inst) return;
+    if (!_knownInstance) { _knownInstance = inst; return; }
+    if (_knownInstance !== inst) _showBanner();
+  }
+
+  function reload() {
+    // Tell SW to activate immediately, then reload
+    navigator.serviceWorker?.getRegistration?.()?.then?.(reg => {
+      if (reg?.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+      else window.location.reload();
+    }) ?? window.location.reload();
+  }
+
+  return { check, reload, showBanner: _showBanner };
+})();
+
 // ── Auth check ────────────────────────────────────
 async function checkAuth() {
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
+    AppUpdater.check(res.headers);
     if (res.status === 401) {
       document.getElementById('login-overlay').style.display = 'flex';
       return false;
@@ -129,6 +172,7 @@ const Backend = (() => {
         sender_id: 'web_user',
       })
     });
+    AppUpdater.check(res.headers);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -686,7 +730,23 @@ window.addEventListener('DOMContentLoaded', async () => {
   const authed = await checkAuth();
   if (!authed) return;
 
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      // When a new SW is found, show update banner once it finishes installing
+      reg.addEventListener('updatefound', () => {
+        reg.installing?.addEventListener('statechange', e => {
+          if (e.target.state === 'installed' && navigator.serviceWorker.controller) {
+            AppUpdater.showBanner();
+          }
+        });
+      });
+    }).catch(() => {});
+    // After SKIP_WAITING the controller changes — reload to serve new assets
+    let _reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!_reloading) { _reloading = true; window.location.reload(); }
+    });
+  }
 
   document.addEventListener('click', e => {
     const sidebar = document.getElementById('sidebar');
