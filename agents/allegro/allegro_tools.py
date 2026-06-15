@@ -382,4 +382,26 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_order_monitoring",
+            "description": (
+                "Show a button to disable automatic order monitoring in the browser. "
+                "Call when the user asks to turn off, stop, or disable order monitoring/notifications."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_invoice_monitoring",
+            "description": (
+                "Show a button to disable automatic VAT invoice monitoring in the browser. "
+                "Call when the user asks to turn off, stop, or disable invoice monitoring/notifications."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]

@@ -58,6 +58,8 @@ class AllegroAgent(BaseAgent):
         "button in the UI that the user must press to activate browser-side monitoring. "
         "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
         "as a standalone promise — you cannot do this. Always call the tool and tell the user to click the button. "
+        "When the user asks to DISABLE / turn off / stop monitoring or notifications, "
+        "call disable_order_monitoring or disable_invoice_monitoring — NEVER explain that you cannot do it. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
         "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way."
     )
@@ -772,6 +774,20 @@ class AllegroAgent(BaseAgent):
                 "Mogę co 15 minut sprawdzać, czy pojawiły się nowe zamówienia wymagające faktury VAT, "
                 "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
                 '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>'
+            )
+
+        if tool_name == "disable_order_monitoring":
+            return (
+                "Kliknij poniższy przycisk, aby wyłączyć monitoring zamówień w tej przeglądarce.\n\n"
+                '<button class="btn-monitoring" style="background:#6b7280" '
+                'onclick="OrderMonitor.disable();this.outerHTML=\'<span>✓ Monitoring zamówień wyłączony</span>\'">🔕 Wyłącz monitoring zamówień</button>'
+            )
+
+        if tool_name == "disable_invoice_monitoring":
+            return (
+                "Kliknij poniższy przycisk, aby wyłączyć monitoring faktur w tej przeglądarce.\n\n"
+                '<button class="btn-invoice-monitoring" style="filter:grayscale(1)" '
+                'onclick="InvoiceMonitor.disable();this.outerHTML=\'<span>✓ Monitoring faktur wyłączony</span>\'">🔕 Wyłącz monitoring faktur</button>'
             )
 
         return f"Unknown tool: {tool_name}"
