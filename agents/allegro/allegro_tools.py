@@ -4,14 +4,40 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_new_orders",
+            "description": (
+                "List new (unprocessed) orders waiting to be fulfilled. "
+                "Use for any question about 'nowe zamówienia', 'nowe', 'oczekujące', "
+                "'co nowego', 'jakie zamówienia mam', 'ile zamówień', new/pending orders. "
+                "Automatically filters for READY_FOR_PROCESSING + fulfillment=NEW orders. "
+                "Returns order IDs, buyer info, fulfillment status, and totals."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "buyer_login": {
+                        "type": "string",
+                        "description": "Optionally filter by buyer's Allegro login.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max orders to return (1–100).",
+                        "default": 100,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_orders",
             "description": (
-                "List orders from Allegro. "
-                "MANDATORY for 'nowe zamówienia' / new/pending orders: "
-                "status=READY_FOR_PROCESSING AND fulfillment_status=NEW AND line_items_sent=[NONE]. "
-                "NEVER omit fulfillment_status=NEW when the user asks about new orders. "
-                "Always use limit=50 or higher unless user explicitly asks for fewer. "
-                "Returns order IDs, buyer info, fulfillment status, and totals."
+                "List Allegro orders with arbitrary filters. "
+                "Use ONLY for specific filtered queries — e.g. orders by a specific buyer, "
+                "orders with a particular fulfillment status (SENT, PROCESSING, etc.), "
+                "or cancelled orders. "
+                "For new/pending orders use get_new_orders instead."
             ),
             "parameters": {
                 "type": "object",
@@ -37,7 +63,7 @@ ALLEGRO_TOOLS: list[dict] = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max orders to return (1–100). Default 50 — always fetch at least 50 to avoid missing orders.",
+                        "description": "Max orders to return (1–100).",
                         "default": 50,
                     },
                 },

@@ -61,11 +61,7 @@ class AllegroAgent(BaseAgent):
         "When the user asks to DISABLE / turn off / stop monitoring or notifications, "
         "call disable_order_monitoring or disable_invoice_monitoring — NEVER explain that you cannot do it. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
-        "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way. "
-        "NEW ORDERS — CRITICAL: When the user asks about 'nowe zamówienia', 'nowe', 'oczekujące', or new/pending orders, "
-        "you MUST call get_orders with fulfillment_status=NEW. Never omit fulfillment_status for new order queries. "
-        "PAGINATION — CRITICAL: Always request at least limit=50 for get_orders unless the user explicitly asks for fewer. "
-        "Never default to 10 when the user asks to see 'wszystkie' or an unspecified list of orders."
+        "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way."
     )
 
     def __init__(self, user_id: str | None = None):
@@ -257,6 +253,17 @@ class AllegroAgent(BaseAgent):
 
     async def _dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         logger.info("DEBUG _dispatch: tool=%s input=%s", tool_name, tool_input)
+        if tool_name == "get_new_orders":
+            orders = await self._allegro.get_orders(
+                status="READY_FOR_PROCESSING",
+                fulfillment_status="NEW",
+                buyer_login=tool_input.get("buyer_login"),
+                limit=min(int(tool_input.get("limit", 100)), 100),
+            )
+            if not orders:
+                return "Brak nowych zamówień."
+            return "\n\n".join(self._order_block(o) for o in orders)
+
         if tool_name == "get_orders":
             orders = await self._allegro.get_orders(
                 status=tool_input.get("status"),
