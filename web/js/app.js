@@ -194,17 +194,17 @@ const OrderMonitor = (() => {
 
   async function _saveBaseline() {
     try {
-      console.log('[OrderMonitor] saving baseline (no since= param)…');
-      const res = await fetch('/allegro/order-events', { credentials: 'include' });
+      console.log('[OrderMonitor] saving baseline via /order-event-stats…');
+      const res = await fetch('/allegro/order-event-stats', { credentials: 'include' });
       console.log('[OrderMonitor] baseline HTTP', res.status);
       if (!res.ok) return;
       const data = await res.json();
       console.log('[OrderMonitor] baseline response:', JSON.stringify(data));
-      if (data.last_event_id) {
-        localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
-        console.log('[OrderMonitor] baseline saved, last_event_id =', data.last_event_id);
+      if (data.latest_event_id) {
+        localStorage.setItem(LAST_EVT_KEY, data.latest_event_id);
+        console.log('[OrderMonitor] baseline saved, latest_event_id =', data.latest_event_id);
       } else {
-        console.warn('[OrderMonitor] baseline response has no last_event_id');
+        console.warn('[OrderMonitor] baseline response has no latest_event_id');
       }
     } catch (e) {
       console.error('[OrderMonitor] baseline fetch error:', e);

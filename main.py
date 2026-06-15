@@ -298,6 +298,26 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
     }
 
 
+@app.get("/allegro/order-event-stats", tags=["Allegro"])
+async def allegro_order_event_stats(request: Request):
+    """Return the latest Allegro event ID — used to establish monitoring baseline."""
+    from services.auth_service import get_current_user
+    from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
+
+    user = await get_current_user(request)
+    service = AllegroService(user_id=user["sub"])
+    if service._tokens is None:
+        await service._load_tokens_from_redis()
+    if service._tokens is None:
+        raise HTTPException(401, "Not authenticated with Allegro")
+    try:
+        return await service.get_order_event_stats()
+    except AllegroAuthError:
+        raise HTTPException(401, "Allegro auth error")
+    except AllegroAPIError as exc:
+        raise HTTPException(502, str(exc))
+
+
 @app.get("/allegro/order-events", tags=["Allegro"])
 async def allegro_order_events(request: Request, since: str | None = None):
     """Poll Allegro order events for new READY_FOR_PROCESSING orders since a given event ID."""

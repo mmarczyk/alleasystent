@@ -715,6 +715,12 @@ class AllegroService:
         data = await self._get("/order/carriers")
         return data.get("carriers", [])
 
+    async def get_order_event_stats(self) -> dict[str, Any]:
+        """Return the latest event ID and timestamp — use for monitoring baseline."""
+        data = await self._get("/order/event-stats")
+        latest = data.get("latestEvent") or {}
+        return {"latest_event_id": latest.get("id"), "occurred_at": latest.get("occurredAt")}
+
     async def get_order_events(self, since_event_id: str | None = None) -> dict[str, Any]:
         """Fetch new READY_FOR_PROCESSING order events since a given event ID."""
         # List of tuples keeps [] unencoded in httpx
