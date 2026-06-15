@@ -261,15 +261,27 @@ const OrderMonitor = (() => {
     console.log('[OrderMonitor] polling started');
   }
 
-  function _injectChatMessage(orders) {
+  async function _injectChatMessage(orders) {
     try {
       if (!Store.active()) Chat.newConversation();
-      const lines = orders.map(o => {
-        const id = o.order_id ? `**${String(o.order_id).slice(0, 8)}…**` : `event ${o.event_id}`;
-        return `- ${id}`;
-      }).join('\n');
+      // Fetch full details for each new order in parallel
+      const details = await Promise.all(
+        orders.map(o => o.order_id
+          ? fetch(`/allegro/orders/${encodeURIComponent(o.order_id)}`, { credentials: 'include' })
+              .then(r => r.ok ? r.json() : null)
+              .catch(() => null)
+          : Promise.resolve(null)
+        )
+      );
       const noun = orders.length === 1 ? 'nowe zamówienie' : `${orders.length} nowe zamówienia`;
-      const text = `🛒 **Monitoring zamówień** — wykryto ${noun} gotowe do realizacji:\n\n${lines}\n\nMożesz zapytać mnie o szczegóły tych zamówień.`;
+      const lines = orders.map((o, i) => {
+        const d = details[i];
+        if (!d) return `- **${String(o.order_id || '').slice(0, 8)}…** — brak szczegółów`;
+        const items = (d.items || []).map(it => `${it.name} ×${it.quantity}`).join(', ');
+        const total = `${Number(d.total_price).toFixed(2)} ${d.currency || 'PLN'}`;
+        return `- **${d.buyer_login}** · ${total} · ${d.delivery_method}\n  ${items}`;
+      }).join('\n');
+      const text = `🛒 **Monitoring zamówień** — wykryto ${noun} gotowe do realizacji:\n\n${lines}`;
       Store.addMessage('assistant', text);
       Chat.renderMessages();
     } catch (e) { console.error('[OrderMonitor] chat inject error:', e); }

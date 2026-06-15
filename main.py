@@ -318,6 +318,37 @@ async def allegro_order_event_stats(request: Request):
         raise HTTPException(502, str(exc))
 
 
+@app.get("/allegro/orders/{order_id}", tags=["Allegro"])
+async def allegro_get_order(order_id: str, request: Request):
+    """Fetch details of a single Allegro order by checkout-form ID."""
+    from services.auth_service import get_current_user
+    from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
+
+    user = await get_current_user(request)
+    service = AllegroService(user_id=user["sub"])
+    if service._tokens is None:
+        await service._load_tokens_from_redis()
+    if service._tokens is None:
+        raise HTTPException(401, "Not authenticated with Allegro")
+    try:
+        order = await service.get_order(order_id)
+    except AllegroAuthError:
+        raise HTTPException(401, "Allegro auth error")
+    except AllegroAPIError as exc:
+        raise HTTPException(502, str(exc))
+    delivery = order.delivery or {}
+    method_name = (delivery.get("method") or {}).get("name") or "—"
+    return {
+        "order_id": order.order_id,
+        "buyer_login": order.buyer_login,
+        "total_price": order.total_price,
+        "currency": order.currency,
+        "fulfillment_status": order.fulfillment_status,
+        "delivery_method": method_name,
+        "items": [{"name": li.offer_name, "quantity": li.quantity, "price": li.price} for li in order.line_items],
+    }
+
+
 @app.get("/allegro/order-events", tags=["Allegro"])
 async def allegro_order_events(request: Request, since: str | None = None):
     """Poll Allegro order events for new READY_FOR_PROCESSING orders since a given event ID."""
