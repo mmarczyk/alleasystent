@@ -166,9 +166,8 @@ const Notifications = (() => {
 
 // ── Order monitor ────────────────────────────────
 const OrderMonitor = (() => {
-  const ENABLED_KEY    = 'ae_monitor_enabled';
-  const LAST_EVT_KEY   = 'ae_monitor_last_event';
-  const LAST_CHECK_KEY = 'ae_monitor_last_check';
+  const ENABLED_KEY  = 'ae_monitor_enabled';
+  const LAST_EVT_KEY = 'ae_monitor_last_event';
   let _timer = null;
 
   function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
@@ -182,7 +181,6 @@ const OrderMonitor = (() => {
       console.log('[OrderMonitor] notification permission already:', Notifications.supported() ? Notification.permission : 'API not supported');
     }
     localStorage.setItem(ENABLED_KEY, '1');
-    localStorage.setItem(LAST_CHECK_KEY, new Date().toISOString());
     await _saveBaseline();
     if (_timer) clearInterval(_timer);
     _timer = setInterval(_check, 5 * 60 * 1000);
@@ -220,30 +218,21 @@ const OrderMonitor = (() => {
   }
 
   async function _check() {
-    const lastId    = localStorage.getItem(LAST_EVT_KEY);
-    const lastCheck = localStorage.getItem(LAST_CHECK_KEY);
-    const nowIso    = new Date().toISOString();
-    console.log('[OrderMonitor] _check() lastId =', lastId, 'lastCheck =', lastCheck, nowIso);
+    const lastId = localStorage.getItem(LAST_EVT_KEY);
+    console.log('[OrderMonitor] _check() lastId =', lastId, new Date().toISOString());
     if (!lastId) {
       console.warn('[OrderMonitor] no baseline — saving one and skipping this tick');
-      localStorage.setItem(LAST_CHECK_KEY, nowIso);
       await _saveBaseline();
       return;
     }
     try {
-      let url = `/allegro/order-events?since=${encodeURIComponent(lastId)}`;
-      if (lastCheck) url += `&min_occurred_at=${encodeURIComponent(lastCheck)}`;
+      const url = `/allegro/order-events?since=${encodeURIComponent(lastId)}`;
       const res = await fetch(url, { credentials: 'include' });
       console.log('[OrderMonitor] poll HTTP', res.status, 'url:', url);
-      if (!res.ok) {
-        console.error('[OrderMonitor] poll failed, status:', res.status);
-        return;
-      }
+      if (!res.ok) { console.error('[OrderMonitor] poll failed, status:', res.status); return; }
       const data = await res.json();
       console.log('[OrderMonitor] poll response:', JSON.stringify(data));
-      // Update both cursors after successful poll
       if (data.last_event_id) localStorage.setItem(LAST_EVT_KEY, data.last_event_id);
-      localStorage.setItem(LAST_CHECK_KEY, nowIso);
       const count = (data.new_orders || []).length;
       if (count > 0) {
         const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
@@ -265,10 +254,6 @@ const OrderMonitor = (() => {
     console.log('[OrderMonitor] init() enabled =', enabled, 'lastId =', lastId,
       'notif =', Notifications.supported() ? Notification.permission : 'unsupported');
     if (!enabled) return;
-    // Ensure last-check timestamp exists (guards against replaying old events after reopen)
-    if (!localStorage.getItem(LAST_CHECK_KEY)) {
-      localStorage.setItem(LAST_CHECK_KEY, new Date().toISOString());
-    }
     if (_timer) clearInterval(_timer);
     _check();
     _timer = setInterval(_check, 5 * 60 * 1000);
