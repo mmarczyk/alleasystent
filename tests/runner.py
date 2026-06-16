@@ -160,7 +160,7 @@ HTML = """<!DOCTYPE html>
 
 <header>
   <h1>AllEasystent — Test Runner</h1>
-  <span id="target-url"></span>
+  <span id="target-url">→ __TARGET_URL__</span>
 </header>
 
 <div class="controls">
@@ -188,8 +188,7 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-const targetUrl = (window.ENV_ALLEASYSTENT_URL || '') || '(nie ustawiono ALLEASYSTENT_URL)';
-document.getElementById('target-url').textContent = '→ ' + targetUrl;
+// target URL injected server-side into __TARGET_URL__
 
 let es = null;
 let stats = {pass:0, fail:0, skip:0};
@@ -311,4 +310,5 @@ async function stopRun() {
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return HTML
+    target = os.environ.get("ALLEASYSTENT_URL", "(nie ustawiono ALLEASYSTENT_URL)")
+    return HTML.replace("__TARGET_URL__", target)
