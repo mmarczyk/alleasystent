@@ -5,6 +5,7 @@ Configuration (environment variables or defaults):
   ALLEASYSTENT_URL   — base URL of the running backend, e.g. https://your-app.railway.app
                        default: http://localhost:8080
   ALLEGRO_AUTHED     — set to "1" to run tests that require Allegro authorization
+  JWT_SECRET         — must match the main app's JWT_SECRET to generate a test session cookie
 """
 
 import os
@@ -19,6 +20,27 @@ requires_allegro = pytest.mark.skipif(
     not ALLEGRO_AUTHED,
     reason="Wymaga autoryzacji Allegro. Ustaw ALLEGRO_AUTHED=1 po autoryzacji.",
 )
+
+
+def _make_session_cookie() -> str | None:
+    """Generate a test JWT session cookie if JWT_SECRET is available."""
+    secret = os.environ.get("JWT_SECRET", "")
+    if not secret:
+        return None
+    try:
+        from datetime import datetime, timedelta, timezone
+        import jwt
+        payload = {
+            "sub": "test_user",
+            "name": "Test User",
+            "exp": datetime.now(timezone.utc) + timedelta(days=1),
+        }
+        return jwt.encode(payload, secret, algorithm="HS256")
+    except Exception:
+        return None
+
+
+_SESSION_COOKIE = _make_session_cookie()
 
 
 def new_session() -> str:
@@ -36,7 +58,8 @@ def query(message: str, session_id: str | None = None, sender_id: str = "test_us
         "session_id": session_id or new_session(),
         "sender_id": sender_id,
     }
-    resp = httpx.post(f"{BASE_URL}/query", json=payload, timeout=60)
+    cookies = {"session": _SESSION_COOKIE} if _SESSION_COOKIE else {}
+    resp = httpx.post(f"{BASE_URL}/query", json=payload, cookies=cookies, timeout=60)
     resp.raise_for_status()
     return resp.json()
 
