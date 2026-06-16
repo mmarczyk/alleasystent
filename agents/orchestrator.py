@@ -29,13 +29,17 @@ logger = logging.getLogger(__name__)
 INTENT_SYSTEM_PROMPT = """
 Classify the user's message. Reply with EXACTLY ONE of these labels and nothing else:
 
-allegro_orders      — requests for order data, shipping, delivery, tracking, returns, invoices, "zamówienia", "paczka"
+allegro_orders      — requests for order data, shipping, delivery, tracking, returns, invoices, "zamówienia", "paczka";
+                       ALSO follow-up data questions about orders in conversation context
+                       (e.g. "Ile ich jest?", "Co kupiło się u mnie ostatnio?", "Ile to razem?")
 allegro_offers      — listings, prices, stock, offer management, "oferty", "cena", "stan magazynowy"
 allegro_messaging   — buyer messages, send message, "wiadomości", "napisz do kupującego"
 allegro_account     — seller account, fees, billing, statistics, "konto", "opłaty", "prowizja"
-general_knowledge   — product FAQs, store policies, shipping info
+general_knowledge   — product FAQs, store policies, shipping schedule
+                       (e.g. "polityka zwrotów", "kiedy wysyłacie zamówienia?", "ile dni na zwrot?")
 chitchat            — greetings, small talk, questions about assistant capabilities/features,
-                       AND questions where the user asks what THEY themselves said, want, or are looking for
+                       AND meta-questions where the user asks to recall what THEY THEMSELVES said
+                       or requested earlier in this conversation (NOT follow-up data requests)
                        (e.g. "What was I asking about?", "Jakich zamówień szukam?", "Co chciałem?")
 
 Output the label only. No punctuation, no explanation.
@@ -112,6 +116,9 @@ class Orchestrator:
         (["cześć", "hej", "witaj", "dzień dobry", "dobry wieczór", "siema",
           "hello", "hi ", "hey "],
          "chitchat"),
+        # Store policies / FAQs — checked BEFORE orders so "polityka zwrotów" → general_knowledge
+        (["polityk", "faq", "regulamin", "kiedy wysyłacie", "kiedy wysyłają"],
+         "general_knowledge"),
         # Orders
         (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
           "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment"],

@@ -9,6 +9,7 @@ Configuration (environment variables or defaults):
 
 import os
 import time
+import uuid
 import pytest
 import httpx
 
@@ -23,7 +24,7 @@ requires_allegro = pytest.mark.skipif(
 
 def new_session() -> str:
     """Generate a unique session ID for test isolation."""
-    return f"test_{int(time.time() * 1000)}"
+    return f"test_{uuid.uuid4().hex[:12]}"
 
 
 def query(message: str, session_id: str | None = None, sender_id: str = "test_user") -> dict:

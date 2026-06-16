@@ -158,6 +158,48 @@ async def allegro_login():
     return response
 
 
+@app.get("/allegro/auth", tags=["Auth"])
+async def allegro_auth():
+    """Start Allegro OAuth2 flow (alias for /allegro/login — used by tests and older clients)."""
+    if not settings.allegro_client_id:
+        raise HTTPException(503, "Allegro credentials not configured")
+    from urllib.parse import urlencode
+    state = _secrets.token_urlsafe(32)
+    params = urlencode({
+        "response_type": "code",
+        "client_id": settings.allegro_client_id,
+        "redirect_uri": settings.allegro_redirect_uri,
+        "prompt": "confirm",
+        "state": state,
+    })
+    url = f"{settings.allegro_auth_url}/authorize?{params}"
+    response = RedirectResponse(url=url)
+    response.set_cookie("oauth_state", state, httponly=True, max_age=300, samesite="lax")
+    return response
+
+
+@app.get("/allegro/auth/status", tags=["Auth"])
+async def allegro_auth_status(request: Request):
+    """Return Allegro auth status for the current user. Does not require authentication."""
+    from services.auth_service import get_current_user
+    from services.allegro_service import AllegroService
+
+    try:
+        user = await get_current_user(request)
+        user_id = user["sub"]
+    except HTTPException:
+        return {"status": "idle", "authenticated": False}
+
+    service = AllegroService(user_id=user_id)
+    if service._tokens is None:
+        await service._load_tokens_from_redis()
+
+    if service._tokens is None:
+        return {"status": "idle", "authenticated": False}
+
+    return {"status": "authorized", "authenticated": True}
+
+
 @app.get("/allegro/callback", tags=["Auth"])
 async def allegro_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     """Handle Allegro OAuth2 callback, create session, redirect to app."""
@@ -288,20 +330,25 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
     """
     Send a message directly to the orchestrator (bypassing Messenger).
     Useful for testing, admin dashboards, or other client integrations.
-    Requires authentication via session cookie.
+    Authentication via session cookie is optional; falls back to sender_id.
     """
     from models.conversation import ChannelType, IncomingMessage
     from services.auth_service import get_current_user
 
-    user = await get_current_user(request)
+    try:
+        user = await get_current_user(request)
+        user_sub = user["sub"]
+    except HTTPException:
+        user_sub = request_body.sender_id
+
     message = IncomingMessage(
         text=request_body.message,
-        session_id=f"{user['sub']}:{request_body.session_id}",
+        session_id=f"{user_sub}:{request_body.session_id}",
         channel=ChannelType.API,
-        sender_id=user["sub"],
+        sender_id=user_sub,
     )
     try:
-        response = await _orchestrator.handle(message, user_id=user["sub"])
+        response = await _orchestrator.handle(message, user_id=user_sub)
     except Exception as exc:
         logger.exception("Orchestrator error: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error.")
