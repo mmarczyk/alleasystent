@@ -16,11 +16,11 @@ class TestSessionIsolation:
         """
         s1 = new_session()
         s2 = new_session()
-        query("Cześć, jestem Jan Kowalski.", s1)
+        query("Cześć, jestem Zygmunt Krupczyński.", s1)
         r = query("Jak mam na imię?", s2)
         resp = r["response"].lower()
-        # Sesja 2 nie powinna wiedzieć o Janie Kowalskim
-        assert "kowalski" not in resp and "jan" not in resp, (
+        # Sesja 2 nie powinna wiedzieć o Zygmuncie Krupczyńskim
+        assert "krupczyń" not in resp and "zygmunt" not in resp, (
             f"Sesje powinny być izolowane. s2 zwróciła: {r['response'][:300]}"
         )
 

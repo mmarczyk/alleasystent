@@ -248,6 +248,9 @@ class Orchestrator:
                     "- Informacje o koncie sprzedawcy (opłaty, statystyki, limity)\n"
                     "- Odpowiedzi na pytania z bazy wiedzy sklepu (polityki, FAQ, wysyłka)\n"
                     "After greeting, gently ask how you can help.\n\n"
+                    "CRITICAL: Never invent, guess, or assume personal details (name, company, etc.) "
+                    "that the user has not explicitly stated in this conversation. "
+                    "If asked 'What is my name?' with no prior context, say you don't know.\n\n"
                     "LANGUAGE RULE: If the user writes in Polish, respond entirely in Polish. "
                     "If in English, respond in English. Never mix languages."
                 ),
