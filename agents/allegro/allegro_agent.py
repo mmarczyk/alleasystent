@@ -238,6 +238,7 @@ class AllegroAgent(BaseAgent):
                 fulfillment_status="NEW",
                 buyer_login=tool_input.get("buyer_login"),
                 limit=min(int(tool_input.get("limit", 100)), 100),
+                bypass_cache=True,
             )
             if not orders:
                 return "Brak nowych zamówień."
@@ -698,9 +699,9 @@ class AllegroAgent(BaseAgent):
             carrier_map: dict[str, str] = {c["id"]: c.get("name", c["id"]) for c in carriers_raw}
 
             if not fulfillment_status:
-                orders = [o for o in orders if o.fulfillment_status in ("NEW", "PROCESSING")]
+                orders = [o for o in orders if o.fulfillment_status == "READY_FOR_SHIPMENT"]
             if not orders:
-                return "Brak zamówień do wysłania."
+                return "Brak zamówień gotowych do wysłania."
             courier_counts: Counter = Counter()
             blocks = []
             for o in orders:

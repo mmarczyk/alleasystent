@@ -290,8 +290,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Use whenever the user asks: which couriers are in pending orders, "
                 "which delivery methods were selected, tracking numbers, or any question "
                 "combining orders with shipping/courier/delivery. "
-                "Default (no filters): returns all unsent orders (status=READY_FOR_PROCESSING, "
-                "fulfillment_status not SENT/PICKED_UP). "
+                "Default (no filters): returns orders with fulfillment_status=READY_FOR_SHIPMENT "
+                "(packed and awaiting carrier handoff). "
                 "For 'orders to send' / 'do wysłania' leave fulfillment_status empty."
             ),
             "parameters": {
@@ -305,7 +305,7 @@ ALLEGRO_TOOLS: list[dict] = [
                     "fulfillment_status": {
                         "type": "string",
                         "description": (
-                            "Fulfillment status filter. Leave empty to get all unsent orders. "
+                            "Fulfillment status filter. Leave empty to get READY_FOR_SHIPMENT orders. "
                             "Use SENT only when explicitly asking about already-shipped orders."
                         ),
                         "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],

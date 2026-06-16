@@ -367,15 +367,17 @@ class AllegroService:
         bought_at_lte: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        bypass_cache: bool = False,
     ) -> list[AllegroOrder]:
         cache_key = (
             f"{status}:{buyer_login}:{fulfillment_status}:{line_items_sent}:"
             f"{bought_at_gte}:{bought_at_lte}:{limit}:{offset}"
         )
-        cached = self._orders_list_cache.get(cache_key)
-        if cached is not None:
-            logger.debug("orders list cache hit: %s", cache_key)
-            return cached
+        if not bypass_cache:
+            cached = self._orders_list_cache.get(cache_key)
+            if cached is not None:
+                logger.debug("orders list cache hit: %s", cache_key)
+                return cached
 
         base_params: dict[str, Any] = {}
         if status:
