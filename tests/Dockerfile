@@ -12,5 +12,8 @@ COPY . .
 ENV ALLEASYSTENT_URL=""
 ENV ALLEGRO_AUTHED="0"
 ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
 
-CMD ["pytest", "-v", "--tb=short", "--no-header"]
+EXPOSE 8080
+
+CMD ["sh", "-c", "uvicorn runner:app --host 0.0.0.0 --port ${PORT}"]
