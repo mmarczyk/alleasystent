@@ -232,6 +232,20 @@ const WebPush = (() => {
   // other devices (e.g. iOS PWA) can retrieve it via /push/pending on startup.
   async function sendNotification(title, body, chatText, url) {
     const cleanBody = String(body).replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+
+    // Direct Notification — instant, for the current device (desktop/Android tab)
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        new Notification(title, {
+          body: cleanBody,
+          icon: 'icons/icon-192.svg',
+          tag: 'alleasystent-monitor',  // same tag so SW push replaces it silently
+        });
+      } catch {}
+    }
+
+    // Web Push — fans out to all subscribed devices (iOS PWA, other desktops, background tabs)
+    // The SW shows a notification with the same tag, replacing the direct one on this device
     if (localStorage.getItem(SUB_KEY)) {
       const payload = { title, body: cleanBody, url: url ?? '/' };
       if (chatText) payload.chatMessage = chatText;
@@ -241,11 +255,6 @@ const WebPush = (() => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       }).catch(() => {});
-      return;
-    }
-    // Fallback: direct Notification API (desktop only, not iOS)
-    if (Notification.permission === 'granted') {
-      try { new Notification(title, { body: cleanBody, icon: 'icons/icon-192.svg' }); } catch {}
     }
   }
 

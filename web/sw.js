@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v27';
+const CACHE = 'alleasystent-v28';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
@@ -43,6 +43,8 @@ self.addEventListener('push', e => {
       badge: './icons/icon-192.svg',
       data: { url: data.url ?? '/' },
       vibrate: [200, 100, 200],
+      tag: 'alleasystent-monitor',  // replaces any direct Notification on same device silently
+      renotify: false,
     })
   );
 });

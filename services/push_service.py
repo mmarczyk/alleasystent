@@ -103,12 +103,12 @@ async def send_push(user_id: str, title: str, body: str, url: str = "/") -> None
     from config.settings import get_settings
     settings = get_settings()
     if not settings.vapid_private_key or not settings.vapid_public_key:
-        logger.debug("VAPID keys not configured — skipping push notification")
+        logger.warning("VAPID keys not configured (set VAPID_PRIVATE_KEY + VAPID_PUBLIC_KEY in Railway) — skipping push")
         return
 
     subscriptions = await _get_subscriptions(user_id)
     if not subscriptions:
-        logger.debug("No push subscriptions for user %s", user_id)
+        logger.info("No push subscriptions for user %s — nothing to send", user_id)
         return
 
     try:
