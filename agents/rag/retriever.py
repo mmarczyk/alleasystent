@@ -192,8 +192,16 @@ class VertexAIRetriever(BaseRetriever):
         logger.warning("Vertex AI Vector Search deletion must be done via batch job")
 
 
+_chroma_singleton: "ChromaRetriever | None" = None
+
+
 def build_retriever() -> BaseRetriever:
+    global _chroma_singleton
     settings = get_settings()
     if settings.rag_backend == "vertex_ai":
         return VertexAIRetriever()
-    return ChromaRetriever()
+    # Singleton: one PersistentClient per process avoids SQLite locking when the
+    # indexer and RAGAgent both open the same ChromaDB directory simultaneously.
+    if _chroma_singleton is None:
+        _chroma_singleton = ChromaRetriever()
+    return _chroma_singleton

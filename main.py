@@ -173,7 +173,7 @@ async def allegro_auth():
         "state": state,
     })
     url = f"{settings.allegro_auth_url}/authorize?{params}"
-    response = RedirectResponse(url=url)
+    response = RedirectResponse(url=url, status_code=302)
     response.set_cookie("oauth_state", state, httponly=True, max_age=300, samesite="lax")
     return response
 
