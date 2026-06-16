@@ -374,8 +374,15 @@ const OrderMonitor = (() => {
     const enabled = isEnabled();
     const lastId  = localStorage.getItem(LAST_EVT_KEY);
     console.log('[OrderMonitor] init() enabled =', enabled, 'lastId =', lastId,
-      'notif =', Notifications.supported() ? Notification.permission : 'unsupported');
+      'push =', !!localStorage.getItem('ae_push_subscribed'),
+      'notif =', typeof Notification !== 'undefined' ? Notification.permission : 'unsupported');
     if (!enabled) return;
+    // Auto-subscribe to Web Push if monitoring was enabled before VAPID was configured.
+    // Works silently when Notification permission is already granted (no gesture needed).
+    if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      console.log('[OrderMonitor] init: attempting auto-subscribe to Web Push');
+      WebPush.subscribe().then(ok => console.log('[OrderMonitor] auto-subscribe result:', ok)).catch(() => {});
+    }
     if (_timer) clearInterval(_timer);
     _check();
     _timer = setInterval(_check, 5 * 60 * 1000);
@@ -511,7 +518,9 @@ const InvoiceMonitor = (() => {
 
   function init() {
     if (!isEnabled()) return;
-    // Don't disable just because notifications are unavailable — in-app toast still works
+    if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      WebPush.subscribe().catch(() => {});
+    }
     _startPolling();
   }
 

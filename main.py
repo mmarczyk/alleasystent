@@ -416,6 +416,22 @@ async def allegro_pending_invoices(request: Request):
 
 # ── Web Push ─────────────────────────────────────────────────────────────────
 
+@app.get("/push/status", tags=["Push"])
+async def push_status(request: Request):
+    """Debug: show push configuration and subscriptions for the current user."""
+    from services.auth_service import get_current_user
+    from services.push_service import _get_subscriptions
+    user = await get_current_user(request)
+    subs = await _get_subscriptions(user["sub"])
+    return {
+        "user": user["sub"],
+        "vapid_public_key_set": bool(settings.vapid_public_key),
+        "vapid_private_key_set": bool(settings.vapid_private_key),
+        "subscriptions_count": len(subs),
+        "subscription_endpoints": [s.get("endpoint", "")[:60] + "…" for s in subs],
+    }
+
+
 @app.get("/push/vapid-public-key", tags=["Push"])
 async def push_vapid_key():
     """Return the VAPID public key so the browser can subscribe to push."""
