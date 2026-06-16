@@ -68,37 +68,40 @@ def _find_or_create_results_issue() -> int:
 
 def _build_comment(lines: list[str], exit_code: int) -> str:
     passed = failed = skipped = 0
-    failures: list[str] = []
     duration = ""
-    current_failure: list[str] = []
-    in_failure = False
 
+    # Count results from verbose lines (test_file.py::Class::method PASSED)
     for line in lines:
-        m = re.match(r"^(\S+\.py(?:::\S+)+)\s+(PASSED|FAILED|ERROR|SKIPPED)", line)
+        m = re.match(r"^\S+\.py(?:::\S+)+\s+(PASSED|FAILED|ERROR|SKIPPED)", line)
         if m:
-            state = m.group(2)
-            if state == "PASSED":   passed += 1
-            elif state in ("FAILED", "ERROR"): failed += 1
-            elif state == "SKIPPED": skipped += 1
-
-        if re.match(r"^FAILED ", line):
-            in_failure = True
-            current_failure = [line]
-        elif in_failure:
-            if line.startswith("_") or line.startswith("="):
-                if current_failure:
-                    failures.append("\n".join(current_failure))
-                current_failure = []
-                in_failure = False
-            else:
-                current_failure.append(line)
+            state = m.group(1)
+            if state == "PASSED":               passed += 1
+            elif state in ("FAILED", "ERROR"):  failed += 1
+            elif state == "SKIPPED":            skipped += 1
 
         t = re.search(r"in ([\d.]+)s", line)
         if t and "=====" in line:
             duration = t.group(1) + "s"
 
-    if current_failure:
-        failures.append("\n".join(current_failure))
+    # Collect traceback blocks — each starts with "____" separator line
+    tracebacks: list[str] = []
+    current_tb: list[str] = []
+    in_tb = False
+    for line in lines:
+        if re.match(r"^_{5,}", line):          # _____ TestClass.test_name _____
+            if current_tb:
+                tracebacks.append("\n".join(current_tb))
+            current_tb = [line]
+            in_tb = True
+        elif re.match(r"^={5,}", line) and in_tb:  # ===== summary =====
+            if current_tb:
+                tracebacks.append("\n".join(current_tb))
+            current_tb = []
+            in_tb = False
+        elif in_tb:
+            current_tb.append(line)
+    if current_tb:
+        tracebacks.append("\n".join(current_tb))
 
     icon = "✅" if exit_code == 0 else "❌"
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -117,10 +120,10 @@ def _build_comment(lines: list[str], exit_code: int) -> str:
         f"| ⏭️ Skipped | {skipped} |",
     ]
 
-    if failures:
+    if tracebacks:
         lines_md += ["", "### Nieudane testy", ""]
-        for f in failures[:10]:  # max 10 failure blocks
-            lines_md += [f"```\n{f[:1200]}\n```", ""]
+        for tb in tracebacks[:10]:  # max 10 traceback blocks
+            lines_md += [f"```\n{tb[:1200]}\n```", ""]
 
     return "\n".join(lines_md)
 
