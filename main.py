@@ -453,11 +453,18 @@ async def push_notify(request: Request):
     Called by the client-side monitors when they detect new orders/invoices.
     The backend fans out the push to every subscribed device for this user,
     so the notification reaches iOS PWA, Android, and other desktop tabs.
+
+    Optional body field `chatMessage`: if present, the formatted chat text is stored
+    in Redis so that any device opening the app (including ones not running polling)
+    can retrieve and display it via GET /push/pending.
     """
     from services.auth_service import get_current_user
-    from services.push_service import send_push
+    from services.push_service import send_push, store_pending_chat
     user = await get_current_user(request)
     body = await request.json()
+    chat_message = body.get("chatMessage")
+    if chat_message:
+        await store_pending_chat(user["sub"], chat_message)
     await send_push(
         user_id=user["sub"],
         title=body.get("title", "AllEasystent"),
@@ -465,6 +472,21 @@ async def push_notify(request: Request):
         url=body.get("url", "/"),
     )
     return {"status": "sent"}
+
+
+@app.get("/push/pending", tags=["Push"])
+async def push_pending(request: Request):
+    """Return (and remove) the oldest pending chat message for the current user.
+
+    Called on app startup — lets devices that were offline during polling still
+    receive the formatted order/invoice notification in their chat.
+    Returns {chatMessage: string} or {chatMessage: null} when queue is empty.
+    """
+    from services.auth_service import get_current_user
+    from services.push_service import pop_pending_chat
+    user = await get_current_user(request)
+    text = await pop_pending_chat(user["sub"])
+    return {"chatMessage": text}
 
 
 # ── Static UI ─────────────────────────────────────────────────────────────────

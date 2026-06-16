@@ -31,6 +31,41 @@ async def save_subscription(user_id: str, subscription: dict) -> None:
         await r.aclose()
 
 
+async def store_pending_chat(user_id: str, text: str, ttl: int = 1800) -> None:
+    """Store a chat message in Redis to be delivered when the user opens the app.
+
+    Multiple messages accumulate as a list (FIFO). TTL 30 min by default.
+    This lets devices that weren't open during polling still see the message.
+    """
+    from config.settings import get_settings
+    settings = get_settings()
+    if not settings.redis_url:
+        return
+    import redis.asyncio as aioredis
+    key = f"push:chat:{user_id}"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        await r.rpush(key, text)
+        await r.expire(key, ttl)
+    finally:
+        await r.aclose()
+
+
+async def pop_pending_chat(user_id: str) -> str | None:
+    """Pop and return the oldest pending chat message, or None if queue is empty."""
+    from config.settings import get_settings
+    settings = get_settings()
+    if not settings.redis_url:
+        return None
+    import redis.asyncio as aioredis
+    key = f"push:chat:{user_id}"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        return await r.lpop(key)
+    finally:
+        await r.aclose()
+
+
 async def remove_subscription(user_id: str, endpoint: str) -> None:
     """Remove a specific push subscription by endpoint URL."""
     from config.settings import get_settings

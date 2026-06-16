@@ -228,15 +228,18 @@ const WebPush = (() => {
     }
   }
 
-  async function sendNotification(title, body, url) {
+  // chatText is the full markdown chat message — backend stores it in Redis so
+  // other devices (e.g. iOS PWA) can retrieve it via /push/pending on startup.
+  async function sendNotification(title, body, chatText, url) {
     const cleanBody = String(body).replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
     if (localStorage.getItem(SUB_KEY)) {
-      // Fire-and-forget — backend fans out to all user devices (including iOS PWA)
+      const payload = { title, body: cleanBody, url: url ?? '/' };
+      if (chatText) payload.chatMessage = chatText;
       fetch('/push/notify', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, body: cleanBody, url: url ?? '/' }),
+        body: JSON.stringify(payload),
       }).catch(() => {});
       return;
     }
@@ -246,8 +249,19 @@ const WebPush = (() => {
     }
   }
 
+  async function checkPending() {
+    // Retrieve and remove the oldest pending chat message from the server.
+    // Called on app startup so devices that were offline during polling still see messages.
+    try {
+      const res = await fetch('/push/pending', { credentials: 'include' });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.chatMessage || null;
+    } catch { return null; }
+  }
+
   async function init() {
-    // Re-register subscription on startup so backend always has a fresh endpoint
+    // Re-register subscription with backend on startup (token may have rotated)
     if (!isSupported() || !localStorage.getItem(SUB_KEY)) return;
     try {
       const reg = await navigator.serviceWorker.ready;
@@ -262,7 +276,7 @@ const WebPush = (() => {
     } catch {}
   }
 
-  return { isSupported, subscribe, sendNotification, init };
+  return { isSupported, subscribe, sendNotification, checkPending, init };
 })();
 
 // ── Order monitor ────────────────────────────────
@@ -334,9 +348,11 @@ const OrderMonitor = (() => {
         const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
         const msg = `Masz ${count} nowe ${label} do realizacji!`;
         console.log('[OrderMonitor] NEW ORDERS DETECTED:', count, data.new_orders);
-        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg);
         UI.toast(`🛒 ${msg}`, 10000);
-        _injectChatMessage(data.new_orders);
+        // Await so the chat text is ready (and localStorage written) before the push fires.
+        // Backend stores the text in Redis so other devices receive it on startup.
+        const chatText = await _injectChatMessage(data.new_orders);
+        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg, chatText);
       } else {
         console.log('[OrderMonitor] no new orders');
       }
@@ -359,7 +375,6 @@ const OrderMonitor = (() => {
 
   async function _injectChatMessage(orders) {
     try {
-      // Ensure a conversation exists and capture its ID BEFORE any await
       if (!Store.active()) Chat.newConversation();
       const targetConvId = Store.active().id;
 
@@ -386,15 +401,17 @@ const OrderMonitor = (() => {
 
       const text = `${header}\n\n${blocks}`;
 
-      // Add message directly to the captured conversation (bypasses Store.active() state)
       const conv = Store.all().find(c => c.id === targetConvId);
-      if (!conv) return;
-      conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
-      localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
-
-      // Render after current call stack clears so all boot code is definitely done
-      setTimeout(() => Chat.loadConversation(targetConvId), 0);
-    } catch (e) { console.error('[OrderMonitor] chat inject error:', e); }
+      if (conv) {
+        conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
+        localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
+        setTimeout(() => Chat.loadConversation(targetConvId), 0);
+      }
+      return text;  // returned so caller can pass it to WebPush.sendNotification
+    } catch (e) {
+      console.error('[OrderMonitor] chat inject error:', e);
+      return null;
+    }
   }
 
   return { isEnabled, enable, disable, init };
@@ -450,11 +467,9 @@ const InvoiceMonitor = (() => {
       const count = newOnes.length;
       const label = count === 1 ? 'zamówienie wymaga' : count < 5 ? 'zamówienia wymagają' : 'zamówień wymaga';
       const msg = `${count} ${label} wystawienia faktury VAT.`;
-      WebPush.sendNotification('AllEasystent — Faktura VAT!', msg);
-      UI.toast(`🧾 ${msg}`, 10000);  // in-app fallback — always shown
-
-      // Inject assistant message into chat
-      _injectChatMessage(newOnes);
+      UI.toast(`🧾 ${msg}`, 10000);
+      const chatText = _injectChatMessage(newOnes);
+      WebPush.sendNotification('AllEasystent — Faktura VAT!', msg, chatText);
     } catch (e) {}
   }
 
@@ -470,11 +485,13 @@ const InvoiceMonitor = (() => {
       const noun = orders.length === 1 ? 'zamówienie wymagające' : `${orders.length} zamówień wymagających`;
       const text = `🧾 **Monitoring faktur** — wykryto ${noun} faktury VAT:\n\n${lines}\n\nPamiętaj o wystawieniu faktury dla każdego z nich.`;
       const conv = Store.all().find(c => c.id === targetConvId);
-      if (!conv) return;
-      conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
-      localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
-      setTimeout(() => Chat.loadConversation(targetConvId), 0);
-    } catch (e) {}
+      if (conv) {
+        conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
+        localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
+        setTimeout(() => Chat.loadConversation(targetConvId), 0);
+      }
+      return text;
+    } catch { return null; }
   }
 
   function _startPolling() {
@@ -846,6 +863,21 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Re-register push subscription with backend (token may have rotated)
   WebPush.init();
+
+  // Check for pending chat messages stored on server (sent while this device was offline)
+  WebPush.checkPending().then(text => {
+    if (!text) return;
+    try {
+      if (!Store.active()) Store.create();
+      const conv = Store.active();
+      if (!conv) return;
+      const isDup = conv.messages.some(m => m.content === text);
+      if (isDup) return;
+      conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
+      localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
+      setTimeout(() => Chat.loadConversation(conv.id), 0);
+    } catch {}
+  }).catch(() => {});
 
   // Init monitors AFTER full UI setup so chat injection finds a ready DOM
   OrderMonitor.init();
