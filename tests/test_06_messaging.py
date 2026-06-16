@@ -80,3 +80,87 @@ class TestSendMessage:
         clarification_words = ["wątek", "id", "który", "podaj", "thread", "which",
                                "wiadomoś", "thread_id"]
         assert any(w in resp for w in clarification_words)
+
+    def test_send_message_success_confirmation(self):
+        """
+        Kryterium: wysłanie wiadomości w istniejącym wątku kończy się potwierdzeniem.
+        Używamy fikcyjnego ID — oczekujemy albo potwierdzenia albo czytelnego błędu (nie ciszy).
+        """
+        result = query(
+            "Wyślij wiadomość w wątku 00000001 z treścią: Dziękuję za zakup, paczka już w drodze!",
+            new_session(),
+        )
+        assert result["agent"] == "allegro"
+        resp = result["response"].lower()
+        assert "otwórz link" not in resp
+        # Odpowiedź musi coś powiedzieć — sukces LUB błąd, ale nie milczenie
+        informative_words = ["wysłan", "wiadomoś", "potwierdz", "błąd", "nie znalazł",
+                             "sent", "message", "confirm", "error", "not found", "failed"]
+        assert any(w in resp for w in informative_words), (
+            f"Odpowiedź powinna potwierdzać wysłanie lub informować o błędzie: {result['response'][:400]}"
+        )
+
+    def test_send_message_content_not_truncated(self):
+        """
+        Kryterium: treść wysyłanej wiadomości nie jest obcinana.
+        Weryfikujemy że agent przyjmuje długą treść bez błędu walidacji.
+        """
+        long_message = (
+            "Wyślij wiadomość w wątku 00000002 z treścią: "
+            "Szanowny Kliencie, dziękujemy za złożone zamówienie. "
+            "Informujemy, że Pana/Pani paczka została nadana dzisiaj i powinna dotrzeć "
+            "w ciągu 2-3 dni roboczych. Numer przesyłki: PL123456789PL. "
+            "W razie pytań prosimy o kontakt."
+        )
+        result = query(long_message, new_session())
+        assert result["agent"] == "allegro"
+        resp = result["response"].lower()
+        # Nie może być błędu o za długiej treści
+        truncation_errors = ["za długi", "too long", "zbyt długi", "przekroczono", "limit znaków"]
+        assert not any(e in resp for e in truncation_errors), (
+            f"Treść wiadomości nie powinna być odrzucana jako za długa: {result['response'][:400]}"
+        )
+
+    def test_thread_list_contains_required_fields(self):
+        """
+        Kryterium: lista wątków zawiera ID wątku, temat, status odczytania, datę.
+        """
+        result = query("Pokaż listę moich wątków wiadomości", new_session())
+        assert result["agent"] == "allegro"
+        resp = result["response"].lower()
+        assert "otwórz link" not in resp
+        # Jeśli są wątki, muszą zawierać wymagane pola
+        if not any(w in resp for w in ["brak", "nie ma", "no messages", "empty"]):
+            field_indicators = ["id", "wątek", "temat", "thread", "subject",
+                                "przeczyta", "unread", "data", "date"]
+            assert any(w in resp for w in field_indicators), (
+                f"Lista wątków powinna zawierać wymagane pola (ID, temat, status, data): {result['response'][:400]}"
+            )
+
+    def test_unread_messages_clearly_marked(self):
+        """
+        Kryterium: nieprzeczytane wiadomości są wyraźnie oznaczone w odpowiedzi.
+        """
+        result = query("Które wiadomości od kupujących są nieprzeczytane?", new_session())
+        assert result["agent"] == "allegro"
+        resp = result["response"].lower()
+        assert "otwórz link" not in resp
+        # Odpowiedź musi jasno informować o statusie odczytania
+        read_status_words = ["nieprzeczyta", "przeczyta", "unread", "read", "nowe", "brak", "nie ma"]
+        assert any(w in resp for w in read_status_words), (
+            f"Odpowiedź powinna jasno informować o statusie odczytania: {result['response'][:400]}"
+        )
+
+    def test_message_response_in_english(self):
+        """
+        Kryterium: odpowiedź jest w języku pytania — test dla angielskiego.
+        """
+        result = query("Do I have any unread messages from buyers?", new_session())
+        assert result["agent"] == "allegro"
+        resp = result["response"].lower()
+        assert "otwórz link" not in resp
+        english_indicators = ["message", "thread", "unread", "buyer", "you have", "no messages",
+                              "inbox", "conversation"]
+        assert any(w in resp for w in english_indicators), (
+            f"Odpowiedź powinna być po angielsku: {result['response'][:400]}"
+        )

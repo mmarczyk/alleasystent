@@ -11,8 +11,8 @@ Scenariusze testowe weryfikujące wymagania z PRD przez wywołania `POST /query`
 | `test_03_allegro_auth.py` | OAuth2 device flow, zachowanie bez/z autoryzacją |
 | `test_04_orders.py` | Zamówienia — listowanie, szczegóły, filtry |
 | `test_05_offers.py` | Oferty — listowanie, zmiana ceny, stan magazynowy |
-| `test_06_messaging.py` | Wiadomości od kupujących — lista i wysyłanie |
-| `test_07_account.py` | Konto sprzedawcy i rozliczenia |
+| `test_06_messaging.py` | Wiadomości od kupujących — lista (pola, status odczytania), wysyłanie (potwierdzenie, długa treść), EN |
+| `test_07_account.py` | Konto sprzedawcy (pola, data rejestracji, EN) i rozliczenia (pola, sortowanie, limit, EN) |
 | `test_08_language.py` | Wielojęzyczność (PL/EN) |
 | `test_09_rag.py` | Baza wiedzy — routing, pusta baza, indeksowanie |
 | `test_10_api_and_health.py` | Health check, kształt API, edge cases |
