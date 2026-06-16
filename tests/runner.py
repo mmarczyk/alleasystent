@@ -36,30 +36,33 @@ def _gh_headers() -> dict:
     }
 
 
+RESULTS_ISSUE_TITLE = "🧪 Wyniki testów automatycznych"
+
+
 def _find_or_create_results_issue() -> int:
     """Return issue number for the pinned test-results issue, creating it if needed."""
     owner, repo = GITHUB_REPO.split("/", 1)
     with httpx.Client(timeout=15) as client:
+        # Search by title — avoids dependency on labels existing in the repo
         r = client.get(
-            f"https://api.github.com/repos/{owner}/{repo}/issues",
+            f"https://api.github.com/search/issues",
             headers=_gh_headers(),
-            params={"labels": RESULTS_LABEL, "state": "open", "per_page": 1},
+            params={"q": f'repo:{owner}/{repo} in:title "{RESULTS_ISSUE_TITLE}" is:issue is:open', "per_page": 1},
         )
         r.raise_for_status()
-        issues = r.json()
-        if issues:
-            return issues[0]["number"]
+        items = r.json().get("items", [])
+        if items:
+            return items[0]["number"]
 
         r2 = client.post(
             f"https://api.github.com/repos/{owner}/{repo}/issues",
             headers=_gh_headers(),
             json={
-                "title": "🧪 Wyniki testów automatycznych",
+                "title": RESULTS_ISSUE_TITLE,
                 "body": (
                     "To issue jest automatycznie aktualizowane przez test runner.\n"
                     "Każde uruchomienie testów dodaje nowy komentarz z wynikami."
                 ),
-                "labels": [RESULTS_LABEL],
             },
         )
         r2.raise_for_status()
