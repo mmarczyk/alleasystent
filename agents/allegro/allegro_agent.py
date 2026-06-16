@@ -698,7 +698,7 @@ class AllegroAgent(BaseAgent):
             carrier_map: dict[str, str] = {c["id"]: c.get("name", c["id"]) for c in carriers_raw}
 
             if not fulfillment_status:
-                orders = [o for o in orders if o.fulfillment_status not in ("SENT", "PICKED_UP", "CANCELLED")]
+                orders = [o for o in orders if o.fulfillment_status in ("NEW", "PROCESSING")]
             if not orders:
                 return "Brak zamówień do wysłania."
             courier_counts: Counter = Counter()

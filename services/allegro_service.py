@@ -485,7 +485,7 @@ class AllegroService:
             buyer_email=(data.get("buyer") or {}).get("email", ""),
             status=data.get("status", ""),
             fulfillment_status=(data.get("fulfillment") or {}).get("status", ""),
-            payment_status=((data.get("payment") or {}).get("paidAmount") or {}).get("currency", ""),
+            payment_status=(data.get("payment") or {}).get("type", ""),
             paid_at=(data.get("payment") or {}).get("finishedAt", ""),
             total_price=float(total_amount.get("amount", 0) or 0) if isinstance(total_amount, dict) else 0.0,
             currency=total_amount.get("currency", "PLN") if isinstance(total_amount, dict) else "PLN",
@@ -736,15 +736,21 @@ class AllegroService:
         return {"latest_event_id": latest.get("id"), "occurred_at": latest.get("occurredAt")}
 
     async def get_order_events(self, since_event_id: str | None = None) -> dict[str, Any]:
-        """Fetch new READY_FOR_PROCESSING order events since a given event ID."""
-        # List of tuples keeps [] unencoded in httpx
+        """Fetch new READY_FOR_PROCESSING order events since a given event ID.
+
+        Verifies fulfillment.status == NEW to avoid false positives from orders
+        that were cancelled and re-paid (payment event fires again but order is SENT).
+        """
+        import asyncio
+
         params_list: list[tuple[str, str]] = [("type[]", "READY_FOR_PROCESSING"), ("limit", "100")]
         if since_event_id:
             params_list.append(("from", since_event_id))
         data = await self._get("/order/events", params=params_list)
         events = data.get("events", [])
         last_event_id = events[-1]["id"] if events else since_event_id
-        new_orders = [
+
+        candidates = [
             {
                 "event_id": e["id"],
                 "order_id": ((e.get("order") or {}).get("checkoutForm") or {}).get("id"),
@@ -753,10 +759,27 @@ class AllegroService:
             for e in events
             if e.get("type") == "READY_FOR_PROCESSING"
         ]
+
+        # Verify fulfillment.status to filter out false positives (e.g. re-paid cancelled orders)
+        if candidates:
+            order_results = await asyncio.gather(
+                *[self.get_order(c["order_id"]) for c in candidates if c["order_id"]],
+                return_exceptions=True,
+            )
+            fulfillment_map: dict[str, str] = {}
+            for result in order_results:
+                if isinstance(result, BaseException):
+                    continue
+                fulfillment_map[result.order_id] = result.fulfillment_status
+            candidates = [
+                c for c in candidates
+                if fulfillment_map.get(c["order_id"], "NEW") == "NEW"
+            ]
+
         return {
-            "new_orders": new_orders,
+            "new_orders": candidates,
             "last_event_id": last_event_id,
-            "count": len(new_orders),
+            "count": len(candidates),
         }
 
     async def close(self) -> None:
