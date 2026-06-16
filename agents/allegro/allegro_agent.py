@@ -79,69 +79,25 @@ class AllegroAgent(BaseAgent):
         if self._allegro._tokens is None:
             await self._allegro._load_tokens_from_redis()
 
-        # Still no tokens — trigger auth flow
         if self._allegro._tokens is None:
-            if self._allegro._pending_device_code:
-                return await self._try_complete_auth(query, conversation_history, context)
-            return await self._request_auth()
+            return self._request_auth()
 
-        # Tokens exist but expired — try refresh, fall back to fresh device flow
+        # Tokens exist but expired — try refresh, fall back to fresh login
         if self._allegro._tokens.is_expired():
             try:
                 await self._allegro._refresh_tokens()
             except AllegroAuthError:
-                return await self._request_auth()
+                return self._request_auth()
 
         return await super().run(query, conversation_history, context)
 
-    async def _request_auth(self) -> AgentResponse:
-        import asyncio
-        try:
-            flow = await self._allegro.start_device_flow()
-            url = flow.get("verification_uri_complete") or flow.get("verification_uri", "")
-            user_code = flow.get("user_code", "")
-            device_code = flow.get("device_code", "")
-            interval = int(flow.get("interval", 5))
-            # Background polling — saves tokens to disk automatically when approved
-            asyncio.create_task(self._allegro.poll_device_flow(device_code, interval))
-            text = (
-                "Aby uzyskać dostęp do Twojego sklepu Allegro, potrzebuję autoryzacji.\n\n"
-                f"Otwórz poniższy link i zatwierdź dostęp:\n{url}"
-            )
-            if user_code:
-                text += f"\n\nJeśli zostaniesz poproszony o kod, wpisz: **{user_code}**"
-            text += "\n\nPo zatwierdzeniu wyślij swoje pytanie jeszcze raz."
-        except Exception as exc:
-            logger.error("Failed to start Allegro device flow: %s", exc)
-            text = "Wymagana autoryzacja Allegro, ale nie udało się jej uruchomić. Spróbuj ponownie za chwilę."
-        return AgentResponse(text=text, agent_type=self.agent_name)
-
-    async def _try_complete_auth(
-        self,
-        query: str,
-        conversation_history: list[dict[str, str]] | None,
-        context: str | None,
-    ) -> AgentResponse:
-        try:
-            success = await self._allegro.try_complete_device_flow()
-        except AllegroAuthError as exc:
-            # Hard failure (expired device code, denied, etc.) — start fresh
-            logger.warning("Device flow completion failed: %s — starting fresh", exc)
-            return await self._request_auth()
-
-        if success:
-            # Tokens obtained — answer the original question immediately
-            return await super().run(query, conversation_history, context)
-
-        return AgentResponse(
-            text=(
-                "Nie udało mi się jeszcze potwierdzić autoryzacji Allegro.\n\n"
-                "Czy otworzyłeś link i zatwierdziłeś dostęp na Allegro? "
-                "Jeśli tak, wyślij swoje pytanie jeszcze raz. "
-                "Jeśli nie, najpierw zatwierdź dostęp."
-            ),
-            agent_type=self.agent_name,
+    def _request_auth(self) -> AgentResponse:
+        text = (
+            "Aby uzyskać dostęp do Twojego sklepu Allegro, potrzebuję autoryzacji.\n\n"
+            "[➡ Zaloguj się przez Allegro](/allegro/login)\n\n"
+            "Po zalogowaniu wróć tutaj i zadaj swoje pytanie ponownie."
         )
+        return AgentResponse(text=text, agent_type=self.agent_name)
 
     def _get_tools(self) -> list[dict[str, Any]]:
         return ALLEGRO_TOOLS
