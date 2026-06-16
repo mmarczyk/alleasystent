@@ -251,7 +251,7 @@ function updateStats() {
 
 function parseLine(line) {
   // Test result line: "test_01_routing.py::Class::method PASSED" etc.
-  const m = line.match(/^(\\S+\\.py(?:::\\S+)+)\\s+(PASSED|FAILED|ERROR|SKIPPED)$/);
+  const m = line.match(/^(\\S+\\.py(?:::\\S+)+)\\s+(PASSED|FAILED|ERROR|SKIPPED)/);
   if (m) {
     const state = {PASSED:'pass',FAILED:'fail',ERROR:'error',SKIPPED:'skip'}[m[2]];
     addTestResult(m[1], state);
