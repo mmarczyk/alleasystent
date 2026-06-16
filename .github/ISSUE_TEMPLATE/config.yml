@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Pytania i dyskusje
+    url: https://github.com/mmarczyk/alleasystent/discussions
+    about: Pytania, pomysły, ogólne dyskusje — zamiast otwierać Issue
