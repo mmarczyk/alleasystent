@@ -214,7 +214,7 @@ class AllegroAgent(BaseAgent):
         delivery_name = cls._dig(d, "method", "name", default="—")
         total_qty = sum(li.quantity for li in o.line_items)
         link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
-        fulfillment = self._fulfillment_pl(o.fulfillment_status)
+        fulfillment = cls._fulfillment_pl(o.fulfillment_status)
         lines = [
             f"**Zamówienie** `{o.order_id}`",
             f"- Kupujący: **{o.buyer_login}**",
