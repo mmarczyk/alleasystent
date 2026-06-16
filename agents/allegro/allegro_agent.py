@@ -160,7 +160,30 @@ class AllegroAgent(BaseAgent):
             g["total_stock"] += stock
         return sorted(groups.values(), key=lambda g: g["total_stock"])
 
-    # Tracking URL templates keyed by Allegro carrier ID prefix
+    _FULFILLMENT_PL: dict[str, str] = {
+        "NEW":                "Nowe",
+        "PROCESSING":         "W realizacji",
+        "READY_FOR_SHIPMENT": "Gotowe do wysyłki",
+        "SENT":               "Wysłane",
+        "PICKED_UP":          "Odebrane",
+        "CANCELLED":          "Anulowane",
+        "SUSPENDED":          "Wstrzymane",
+    }
+
+    _STATUS_PL: dict[str, str] = {
+        "BOUGHT":               "Opłacone",
+        "FILLED_IN":            "Wypełnione",
+        "READY_FOR_PROCESSING": "Gotowe do realizacji",
+        "CANCELLED":            "Anulowane",
+    }
+
+    @classmethod
+    def _fulfillment_pl(cls, status: str | None) -> str:
+        return cls._FULFILLMENT_PL.get(status or "", status or "—")
+
+    @classmethod
+    def _status_pl(cls, status: str | None) -> str:
+        return cls._STATUS_PL.get(status or "", status or "—")
     _TRACKING_URLS: dict[str, str] = {
         "INPOST":          "https://inpost.pl/sledzenie-przesylek?number={code}",
         "DHL":             "https://www.dhl.com/pl-pl/home/tracking.html?tracking-id={code}&submit=1",
@@ -191,7 +214,7 @@ class AllegroAgent(BaseAgent):
         delivery_name = cls._dig(d, "method", "name", default="—")
         total_qty = sum(li.quantity for li in o.line_items)
         link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
-        fulfillment = o.fulfillment_status or "—"
+        fulfillment = self._fulfillment_pl(o.fulfillment_status)
         lines = [
             f"**Zamówienie** `{o.order_id}`",
             f"- Kupujący: **{o.buyer_login}**",
@@ -698,7 +721,7 @@ class AllegroAgent(BaseAgent):
                 )
                 extra = [
                     f"Kurier/dostawa: **{method_name}**",
-                    f"Status: **{o.fulfillment_status or '—'}**",
+                    f"Status: **{self._fulfillment_pl(o.fulfillment_status)}**",
                     f"Numer śledzenia: {tracking_str}",
                 ]
                 if pickup_name:
