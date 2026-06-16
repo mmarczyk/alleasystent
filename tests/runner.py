@@ -1,11 +1,16 @@
 """
 Test runner UI — serves a web interface for running pytest and streaming results.
+After each run, posts a summary comment to a GitHub issue (if GITHUB_TOKEN is set).
 """
 
 import asyncio
 import os
+import re
 import subprocess
 import threading
+from datetime import datetime, timezone
+
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 
@@ -14,8 +19,131 @@ app = FastAPI()
 _lock = threading.Lock()
 _running = False
 _process: subprocess.Popen | None = None
-_output: list[str] = []  # all lines since last run, replayed to new SSE clients
+_output: list[str] = []
 
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO  = os.environ.get("GITHUB_REPO", "mmarczyk/alleasystent")
+RESULTS_LABEL = "test-results"
+
+
+# ── GitHub helpers ─────────────────────────────────────────────────────────────
+
+def _gh_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _find_or_create_results_issue() -> int:
+    """Return issue number for the pinned test-results issue, creating it if needed."""
+    owner, repo = GITHUB_REPO.split("/", 1)
+    with httpx.Client(timeout=15) as client:
+        r = client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/issues",
+            headers=_gh_headers(),
+            params={"labels": RESULTS_LABEL, "state": "open", "per_page": 1},
+        )
+        r.raise_for_status()
+        issues = r.json()
+        if issues:
+            return issues[0]["number"]
+
+        r2 = client.post(
+            f"https://api.github.com/repos/{owner}/{repo}/issues",
+            headers=_gh_headers(),
+            json={
+                "title": "🧪 Wyniki testów automatycznych",
+                "body": (
+                    "To issue jest automatycznie aktualizowane przez test runner.\n"
+                    "Każde uruchomienie testów dodaje nowy komentarz z wynikami."
+                ),
+                "labels": [RESULTS_LABEL],
+            },
+        )
+        r2.raise_for_status()
+        return r2.json()["number"]
+
+
+def _build_comment(lines: list[str], exit_code: int) -> str:
+    passed = failed = skipped = 0
+    failures: list[str] = []
+    duration = ""
+    current_failure: list[str] = []
+    in_failure = False
+
+    for line in lines:
+        m = re.match(r"^(\S+\.py(?:::\S+)+)\s+(PASSED|FAILED|ERROR|SKIPPED)", line)
+        if m:
+            state = m.group(2)
+            if state == "PASSED":   passed += 1
+            elif state in ("FAILED", "ERROR"): failed += 1
+            elif state == "SKIPPED": skipped += 1
+
+        if re.match(r"^FAILED ", line):
+            in_failure = True
+            current_failure = [line]
+        elif in_failure:
+            if line.startswith("_") or line.startswith("="):
+                if current_failure:
+                    failures.append("\n".join(current_failure))
+                current_failure = []
+                in_failure = False
+            else:
+                current_failure.append(line)
+
+        t = re.search(r"in ([\d.]+)s", line)
+        if t and "=====" in line:
+            duration = t.group(1) + "s"
+
+    if current_failure:
+        failures.append("\n".join(current_failure))
+
+    icon = "✅" if exit_code == 0 else "❌"
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    target = os.environ.get("ALLEASYSTENT_URL", "?")
+
+    lines_md = [
+        f"## {icon} Wyniki testów — {ts}",
+        "",
+        f"**Backend:** `{target}`  ",
+        f"**Czas:** {duration or '?'}",
+        "",
+        "| Status | Liczba |",
+        "|--------|--------|",
+        f"| ✅ Passed  | {passed}  |",
+        f"| ❌ Failed  | {failed}  |",
+        f"| ⏭️ Skipped | {skipped} |",
+    ]
+
+    if failures:
+        lines_md += ["", "### Nieudane testy", ""]
+        for f in failures[:10]:  # max 10 failure blocks
+            lines_md += [f"```\n{f[:1200]}\n```", ""]
+
+    return "\n".join(lines_md)
+
+
+def _post_to_github(lines: list[str], exit_code: int) -> None:
+    if not GITHUB_TOKEN:
+        return
+    try:
+        issue_number = _find_or_create_results_issue()
+        body = _build_comment(lines, exit_code)
+        owner, repo = GITHUB_REPO.split("/", 1)
+        with httpx.Client(timeout=15) as client:
+            client.post(
+                f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
+                headers=_gh_headers(),
+                json={"body": body},
+            ).raise_for_status()
+    except Exception as e:
+        with _lock:
+            _output.append(f"[GitHub] Błąd wysyłania wyników: {e}")
+
+
+# ── Pytest runner ──────────────────────────────────────────────────────────────
 
 def _run_pytest():
     global _running, _process, _output
@@ -45,11 +173,19 @@ def _run_pytest():
             _output.append(line)
 
     proc.wait()
+
+    with _lock:
+        snapshot = list(_output)
+
+    _post_to_github(snapshot, proc.returncode)
+
     with _lock:
         _output.append(f"__EXIT__{proc.returncode}")
         _running = False
         _process = None
 
+
+# ── API endpoints ──────────────────────────────────────────────────────────────
 
 @app.post("/run")
 async def run():
@@ -100,6 +236,8 @@ async def status():
         return {"running": _running, "lines": len(_output)}
 
 
+# ── HTML ───────────────────────────────────────────────────────────────────────
+
 HTML = """<!DOCTYPE html>
 <html lang="pl">
 <head>
@@ -110,9 +248,12 @@ HTML = """<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
 
-  header { padding: 20px 32px; border-bottom: 1px solid #1e2535; display: flex; align-items: center; gap: 16px; }
+  header { padding: 20px 32px; border-bottom: 1px solid #1e2535; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
   header h1 { font-size: 1.2rem; font-weight: 600; color: #fff; }
   header span { font-size: 0.8rem; color: #64748b; }
+  .gh-badge { font-size: 0.75rem; padding: 3px 10px; border-radius: 20px; background: #1e2535; color: #94a3b8; }
+  .gh-badge.ok { background: #14532d; color: #4ade80; }
+  .gh-badge.off { background: #1c1917; color: #78716c; }
 
   .controls { padding: 20px 32px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   button { padding: 8px 20px; border: none; border-radius: 6px; font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: opacity .15s; }
@@ -146,7 +287,6 @@ HTML = """<!DOCTYPE html>
   li.pass .test-name { color: #e2e8f0; }
   li.fail .test-name { color: #fca5a5; }
   li.skip .test-name { color: #78716c; }
-  li.running .test-name { color: #93c5fd; }
 
   #log { font-family: monospace; font-size: 0.78rem; line-height: 1.6; padding: 12px 16px; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #64748b; }
   .log-pass { color: #4ade80; }
@@ -160,7 +300,8 @@ HTML = """<!DOCTYPE html>
 
 <header>
   <h1>AllEasystent — Test Runner</h1>
-  <span id="target-url">→ __TARGET_URL__</span>
+  <span>→ __TARGET_URL__</span>
+  <span class="gh-badge __GH_CLASS__">__GH_LABEL__</span>
 </header>
 
 <div class="controls">
@@ -188,11 +329,8 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-// target URL injected server-side into __TARGET_URL__
-
 let es = null;
 let stats = {pass:0, fail:0, skip:0};
-let currentRun = [];
 
 function setBadge(state, text) {
   const b = document.getElementById('status-badge');
@@ -210,11 +348,10 @@ function clearResults() {
   document.getElementById('log').innerHTML = '';
   document.getElementById('summary-bar').style.display = 'none';
   stats = {pass:0, fail:0, skip:0};
-  currentRun = [];
 }
 
 function addTestResult(name, state) {
-  const icons = {pass:'✅', fail:'❌', skip:'⏭️', running:'⏳', error:'💥'};
+  const icons = {pass:'✅', fail:'❌', skip:'⏭️', error:'💥'};
   const li = document.createElement('li');
   li.className = state;
   const parts = name.split('::');
@@ -223,7 +360,6 @@ function addTestResult(name, state) {
   li.innerHTML = `<span class="icon">${icons[state]||'•'}</span><span class="test-name"><span class="module">${module}</span>${shortName}</span>`;
   document.getElementById('test-list').appendChild(li);
   li.scrollIntoView({block:'nearest'});
-  return li;
 }
 
 function appendLog(line) {
@@ -249,7 +385,6 @@ function updateStats() {
 }
 
 function parseLine(line) {
-  // Test result line: "test_01_routing.py::Class::method PASSED" etc.
   const m = line.match(/^(\\S+\\.py(?:::\\S+)+)\\s+(PASSED|FAILED|ERROR|SKIPPED)/);
   if (m) {
     const state = {PASSED:'pass',FAILED:'fail',ERROR:'error',SKIPPED:'skip'}[m[2]];
@@ -260,11 +395,9 @@ function parseLine(line) {
     updateStats();
     return;
   }
-  // Summary line
-  const s = line.match(/(\\d+) passed|( \\d+) failed|(\\d+) skipped|in ([\\d.]+)s/g);
-  if (s && /=====/.test(line)) {
-    const t = line.match(/in ([\\d.]+)s/);
-    if (t) document.getElementById('stat-time').textContent = `⏱ ${t[1]}s`;
+  const t = line.match(/in ([\\d.]+)s/);
+  if (t && /=====/.test(line)) {
+    document.getElementById('stat-time').textContent = `⏱ ${t[1]}s`;
   }
   appendLog(line);
 }
@@ -282,7 +415,6 @@ async function startRun() {
   es = new EventSource('/stream');
   es.onmessage = (e) => {
     const line = e.data;
-    if (line === '__PING__') return;
     if (line.startsWith('__EXIT__')) {
       const code = parseInt(line.replace('__EXIT__',''));
       es.close(); es = null;
@@ -311,4 +443,10 @@ async function stopRun() {
 @app.get("/", response_class=HTMLResponse)
 async def index():
     target = os.environ.get("ALLEASYSTENT_URL", "(nie ustawiono ALLEASYSTENT_URL)")
-    return HTML.replace("__TARGET_URL__", target)
+    gh_ok = bool(GITHUB_TOKEN)
+    gh_class = "ok" if gh_ok else "off"
+    gh_label = f"GitHub → {GITHUB_REPO}" if gh_ok else "GitHub: brak tokenu"
+    return (HTML
+            .replace("__TARGET_URL__", target)
+            .replace("__GH_CLASS__", gh_class)
+            .replace("__GH_LABEL__", gh_label))
