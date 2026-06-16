@@ -28,7 +28,7 @@ def _run_pytest():
     env["PYTHONUNBUFFERED"] = "1"
 
     proc = subprocess.Popen(
-        ["pytest", "-v", "--tb=short", "--no-header", "--no-color"],
+        ["pytest", "-v", "--tb=short", "--no-header", "-p", "no:color"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
