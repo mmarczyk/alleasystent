@@ -29,12 +29,14 @@ logger = logging.getLogger(__name__)
 INTENT_SYSTEM_PROMPT = """
 Classify the user's message. Reply with EXACTLY ONE of these labels and nothing else:
 
-allegro_orders      — orders, shipping, delivery, tracking, returns, invoices, "zamówienia", "paczka"
+allegro_orders      — requests for order data, shipping, delivery, tracking, returns, invoices, "zamówienia", "paczka"
 allegro_offers      — listings, prices, stock, offer management, "oferty", "cena", "stan magazynowy"
 allegro_messaging   — buyer messages, send message, "wiadomości", "napisz do kupującego"
 allegro_account     — seller account, fees, billing, statistics, "konto", "opłaty", "prowizja"
 general_knowledge   — product FAQs, store policies, shipping info
-chitchat            — greetings, small talk, questions about assistant capabilities/features
+chitchat            — greetings, small talk, questions about assistant capabilities/features,
+                       AND questions where the user asks what THEY themselves said, want, or are looking for
+                       (e.g. "What was I asking about?", "Jakich zamówień szukam?", "Co chciałem?")
 
 Output the label only. No punctuation, no explanation.
 """.strip()
