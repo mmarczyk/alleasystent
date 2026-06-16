@@ -1,0 +1,12 @@
+[build]
+dockerfilePath = "Dockerfile.test"
+
+[deploy]
+# Kontener uruchamia testy i kończy działanie — nie nasłuchuje na żadnym porcie.
+# Railway oznaczy deploy jako nieudany jeśli pytest zwróci kod ≠ 0.
+startCommand = "pytest -v --tb=short --no-header"
+restartPolicyType = "never"
+
+# Zmienne środowiskowe ustaw w dashboardzie Railway:
+#   ALLEASYSTENT_URL  = https://twoja-aplikacja.railway.app   (wymagane)
+#   ALLEGRO_AUTHED    = 0  (lub 1 po autoryzacji Allegro)
