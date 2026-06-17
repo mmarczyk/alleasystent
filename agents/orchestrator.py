@@ -222,7 +222,11 @@ class Orchestrator:
 
         # Store knowledge (FAQs, policies) → RAGAgent (lazy-loaded)
         if intent == "general_knowledge":
-            return await self._get_rag_agent().run(message.text, history)
+            try:
+                return await self._get_rag_agent().run(message.text, history)
+            except Exception as exc:
+                logger.error("RAGAgent failed, falling back to chitchat: %s", exc)
+                return await self._handle_chitchat(message.text, history)
 
         # Chitchat / capabilities
         if intent == "chitchat":

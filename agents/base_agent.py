@@ -16,7 +16,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openai import AsyncOpenAI, RateLimitError
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
 
 from agents.tool_gap_analyzer import analyze_for_tool_gap
 from config.settings import get_settings
@@ -28,6 +28,9 @@ MAX_ITERATIONS = 10
 # After exhausting all models in the pool, wait this many seconds before trying again.
 _BACKOFF_DELAYS = (2, 4, 8)
 
+# Exceptions that are worth rotating/retrying (transient infrastructure errors).
+_RETRYABLE = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
+
 
 async def _call_with_retry(
     client: AsyncOpenAI,
@@ -36,35 +39,36 @@ async def _call_with_retry(
     **api_kwargs,
 ):
     """
-    Call client.chat.completions.create with model rotation + exponential backoff on 429.
+    Call client.chat.completions.create with model rotation + exponential backoff.
 
     Strategy:
       1. Try each model in model_pool in order.
-         On 429 → rotate to next model immediately (no wait).
+         On a retryable error (429, 500, connection/timeout) → rotate to next model.
       2. After all models exhausted → wait (exponential backoff) → restart from first model.
-      3. After all backoff rounds exhausted → raise RateLimitError.
+      3. After all backoff rounds exhausted → raise the last seen exception.
     """
+    last_exc: Exception = RuntimeError("No models in pool")
     for backoff_round, delay in enumerate((*_BACKOFF_DELAYS, None)):
         for model in model_pool:
             try:
                 logger.debug("%s: calling model %s", label, model)
                 return await client.chat.completions.create(model=model, **api_kwargs)
-            except RateLimitError:
-                logger.warning("%s: 429 on %s, rotating to next model", label, model)
+            except _RETRYABLE as exc:
+                last_exc = exc
+                logger.warning(
+                    "%s: %s on %s, rotating to next model",
+                    label, type(exc).__name__, model,
+                )
 
-        # All models in pool returned 429
+        # All models in pool returned retryable errors
         if delay is None:
             logger.error(
-                "%s: all models rate-limited after %d rounds, giving up",
+                "%s: all models failed after %d rounds, giving up",
                 label, backoff_round + 1,
             )
-            raise RateLimitError(
-                message=f"{label}: all models in pool {model_pool} exhausted",
-                response=None,  # type: ignore[arg-type]
-                body=None,
-            )
+            raise last_exc
         logger.warning(
-            "%s: full pool rate-limited (round %d), backing off %ds",
+            "%s: full pool failed (round %d), backing off %ds",
             label, backoff_round + 1, delay,
         )
         await asyncio.sleep(delay)
