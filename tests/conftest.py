@@ -65,6 +65,16 @@ def query(message: str, session_id: str | None = None, sender_id: str = "test_us
 
 
 def allegro_auth_status() -> dict:
-    resp = httpx.get(f"{BASE_URL}/allegro/auth/status", timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+    """
+    Sprawdza status autoryzacji Allegro przez GET /auth/me.
+    Zwraca {"status": "authorized", "authenticated": True} lub {"status": "idle"}.
+    """
+    cookies = {"session": _SESSION_COOKIE} if _SESSION_COOKIE else {}
+    try:
+        resp = httpx.get(f"{BASE_URL}/auth/me", cookies=cookies, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {"status": "authorized", "authenticated": True, **data}
+        return {"status": "idle", "authenticated": False}
+    except Exception:
+        return {"status": "idle", "authenticated": False}

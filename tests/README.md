@@ -8,14 +8,14 @@ Scenariusze testowe weryfikujące wymagania z PRD przez wywołania `POST /query`
 |---|---|
 | `test_01_routing.py` | Klasyfikacja intencji — keyword routing i LLM routing |
 | `test_02_chitchat.py` | Powitania i pytania o możliwości asystenta |
-| `test_03_allegro_auth.py` | OAuth2 device flow, zachowanie bez/z autoryzacją |
-| `test_04_orders.py` | Zamówienia — listowanie, szczegóły, filtry |
+| `test_03_allegro_auth.py` | OAuth2 browser flow (/allegro/login), zachowanie bez/z autoryzacją, /auth/me |
+| `test_04_orders.py` | Zamówienia — listowanie, szczegóły, filtry, polskie tłumaczenia statusów |
 | `test_05_offers.py` | Oferty — listowanie, zmiana ceny, stan magazynowy |
 | `test_06_messaging.py` | Wiadomości od kupujących — lista (pola, status odczytania), wysyłanie (potwierdzenie, długa treść), EN |
 | `test_07_account.py` | Konto sprzedawcy (pola, data rejestracji, EN) i rozliczenia (pola, sortowanie, limit, EN) |
 | `test_08_language.py` | Wielojęzyczność (PL/EN) |
 | `test_09_rag.py` | Baza wiedzy — routing, pusta baza, indeksowanie |
-| `test_10_api_and_health.py` | Health check, kształt API, edge cases |
+| `test_10_api_and_health.py` | Health check, kształt API, edge cases, endpointy push (/push/pending, /push/status) |
 | `test_11_conversations.py` | Kontekst wieloturowy i izolacja sesji |
 
 ## Uruchomienie

@@ -43,10 +43,34 @@ class TestOrderListing:
     def test_list_cancelled_orders(self):
         """
         Pytanie: 'Pokaż anulowane zamówienia'
-        Oczekiwane: agent=allegro, filtrowanie po statusie CANCELLED
+        Oczekiwane: agent=allegro, filtrowanie po statusie CANCELLED → wyświetlany jako 'Anulowane'
         """
         result = query("Pokaż anulowane zamówienia", new_session())
         assert result["agent"] == "allegro"
+        resp = result["response"].lower()
+        if "brak" not in resp and "nie ma" not in resp:
+            # Status CANCELLED tłumaczony jest na 'Anulowane' — nie powinno być surowego 'CANCELLED'
+            cancelled_pl = ["anulowan", "anulowane", "cancelled"]
+            assert any(w in resp for w in cancelled_pl), (
+                f"Odpowiedź powinna zawierać status anulowania: {result['response'][:400]}"
+            )
+
+    def test_order_status_displayed_in_polish(self):
+        """
+        Statusy realizacji zamówień są tłumaczone na język polski:
+        NEW → Nowe, SENT → Wysłane, CANCELLED → Anulowane itd.
+        """
+        result = query("Pokaż moje nowe zamówienia", new_session())
+        assert result["agent"] == "allegro"
+        resp = result["response"]
+        if "brak" not in resp.lower() and "nie ma" not in resp.lower():
+            # Surowe wartości API nie powinny pojawiać się w odpowiedzi
+            raw_statuses = ["fulfillment_status", " NEW ", " SENT ", " PROCESSING ",
+                            " READY_FOR_SHIPMENT ", " PICKED_UP "]
+            for raw in raw_statuses:
+                assert raw not in resp, (
+                    f"Status powinien być przetłumaczony na polski, znaleziono surową wartość '{raw}': {resp[:400]}"
+                )
 
     def test_order_response_in_polish(self):
         """
