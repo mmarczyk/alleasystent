@@ -11,6 +11,7 @@ Entry point: FastAPI application with:
   - Google OAuth2 login
 """
 
+import asyncio
 import logging
 import os
 import pathlib
@@ -61,7 +62,19 @@ async def lifespan(app: FastAPI):
             logger.info("ChromaDB retriever pre-warmed successfully")
         except Exception as exc:
             logger.warning("ChromaDB pre-warm failed (non-fatal): %s", exc)
+
+    # Backend order monitor: sends push notifications when new Allegro orders
+    # arrive — works even when iOS PWA is backgrounded (JS can't run then).
+    from services.order_monitor import run_order_monitor
+    monitor_task = asyncio.create_task(run_order_monitor())
+
     yield
+
+    monitor_task.cancel()
+    try:
+        await monitor_task
+    except asyncio.CancelledError:
+        pass
     logger.info("AllEasystent shutting down")
 
 
