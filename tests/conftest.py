@@ -2,10 +2,13 @@
 Shared fixtures and helpers for AllEasystent API tests.
 
 Configuration (environment variables or defaults):
-  ALLEASYSTENT_URL   — base URL of the running backend, e.g. https://your-app.railway.app
-                       default: http://localhost:8080
-  ALLEGRO_AUTHED     — set to "1" to run tests that require Allegro authorization
-  JWT_SECRET         — must match the main app's JWT_SECRET to generate a test session cookie
+  ALLEASYSTENT_URL    — base URL of the running backend, e.g. https://your-app.railway.app
+                        default: http://localhost:8080
+  ALLEGRO_AUTHED      — set to "1" to run tests requiring Allegro access.
+                        Automatically true when ALLEGRO_MOCK_MODE=1 (mock server).
+  ALLEGRO_MOCK_MODE   — set to "1" when pointing at the mock Allegro server.
+                        Implies ALLEGRO_AUTHED=1 without real credentials.
+  JWT_SECRET          — must match the main app's JWT_SECRET to generate a test session cookie
 """
 
 import os
@@ -14,11 +17,17 @@ import pytest
 import httpx
 
 BASE_URL = os.environ.get("ALLEASYSTENT_URL", "http://localhost:8080").rstrip("/")
-ALLEGRO_AUTHED = os.environ.get("ALLEGRO_AUTHED", "0") == "1"
+
+# Mock mode counts as "authed" — the mock server accepts any token
+_MOCK_MODE = os.environ.get("ALLEGRO_MOCK_MODE", "0") == "1"
+ALLEGRO_AUTHED = _MOCK_MODE or os.environ.get("ALLEGRO_AUTHED", "0") == "1"
 
 requires_allegro = pytest.mark.skipif(
     not ALLEGRO_AUTHED,
-    reason="Wymaga autoryzacji Allegro. Ustaw ALLEGRO_AUTHED=1 po autoryzacji.",
+    reason=(
+        "Wymaga autoryzacji Allegro. "
+        "Ustaw ALLEGRO_AUTHED=1 (prawdziwe) lub ALLEGRO_MOCK_MODE=1 (mock server)."
+    ),
 )
 
 

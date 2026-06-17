@@ -37,16 +37,34 @@ pytest -v
 ALLEASYSTENT_URL=https://twoja-aplikacja.railway.app pytest -v
 ```
 
-### Testy z autoryzacją Allegro
+### Testy z autoryzacją Allegro (prawdziwe konto)
 
-1. Otwórz `https://twoja-aplikacja.railway.app/allegro/auth` w przeglądarce
+1. Otwórz `https://twoja-aplikacja.railway.app/allegro/login` w przeglądarce
 2. Zatwierdź dostęp na stronie Allegro
-3. Sprawdź status: `GET /allegro/auth/status` → `{"status": "authorized"}`
-4. Uruchom testy z flagą:
+3. Uruchom testy z flagą:
 
 ```bash
 ALLEASYSTENT_URL=https://twoja-aplikacja.railway.app ALLEGRO_AUTHED=1 pytest -v
 ```
+
+### Testy z mock serwerem Allegro (bez prawdziwego konta)
+
+Wdróż serwis `mock-allegro/` na Railway, następnie skonfiguruj główną aplikację:
+
+```
+ALLEGRO_API_URL    = https://twoj-mock.railway.app
+ALLEGRO_MOCK_TOKEN = mock-token-12345
+```
+
+Uruchom testy z flagą:
+
+```bash
+ALLEASYSTENT_URL=https://twoja-aplikacja.railway.app \
+ALLEGRO_MOCK_MODE=1 \
+pytest -v
+```
+
+`ALLEGRO_MOCK_MODE=1` automatycznie implikuje `ALLEGRO_AUTHED=1`.
 
 ### Uruchomienie wybranego modułu
 
