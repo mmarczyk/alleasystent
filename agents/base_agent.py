@@ -189,14 +189,11 @@ class BaseAgent(ABC):
         )
 
     def _build_system_prompt(self, context: str | None) -> str:
-        from datetime import datetime, timezone
-        now_utc = datetime.now(timezone.utc)
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now_local = datetime.now(ZoneInfo("Europe/Warsaw"))
         parts = [self.system_prompt]
-        parts.append(
-            f"Current UTC datetime: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}. "
-            "Polish timezone: UTC+2 in summer (CEST, late March–late Oct), UTC+1 in winter (CET). "
-            "When the user gives a time like '12:00' or 'po 12', assume Polish local time and convert to UTC for API calls."
-        )
+        parts.append(f"Current date and time: {now_local.strftime('%Y-%m-%d %H:%M %Z')}")
         if context:
             parts.append(f"## Relevant context\n{context}")
         parts.append(

@@ -36,10 +36,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "List Allegro orders with arbitrary filters. "
                 "Use ONLY for specific filtered queries — e.g. orders by a specific buyer, "
                 "orders with a particular fulfillment status (SENT, PROCESSING, etc.), "
-                "cancelled orders, or orders placed after/before a specific time. "
-                "For new/pending orders use get_new_orders instead. "
-                "TIME FILTERING: Allegro timestamps are UTC. Polish time is UTC+2 in summer (CEST) "
-                "and UTC+1 in winter (CET). E.g. 'po 12:00 polskiego' in summer = bought_at_gte '...T10:00:00Z'."
+                "cancelled orders, or orders placed after/before a specific time of day. "
+                "For new/pending orders use get_new_orders instead."
             ),
             "parameters": {
                 "type": "object",
@@ -63,19 +61,20 @@ ALLEGRO_TOOLS: list[dict] = [
                         "items": {"type": "string", "enum": ["NONE", "SOME", "ALL"]},
                         "description": "Filter by shipment state. Multiple values allowed (OR logic).",
                     },
-                    "bought_at_gte": {
+                    "bought_after_local": {
                         "type": "string",
                         "description": (
-                            "Return only orders placed AT OR AFTER this UTC datetime. "
-                            "ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ'. "
-                            "Example: orders after noon Polish summer time → '2026-06-17T10:00:00Z'."
+                            "Return only orders placed AT OR AFTER this local Polish time. "
+                            "Format: 'HH:MM' for today (e.g. '12:00'), "
+                            "or 'YYYY-MM-DD HH:MM' for a specific date (e.g. '2026-06-16 18:00'). "
+                            "Timezone conversion to UTC is handled automatically."
                         ),
                     },
-                    "bought_at_lte": {
+                    "bought_before_local": {
                         "type": "string",
                         "description": (
-                            "Return only orders placed AT OR BEFORE this UTC datetime. "
-                            "ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ'."
+                            "Return only orders placed AT OR BEFORE this local Polish time. "
+                            "Same format as bought_after_local: 'HH:MM' or 'YYYY-MM-DD HH:MM'."
                         ),
                     },
                     "limit": {

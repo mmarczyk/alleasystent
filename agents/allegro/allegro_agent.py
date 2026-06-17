@@ -11,7 +11,9 @@ import asyncio
 import json
 import logging
 from collections import Counter, defaultdict
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from agents.allegro.allegro_tools import ALLEGRO_TOOLS
 from agents.base_agent import BaseAgent
@@ -202,6 +204,23 @@ class AllegroAgent(BaseAgent):
         "FEDEX":           "https://www.fedex.com/apps/fedextrack/?tracknumbers={code}",
     }
 
+    _WARSAW = ZoneInfo("Europe/Warsaw")
+    _UTC = ZoneInfo("UTC")
+
+    @classmethod
+    def _local_to_utc(cls, time_str: str) -> str:
+        """Convert Polish local time string to UTC ISO 8601 for Allegro API.
+
+        Accepts 'HH:MM' (today) or 'YYYY-MM-DD HH:MM' (specific date).
+        """
+        if len(time_str) <= 5:  # "HH:MM"
+            today = datetime.now(cls._WARSAW).date()
+            local_dt = datetime.strptime(f"{today.isoformat()} {time_str}", "%Y-%m-%d %H:%M")
+        else:  # "YYYY-MM-DD HH:MM"
+            local_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+        local_dt = local_dt.replace(tzinfo=cls._WARSAW)
+        return local_dt.astimezone(cls._UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     @classmethod
     def _tracking_url(cls, carrier_id: str, code: str) -> str | None:
         """Return tracking URL for a carrier+code pair, or None if unknown carrier."""
@@ -254,13 +273,15 @@ class AllegroAgent(BaseAgent):
             return "\n\n".join(self._order_block(o) for o in orders)
 
         if tool_name == "get_orders":
+            after_local = tool_input.get("bought_after_local")
+            before_local = tool_input.get("bought_before_local")
             orders = await self._allegro.get_orders(
                 status=tool_input.get("status"),
                 buyer_login=tool_input.get("buyer_login"),
                 fulfillment_status=tool_input.get("fulfillment_status"),
                 line_items_sent=tool_input.get("line_items_sent"),
-                bought_at_gte=tool_input.get("bought_at_gte"),
-                bought_at_lte=tool_input.get("bought_at_lte"),
+                bought_at_gte=self._local_to_utc(after_local) if after_local else None,
+                bought_at_lte=self._local_to_utc(before_local) if before_local else None,
                 limit=min(int(tool_input.get("limit", 50)), 100),
             )
             if not orders:
