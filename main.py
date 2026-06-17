@@ -52,9 +52,15 @@ async def lifespan(app: FastAPI):
         settings.app_env,
         settings.port,
     )
-    # Ensure ChromaDB directory exists
+    # Ensure ChromaDB directory exists and pre-warm the retriever
     if settings.rag_backend == "chromadb":
         pathlib.Path(settings.chromadb_path).mkdir(parents=True, exist_ok=True)
+        try:
+            from agents.rag.retriever import build_retriever
+            build_retriever()
+            logger.info("ChromaDB retriever pre-warmed successfully")
+        except Exception as exc:
+            logger.warning("ChromaDB pre-warm failed (non-fatal): %s", exc)
     yield
     logger.info("AllEasystent shutting down")
 
@@ -153,7 +159,7 @@ async def allegro_login():
         "state": state,
     })
     url = f"{settings.allegro_auth_url}/authorize?{params}"
-    response = RedirectResponse(url=url)
+    response = RedirectResponse(url=url, status_code=302)
     response.set_cookie("oauth_state", state, httponly=True, max_age=300, samesite="lax")
     return response
 

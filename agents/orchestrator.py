@@ -119,10 +119,11 @@ class Orchestrator:
         # Store policies / FAQs — checked BEFORE orders so "polityka zwrotów" → general_knowledge
         (["polityk", "faq", "regulamin", "kiedy wysyłacie", "kiedy wysyłają"],
          "general_knowledge"),
-        # Orders — "zamówi" catches all Polish declensions: zamówień, zamówienia, zamówieniach etc.
-        (["zamówi", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
+        # Orders — use "zamówien" (matches zamówień/zamówienia etc.) but NOT "zamówi"
+        # which would also match "zamówień" in meta-questions like "Jakich zamówień szukam?"
+        (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
           "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
-          "niespakow", "wysłan", "niewysłan", "nieopakow"],
+          "niespakow", "wysłan", "niewysłan", "nieopakow", "wartość zam"],
          "allegro_orders"),
         # Offers
         (["ofert", "offer", "listing", "produkt", "cen", "price", "stock",
