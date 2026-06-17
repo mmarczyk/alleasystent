@@ -241,6 +241,27 @@ class Orchestrator:
         history: list[dict[str, str]],
     ) -> AgentResponse:
         """Handle greetings and small talk without hitting specialized agents."""
+        # Deterministic guard: if the user asks for their name and nothing in the
+        # current session history contains a name introduction, return a canned
+        # "I don't know" — Gemini lite models tend to hallucinate "Jan" otherwise.
+        q_lower = query.lower()
+        name_query = any(kw in q_lower for kw in [
+            "na imię", "jak się nazywam", "jakie mam imię", "my name", "what is my name",
+        ])
+        if name_query:
+            name_given = any(
+                any(kw in (m.get("content") or "").lower()
+                    for kw in ["jestem ", "mam na imię", "nazywam się", "my name is", "i am "])
+                for m in history if m.get("role") == "user"
+            )
+            if not name_given:
+                text = (
+                    "Nie powiedziałeś mi swojego imienia w tej rozmowie — nie wiem jak masz na imię. "
+                    "W czym mogę Ci pomóc?" if "imię" in q_lower or "nazywam" in q_lower
+                    else "You haven't told me your name in this conversation, so I don't know it. How can I help you?"
+                )
+                return AgentResponse(text=text, agent_type="chitchat")
+
         msgs = [
             {
                 "role": "system",
@@ -254,9 +275,10 @@ class Orchestrator:
                     "- Informacje o koncie sprzedawcy (opłaty, statystyki, limity)\n"
                     "- Odpowiedzi na pytania z bazy wiedzy sklepu (polityki, FAQ, wysyłka)\n"
                     "After greeting, gently ask how you can help.\n\n"
-                    "CRITICAL: Never invent, guess, or assume personal details (name, company, etc.) "
-                    "that the user has not explicitly stated in this conversation. "
-                    "If asked 'What is my name?' with no prior context, say you don't know.\n\n"
+                    "ABSOLUTE RULE — PERSONAL DETAILS: You have zero knowledge of the user's "
+                    "real name, company, or identity unless they explicitly stated it in THIS "
+                    "conversation. NEVER guess, invent, or assume a name (not 'Jan', 'Anna', "
+                    "or any other). If asked and no name was given, say you don't know.\n\n"
                     "LANGUAGE RULE: If the user writes in Polish, respond entirely in Polish. "
                     "If in English, respond in English. Never mix languages."
                 ),
