@@ -109,8 +109,10 @@ class Orchestrator:
     # ── Keyword pre-routing (no LLM call needed for obvious patterns) ──────────
     _KEYWORD_MAP: list[tuple[list[str], str]] = [
         # Capability / meta questions always → chitchat
+        # Also: "szukam?" catches "Jakich zamówień szukam?" and similar recall meta-questions
         (["funkcj", "możliwości", "co potrafisz", "co umiesz", "co możesz", "jakie masz",
-          "capabilities", "what can you", "what do you", "features", "help me", "pomoc"],
+          "capabilities", "what can you", "what do you", "features", "help me", "pomoc",
+          "szukam?", "co chciałem", "o co mi chodzi", "czego szukam"],
          "chitchat"),
         # Greetings
         (["cześć", "hej", "witaj", "dzień dobry", "dobry wieczór", "siema",
@@ -241,26 +243,20 @@ class Orchestrator:
         history: list[dict[str, str]],
     ) -> AgentResponse:
         """Handle greetings and small talk without hitting specialized agents."""
-        # Deterministic guard: if the user asks for their name and nothing in the
-        # current session history contains a name introduction, return a canned
-        # "I don't know" — Gemini lite models tend to hallucinate "Jan" otherwise.
+        # Deterministic guard: name queries always return a canned "don't know" response.
+        # Users authenticate via Allegro OAuth, not by self-introduction in chat.
+        # This prevents hallucinated or contaminated history from leaking names.
         q_lower = query.lower()
         name_query = any(kw in q_lower for kw in [
             "na imię", "jak się nazywam", "jakie mam imię", "my name", "what is my name",
         ])
         if name_query:
-            name_given = any(
-                any(kw in (m.get("content") or "").lower()
-                    for kw in ["jestem ", "mam na imię", "nazywam się", "my name is", "i am "])
-                for m in history if m.get("role") == "user"
+            text = (
+                "Nie powiedziałeś mi swojego imienia w tej rozmowie — nie wiem jak masz na imię. "
+                "W czym mogę Ci pomóc?" if "imię" in q_lower or "nazywam" in q_lower
+                else "You haven't told me your name in this conversation, so I don't know it. How can I help you?"
             )
-            if not name_given:
-                text = (
-                    "Nie powiedziałeś mi swojego imienia w tej rozmowie — nie wiem jak masz na imię. "
-                    "W czym mogę Ci pomóc?" if "imię" in q_lower or "nazywam" in q_lower
-                    else "You haven't told me your name in this conversation, so I don't know it. How can I help you?"
-                )
-                return AgentResponse(text=text, agent_type="chitchat")
+            return AgentResponse(text=text, agent_type="chitchat")
 
         msgs = [
             {
