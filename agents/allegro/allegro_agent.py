@@ -230,6 +230,8 @@ class AllegroAgent(BaseAgent):
             f"- Dostawa: {delivery_name}",
             f"- Produkty: {total_qty} szt.",
         ]
+        if o.created_at:
+            lines.insert(1, f"- Data złożenia: {o.created_at} (UTC)")
         if extra_lines:
             lines.extend(f"- {l}" for l in extra_lines)
         lines.append(f"- Link: {link}")
@@ -257,6 +259,8 @@ class AllegroAgent(BaseAgent):
                 buyer_login=tool_input.get("buyer_login"),
                 fulfillment_status=tool_input.get("fulfillment_status"),
                 line_items_sent=tool_input.get("line_items_sent"),
+                bought_at_gte=tool_input.get("bought_at_gte"),
+                bought_at_lte=tool_input.get("bought_at_lte"),
                 limit=min(int(tool_input.get("limit", 50)), 100),
             )
             if not orders:
