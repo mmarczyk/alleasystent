@@ -251,6 +251,8 @@ class AllegroAgent(BaseAgent):
         ]
         if o.created_at:
             lines.insert(1, f"- Data złożenia: {o.created_at} (UTC)")
+        if o.paid_at:
+            lines.insert(2 if o.created_at else 1, f"- Opłacone: {o.paid_at} (UTC)")
         if extra_lines:
             lines.extend(f"- {l}" for l in extra_lines)
         lines.append(f"- Link: {link}")
@@ -273,15 +275,19 @@ class AllegroAgent(BaseAgent):
             return "\n\n".join(self._order_block(o) for o in orders)
 
         if tool_name == "get_orders":
-            after_local = tool_input.get("bought_after_local")
-            before_local = tool_input.get("bought_before_local")
+            bought_after = tool_input.get("bought_after_local")
+            bought_before = tool_input.get("bought_before_local")
+            paid_after = tool_input.get("paid_after_local")
+            paid_before = tool_input.get("paid_before_local")
             orders = await self._allegro.get_orders(
                 status=tool_input.get("status"),
                 buyer_login=tool_input.get("buyer_login"),
                 fulfillment_status=tool_input.get("fulfillment_status"),
                 line_items_sent=tool_input.get("line_items_sent"),
-                bought_at_gte=self._local_to_utc(after_local) if after_local else None,
-                bought_at_lte=self._local_to_utc(before_local) if before_local else None,
+                bought_at_gte=self._local_to_utc(bought_after) if bought_after else None,
+                bought_at_lte=self._local_to_utc(bought_before) if bought_before else None,
+                paid_at_gte=self._local_to_utc(paid_after) if paid_after else None,
+                paid_at_lte=self._local_to_utc(paid_before) if paid_before else None,
                 limit=min(int(tool_input.get("limit", 50)), 100),
             )
             if not orders:

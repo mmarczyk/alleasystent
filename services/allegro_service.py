@@ -365,10 +365,33 @@ class AllegroService:
         line_items_sent: list[str] | None = None,
         bought_at_gte: str | None = None,
         bought_at_lte: str | None = None,
+        paid_at_gte: str | None = None,
+        paid_at_lte: str | None = None,
         limit: int = 100,
         offset: int = 0,
         bypass_cache: bool = False,
     ) -> list[AllegroOrder]:
+        # When filtering by payment time the Allegro API has no direct parameter —
+        # fetch READY_FOR_PROCESSING orders with a broad boughtAt window (last 7 days)
+        # and filter client-side by paid_at.
+        if paid_at_gte or paid_at_lte:
+            from datetime import datetime, timedelta
+            from zoneinfo import ZoneInfo
+            start_window = (
+                datetime.now(ZoneInfo("UTC")) - timedelta(days=7)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            raw = await self.get_orders(
+                status="READY_FOR_PROCESSING",
+                bought_at_gte=start_window,
+                limit=200,
+                bypass_cache=True,
+            )
+            result = raw
+            if paid_at_gte:
+                result = [o for o in result if (o.paid_at or "") >= paid_at_gte]
+            if paid_at_lte:
+                result = [o for o in result if (o.paid_at or "") <= paid_at_lte]
+            return result[:limit]
         cache_key = (
             f"{status}:{buyer_login}:{fulfillment_status}:{line_items_sent}:"
             f"{bought_at_gte}:{bought_at_lte}:{limit}:{offset}"

@@ -34,10 +34,9 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "get_orders",
             "description": (
                 "List Allegro orders with arbitrary filters. "
-                "Use ONLY for specific filtered queries — e.g. orders by a specific buyer, "
-                "orders with a particular fulfillment status (SENT, PROCESSING, etc.), "
-                "cancelled orders, or orders placed after/before a specific time of day. "
-                "For new/pending orders use get_new_orders instead."
+                "For new/pending orders use get_new_orders instead. "
+                "TIME FILTERS: use bought_after/before_local for order PLACEMENT time; "
+                "use paid_after/before_local for PAYMENT time ('opłacone po X', 'zapłacone po X')."
             ),
             "parameters": {
                 "type": "object",
@@ -75,6 +74,21 @@ ALLEGRO_TOOLS: list[dict] = [
                         "description": (
                             "Return only orders placed AT OR BEFORE this local Polish time. "
                             "Same format as bought_after_local: 'HH:MM' or 'YYYY-MM-DD HH:MM'."
+                        ),
+                    },
+                    "paid_after_local": {
+                        "type": "string",
+                        "description": (
+                            "Return only orders whose PAYMENT was completed AT OR AFTER this "
+                            "local Polish time. Use for queries with 'opłacone', 'zapłacone'. "
+                            "Format: 'HH:MM' for today or 'YYYY-MM-DD HH:MM' for a specific date."
+                        ),
+                    },
+                    "paid_before_local": {
+                        "type": "string",
+                        "description": (
+                            "Return only orders whose PAYMENT was completed AT OR BEFORE this "
+                            "local Polish time. Same format as paid_after_local."
                         ),
                     },
                     "limit": {
