@@ -8,14 +8,14 @@ Scenariusze testowe weryfikujące wymagania z PRD przez wywołania `POST /query`
 |---|---|
 | `test_01_routing.py` | Klasyfikacja intencji — keyword routing i LLM routing |
 | `test_02_chitchat.py` | Powitania i pytania o możliwości asystenta |
-| `test_03_allegro_auth.py` | OAuth2 device flow, zachowanie bez/z autoryzacją |
-| `test_04_orders.py` | Zamówienia — listowanie, szczegóły, filtry |
+| `test_03_allegro_auth.py` | OAuth2 browser flow (/allegro/login), zachowanie bez/z autoryzacją, /auth/me |
+| `test_04_orders.py` | Zamówienia — listowanie, szczegóły, filtry, polskie tłumaczenia statusów |
 | `test_05_offers.py` | Oferty — listowanie, zmiana ceny, stan magazynowy |
-| `test_06_messaging.py` | Wiadomości od kupujących — lista i wysyłanie |
-| `test_07_account.py` | Konto sprzedawcy i rozliczenia |
+| `test_06_messaging.py` | Wiadomości od kupujących — lista (pola, status odczytania), wysyłanie (potwierdzenie, długa treść), EN |
+| `test_07_account.py` | Konto sprzedawcy (pola, data rejestracji, EN) i rozliczenia (pola, sortowanie, limit, EN) |
 | `test_08_language.py` | Wielojęzyczność (PL/EN) |
 | `test_09_rag.py` | Baza wiedzy — routing, pusta baza, indeksowanie |
-| `test_10_api_and_health.py` | Health check, kształt API, edge cases |
+| `test_10_api_and_health.py` | Health check, kształt API, edge cases, endpointy push (/push/pending, /push/status) |
 | `test_11_conversations.py` | Kontekst wieloturowy i izolacja sesji |
 
 ## Uruchomienie
@@ -37,16 +37,34 @@ pytest -v
 ALLEASYSTENT_URL=https://twoja-aplikacja.railway.app pytest -v
 ```
 
-### Testy z autoryzacją Allegro
+### Testy z autoryzacją Allegro (prawdziwe konto)
 
-1. Otwórz `https://twoja-aplikacja.railway.app/allegro/auth` w przeglądarce
+1. Otwórz `https://twoja-aplikacja.railway.app/allegro/login` w przeglądarce
 2. Zatwierdź dostęp na stronie Allegro
-3. Sprawdź status: `GET /allegro/auth/status` → `{"status": "authorized"}`
-4. Uruchom testy z flagą:
+3. Uruchom testy z flagą:
 
 ```bash
 ALLEASYSTENT_URL=https://twoja-aplikacja.railway.app ALLEGRO_AUTHED=1 pytest -v
 ```
+
+### Testy z mock serwerem Allegro (bez prawdziwego konta)
+
+Wdróż serwis `mock-allegro/` na Railway, następnie skonfiguruj główną aplikację:
+
+```
+ALLEGRO_API_URL    = https://twoj-mock.railway.app
+ALLEGRO_MOCK_TOKEN = mock-token-12345
+```
+
+Uruchom testy z flagą:
+
+```bash
+ALLEASYSTENT_URL=https://twoja-aplikacja.railway.app \
+ALLEGRO_MOCK_MODE=1 \
+pytest -v
+```
+
+`ALLEGRO_MOCK_MODE=1` automatycznie implikuje `ALLEGRO_AUTHED=1`.
 
 ### Uruchomienie wybranego modułu
 

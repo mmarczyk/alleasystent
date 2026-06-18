@@ -7,7 +7,7 @@ zachowanie przy nieprawidłowych danych wejściowych.
 
 import pytest
 import httpx
-from conftest import query, new_session, BASE_URL
+from conftest import query, new_session, BASE_URL, _SESSION_COOKIE
 
 
 class TestHealthCheck:
@@ -145,3 +145,61 @@ class TestStaticUI:
         """
         resp = httpx.get(f"{BASE_URL}/", timeout=10)
         assert "AllEasystent" in resp.text
+
+
+class TestPushEndpoints:
+    """Testy endpointów Web Push (dodanych po wdrożeniu powiadomień cross-device)."""
+
+    def test_push_pending_requires_session(self):
+        """
+        GET /push/pending bez sesji → 401.
+        """
+        resp = httpx.get(f"{BASE_URL}/push/pending", timeout=10)
+        assert resp.status_code == 401
+
+    def test_push_status_requires_session(self):
+        """
+        GET /push/status bez sesji → 401.
+        """
+        resp = httpx.get(f"{BASE_URL}/push/status", timeout=10)
+        assert resp.status_code == 401
+
+    def test_push_pending_with_session_returns_chat_message_field(self):
+        """
+        GET /push/pending z sesją → 200 z polem chatMessage (str lub null).
+        """
+        if not _SESSION_COOKIE:
+            pytest.skip("JWT_SECRET nie ustawiony — pomiń test sesji")
+        cookies = {"session": _SESSION_COOKIE}
+        resp = httpx.get(f"{BASE_URL}/push/pending", cookies=cookies, timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "chatMessage" in data
+        assert data["chatMessage"] is None or isinstance(data["chatMessage"], str)
+
+    def test_push_status_with_session_returns_config_fields(self):
+        """
+        GET /push/status z sesją → 200 z polami o konfiguracji VAPID i subskrypcjach.
+        """
+        if not _SESSION_COOKIE:
+            pytest.skip("JWT_SECRET nie ustawiony — pomiń test sesji")
+        cookies = {"session": _SESSION_COOKIE}
+        resp = httpx.get(f"{BASE_URL}/push/status", cookies=cookies, timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "vapid_public_key_set" in data
+        assert "vapid_private_key_set" in data
+        assert "subscriptions_count" in data
+        assert isinstance(data["vapid_public_key_set"], bool)
+        assert isinstance(data["subscriptions_count"], int)
+
+    def test_push_vapid_public_key_endpoint(self):
+        """
+        GET /push/vapid-public-key → 200 z kluczem lub 503 gdy brak konfiguracji VAPID.
+        """
+        resp = httpx.get(f"{BASE_URL}/push/vapid-public-key", timeout=10)
+        assert resp.status_code in {200, 503}
+        if resp.status_code == 200:
+            data = resp.json()
+            assert "publicKey" in data
+            assert isinstance(data["publicKey"], str)

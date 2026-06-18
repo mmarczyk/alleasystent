@@ -113,6 +113,15 @@ class AllegroService:
         self._init_redis()
         self._load_tokens()
         self._load_pending_device_code()
+        # Mock mode: always override with a fake long-lived token so the agent
+        # skips OAuth even when an expired real token exists on disk.
+        if self._settings.allegro_mock_token:
+            from datetime import datetime, timedelta
+            self._tokens = AllegroTokens(
+                access_token=self._settings.allegro_mock_token,
+                refresh_token="mock-refresh",
+                expires_at=datetime.utcnow() + timedelta(days=365),
+            )
         # Static order fields (items, price, buyer) don't change — 5 min TTL
         self._order_cache: _TTLCache = _TTLCache(ttl=300.0)
         # Order list results — 60 s TTL (new orders can arrive)

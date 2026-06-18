@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # Store tokens in GCP Secret Manager in production; file path for dev
     allegro_token_store: Literal["file", "secret_manager"] = "file"
     allegro_token_file: str = ".allegro_tokens.json"
+    # When set, skip OAuth and use this value as a pre-seeded Bearer token.
+    # Point ALLEGRO_API_URL to a mock server to run fully offline.
+    allegro_mock_token: str = ""
 
     # ── Redis ─────────────────────────────────────────────────────────────────
     # Railway sets REDIS_URL automatically when a Redis service is added to the project.
