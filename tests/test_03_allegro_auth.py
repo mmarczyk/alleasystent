@@ -143,8 +143,17 @@ class TestAuthenticatedBehavior:
     def test_order_query_after_auth_does_not_ask_for_login(self):
         """
         Pytanie o zamówienia po autoryzacji nie zawiera prośby o logowanie.
+        Agent powinien zwrócić dane zamówień, nie komunikat autoryzacyjny.
         """
         result = query("Pokaż moje nowe zamówienia", new_session())
+        assert result["agent"] == "allegro", (
+            f"Agent powinien być 'allegro', dostałem '{result['agent']}'. "
+            f"Odpowiedź: {result['response'][:400]}"
+        )
         resp = result["response"].lower()
-        assert "/allegro/login" not in resp
-        assert result["agent"] == "allegro"
+        # Nie może być komunikatu o potrzebie logowania
+        auth_prompts = ["zaloguj się przez allegro", "potrzebuję autoryzacji",
+                        "po zalogowaniu wróć", "need authorization"]
+        assert not any(p in resp for p in auth_prompts), (
+            f"Po autoryzacji odpowiedź nie powinna zawierać prośby o logowanie: {result['response'][:400]}"
+        )

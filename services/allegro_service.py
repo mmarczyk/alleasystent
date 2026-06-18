@@ -113,8 +113,9 @@ class AllegroService:
         self._init_redis()
         self._load_tokens()
         self._load_pending_device_code()
-        # Mock mode: pre-seed a fake token so the agent skips OAuth entirely.
-        if self._settings.allegro_mock_token and self._tokens is None:
+        # Mock mode: always override with a fake long-lived token so the agent
+        # skips OAuth even when an expired real token exists on disk.
+        if self._settings.allegro_mock_token:
             from datetime import datetime, timedelta
             self._tokens = AllegroTokens(
                 access_token=self._settings.allegro_mock_token,
