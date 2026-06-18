@@ -16,8 +16,24 @@ import uvicorn
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 app = FastAPI(title="Mock Allegro API")
+
+
+class AcceptAnyMiddleware(BaseHTTPMiddleware):
+    """Force JSON response regardless of Accept header — Allegro clients send custom MIME types."""
+    async def dispatch(self, request: Request, call_next):
+        # Strip vendor-specific Accept header so FastAPI doesn't reject it
+        scope = request.scope
+        headers = dict(scope.get("headers", []))
+        headers[b"accept"] = b"application/json"
+        scope["headers"] = list(headers.items())
+        response = await call_next(request)
+        response.headers["Content-Type"] = "application/json"
+        return response
+
+app.add_middleware(AcceptAnyMiddleware)
 
 # ── Fake data store ────────────────────────────────────────────────────────────
 
