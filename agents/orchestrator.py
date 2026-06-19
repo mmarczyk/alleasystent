@@ -14,7 +14,7 @@ Responsibilities:
 import logging
 from typing import Any
 
-from openai import AsyncOpenAI, RateLimitError
+from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 from agents.base_agent import _call_with_retry
 
 from agents.allegro.allegro_agent import AllegroAgent
@@ -97,7 +97,14 @@ class Orchestrator:
         logger.info("Intent: %s | message: %.60s…", intent, message.text)
 
         # 3. Route to specialized agent
-        response = await self._route(intent, message, session.to_anthropic_messages(), user_id=user_id)
+        try:
+            response = await self._route(intent, message, session.to_anthropic_messages(), user_id=user_id)
+        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
+            logger.error("LLM API error during routing (intent=%s): %s", intent, exc)
+            response = AgentResponse(
+                text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
+                agent_type="base",
+            )
 
         # 4. Persist conversation
         session.add_message(MessageRole.USER, message.text)
@@ -201,9 +208,11 @@ class Orchestrator:
 
             logger.warning("Unknown intent %r, falling back to chitchat", raw)
             return "chitchat"
+        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError):
+            raise  # propagate — handle() will catch and return a friendly error
         except Exception as exc:
             logger.error("Intent classification failed: %s", exc)
-            return "allegro_orders"
+            return "chitchat"
 
     async def _route(
         self,
