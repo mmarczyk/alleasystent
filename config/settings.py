@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     # ── Google Gemini ────────────────────────────────────────────────────────
     google_api_key: str
     gemini_model: str = "gemini-2.5-flash"
-<<<<<<< HEAD
     gemini_model_fast: str = "gemini-2.5-flash-lite"
     gemini_max_tokens: int = 16000
     # Comma-separated rotation pools; empty = auto-derive from defaults below.
