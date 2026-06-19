@@ -93,8 +93,27 @@ class Orchestrator:
         )
 
         # 2. Classify intent
-        intent = await self._classify_intent(message.text, session.to_anthropic_messages())
+        try:
+            intent = await self._classify_intent(message.text, session.to_anthropic_messages())
+        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
+            logger.error("LLM API error during intent classification: %s", exc)
+            response = AgentResponse(
+                text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
+                agent_type="base",
+            )
+            session.add_message(MessageRole.USER, message.text)
+            session.add_message(MessageRole.ASSISTANT, response.text)
+            await self._firestore.save_session(session)
+            return response
         logger.info("Intent: %s | message: %.60s…", intent, message.text)
+
+        # Derive agent_type from intent for use in error responses
+        if intent.startswith("allegro_"):
+            _agent_type = "allegro"
+        elif intent == "general_knowledge":
+            _agent_type = "rag"
+        else:
+            _agent_type = "chitchat"
 
         # 3. Route to specialized agent
         try:
@@ -103,7 +122,7 @@ class Orchestrator:
             logger.error("LLM API error during routing (intent=%s): %s", intent, exc)
             response = AgentResponse(
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
-                agent_type="base",
+                agent_type=_agent_type,
             )
 
         # 4. Persist conversation
