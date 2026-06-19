@@ -14,17 +14,19 @@ class Settings(BaseSettings):
     # ── Google Gemini ────────────────────────────────────────────────────────
     google_api_key: str
     gemini_model: str = "gemini-2.5-flash"
+<<<<<<< HEAD
     gemini_model_fast: str = "gemini-2.5-flash-lite"
     gemini_max_tokens: int = 16000
     # Comma-separated rotation pools; empty = auto-derive from defaults below.
-    # Example: GEMINI_MODEL_POOL=gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash
+    # Override via env var: GEMINI_MODEL_POOL=model1,model2,...
+    # Use stable (non-preview) models — preview quotas are ~10–30 RPM vs 1000+ stable.
     gemini_model_pool: str = ""
     gemini_model_fast_pool: str = ""
 
     _DEFAULT_POOL = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash",
+        "gemini-2.5-flash",       # primary: latest stable, high throughput
+        "gemini-2.5-flash-lite",  # fallback: stable, very fast
+        "gemini-2.0-flash",       # fallback: proven stable, 1000+ RPM
     ]
 
     def model_pool(self) -> list[str]:
