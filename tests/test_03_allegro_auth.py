@@ -14,6 +14,7 @@ class TestAuthEndpoints:
     def test_login_endpoint_redirects_to_allegro(self):
         """
         GET /allegro/login → redirect 302 na stronę Allegro lub 503 gdy brak credentials.
+        W trybie mock redirect prowadzi na mock serwer zamiast allegro.pl — oba są akceptowane.
         Endpoint zastąpił stary device flow.
         """
         resp = httpx.get(f"{BASE_URL}/allegro/login", timeout=15, follow_redirects=False)
@@ -22,8 +23,9 @@ class TestAuthEndpoints:
         )
         if resp.status_code == 302:
             location = resp.headers.get("location", "")
-            assert "allegro.pl" in location, (
-                f"Redirect powinien prowadzić na allegro.pl, dostałem: {location}"
+            # W trybie mock ALLEGRO_AUTH_URL wskazuje na mock server — akceptujemy oba
+            assert "allegro.pl" in location or "authorize" in location, (
+                f"Redirect powinien prowadzić na allegro.pl lub mock /authorize, dostałem: {location}"
             )
 
     def test_auth_me_requires_session(self):
