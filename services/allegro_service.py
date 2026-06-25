@@ -352,14 +352,20 @@ class AllegroService:
 
     async def _get(self, path: str, params: dict | list | None = None) -> dict[str, Any]:
         headers = await self._get_headers()
-        resp = await self._client.get(path, headers=headers, params=params)
+        try:
+            resp = await self._client.get(path, headers=headers, params=params)
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
             raise AllegroAPIError(resp.status_code, resp.text[:500])
         return resp.json()
 
     async def _post(self, path: str, body: dict) -> dict[str, Any]:
         headers = await self._get_headers()
-        resp = await self._client.post(path, headers=headers, json=body)
+        try:
+            resp = await self._client.post(path, headers=headers, json=body)
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
             raise AllegroAPIError(resp.status_code, resp.text[:500])
         return resp.json()
