@@ -137,7 +137,6 @@ alleasystent/
 ├── services/                # Klienty zewnętrznych API
 ├── webhooks/                # Handlery webhooku Facebook
 ├── web/                     # Frontend PWA
-├── tests/                   # Testy (11 modułów)
 ├── deployment/              # Skrypty GCP
 ├── main.py                  # Aplikacja FastAPI
 ├── Dockerfile
@@ -150,9 +149,7 @@ alleasystent/
 
 ## Testy
 
-```bash
-pytest tests/ -v
-```
+Testy zostały przeniesione do osobnego repozytorium [`alleasystent-qa`](https://github.com/mmarczyk/alleasystent-qa), które zawiera pakiet pytest oraz aplikację webową do uruchamiania testów.
 
 ---
 
