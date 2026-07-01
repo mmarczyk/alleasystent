@@ -1,0 +1,10 @@
+# Unit test requirements (no real LLM or Allegro API calls)
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.24.0
+fastapi>=0.115.0
+uvicorn>=0.32.0
+PyJWT>=2.9.0
+openai>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
