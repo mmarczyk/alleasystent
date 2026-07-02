@@ -61,7 +61,7 @@ const AppUpdater = (() => {
 // ── Auth check ────────────────────────────────────
 async function checkAuth() {
   try {
-    const res = await fetch('/auth/me', { credentials: 'include' });
+    const res = await fetch(Settings.api('/auth/me'), { credentials: 'include' });
     AppUpdater.check(res.headers);
     if (res.status === 401) {
       document.getElementById('login-overlay').style.display = 'flex';
@@ -90,6 +90,8 @@ const Settings = (() => {
   function load() {
     try { Object.assign(_s, JSON.parse(localStorage.getItem('ae_settings') || '{}')); } catch {}
     if (_s.backendUrl) _s.backendUrl = _s.backendUrl.replace(/\/$/, '');
+    // Fall back to value injected by GitHub Actions (config.js → window.__BACKEND_URL__)
+    if (!_s.backendUrl && window.__BACKEND_URL__) _s.backendUrl = window.__BACKEND_URL__;
     return _s;
   }
   function save(vals) {
@@ -98,7 +100,9 @@ const Settings = (() => {
     localStorage.setItem('ae_settings', JSON.stringify(_s));
   }
   function get(k) { return _s[k]; }
-  return { load, save, get, all: () => ({ ..._s }) };
+  // Returns an absolute URL when backendUrl is set, otherwise a relative path.
+  function api(path) { return _s.backendUrl ? _s.backendUrl + path : path; }
+  return { load, save, get, api, all: () => ({ ..._s }) };
 })();
 
 // ── Conversation store ───────────────────────────
@@ -160,9 +164,7 @@ const Store = (() => {
 // ── Backend API ──────────────────────────────────
 const Backend = (() => {
   async function query(message, sessionId) {
-    const backendUrl = Settings.get('backendUrl');
-    const url = backendUrl ? `${backendUrl}/query` : '/query';
-    const res = await fetch(url, {
+    const res = await fetch(Settings.api('/query'), {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -200,7 +202,7 @@ const WebPush = (() => {
   async function subscribe() {
     if (!isSupported()) return false;
     try {
-      const keyRes = await fetch('/push/vapid-public-key', { credentials: 'include' });
+      const keyRes = await fetch(Settings.api('/push/vapid-public-key'), { credentials: 'include' });
       if (!keyRes.ok) return false;
       const { publicKey } = await keyRes.json();
 
@@ -214,7 +216,7 @@ const WebPush = (() => {
           applicationServerKey: _urlBase64ToUint8Array(publicKey),
         });
       }
-      await fetch('/push/subscribe', {
+      await fetch(Settings.api('/push/subscribe'), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -249,7 +251,7 @@ const WebPush = (() => {
     if (localStorage.getItem(SUB_KEY)) {
       const payload = { title, body: cleanBody, url: url ?? '/' };
       if (chatText) payload.chatMessage = chatText;
-      fetch('/push/notify', {
+      fetch(Settings.api('/push/notify'), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -262,7 +264,7 @@ const WebPush = (() => {
     // Retrieve and remove the oldest pending chat message from the server.
     // Called on app startup so devices that were offline during polling still see messages.
     try {
-      const res = await fetch('/push/pending', { credentials: 'include' });
+      const res = await fetch(Settings.api('/push/pending'), { credentials: 'include' });
       if (!res.ok) return null;
       const data = await res.json();
       return data.chatMessage || null;
@@ -314,7 +316,7 @@ const OrderMonitor = (() => {
   async function _saveBaseline() {
     try {
       console.log('[OrderMonitor] saving baseline via /order-event-stats…');
-      const res = await fetch('/allegro/order-event-stats', { credentials: 'include' });
+      const res = await fetch(Settings.api('/allegro/order-event-stats'), { credentials: 'include' });
       console.log('[OrderMonitor] baseline HTTP', res.status);
       if (!res.ok) return;
       const data = await res.json();
@@ -345,7 +347,7 @@ const OrderMonitor = (() => {
       return;
     }
     try {
-      const url = `/allegro/order-events?since=${encodeURIComponent(lastId)}`;
+      const url = Settings.api(`/allegro/order-events?since=${encodeURIComponent(lastId)}`);
       const res = await fetch(url, { credentials: 'include' });
       console.log('[OrderMonitor] poll HTTP', res.status, 'url:', url);
       if (!res.ok) { console.error('[OrderMonitor] poll failed, status:', res.status); return; }
@@ -396,7 +398,7 @@ const OrderMonitor = (() => {
 
       const details = await Promise.all(
         orders.map(o => o.order_id
-          ? fetch(`/allegro/orders/${encodeURIComponent(o.order_id)}`, { credentials: 'include' })
+          ? fetch(Settings.api(`/allegro/orders/${encodeURIComponent(o.order_id)}`), { credentials: 'include' })
               .then(r => r.ok ? r.json() : null)
               .catch(() => null)
           : Promise.resolve(null)
@@ -468,7 +470,7 @@ const InvoiceMonitor = (() => {
 
   async function _check() {
     try {
-      const res = await fetch('/allegro/pending-invoices', { credentials: 'include' });
+      const res = await fetch(Settings.api('/allegro/pending-invoices'), { credentials: 'include' });
       if (!res.ok) return;
       const data = await res.json();
       const orders = data.orders || [];
@@ -821,6 +823,13 @@ const Chat = (() => {
 window.addEventListener('DOMContentLoaded', async () => {
   Settings.load();
   Store.load();
+
+  // Point login / logout links at the backend (handles split deployment where
+  // frontend lives on GitHub Pages and backend on Cloud Run).
+  const loginBtn = document.getElementById('login-btn');
+  if (loginBtn) loginBtn.href = Settings.api('/allegro/login');
+  const logoutLink = document.getElementById('logout-link');
+  if (logoutLink) logoutLink.href = Settings.api('/auth/logout');
 
   // Check authentication first — show login overlay if not logged in
   const authed = await checkAuth();

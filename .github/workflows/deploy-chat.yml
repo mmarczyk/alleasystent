@@ -3,7 +3,7 @@ name: Deploy AllEasystent Chat UI to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ["web/**"]
+    paths: ["web/**", ".github/workflows/deploy-chat.yml"]
   workflow_dispatch:
 
 permissions:
@@ -25,6 +25,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Vendor JS/CSS are downloaded at Docker build time and not committed to
+      # the repo.  Download them here so GitHub Pages has them too.
+      - name: Download vendor assets
+        run: |
+          mkdir -p web/js/vendor web/css/vendor
+          curl -sSfL "https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" \
+            -o web/js/vendor/marked.min.js
+          curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" \
+            -o web/js/vendor/highlight.min.js
+          curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" \
+            -o web/css/vendor/github-dark.min.css
+
+      # Inject Cloud Run backend URL into config.js.
+      # Set BACKEND_URL as a GitHub Actions variable (repo → Settings → Variables):
+      #   BACKEND_URL = https://alleasystent-<hash>-ew.a.run.app
+      # Leave empty to keep same-origin mode (all-in-one deployment).
+      - name: Inject backend URL
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          echo "window.__BACKEND_URL__ = '${BACKEND_URL}';" > web/config.js
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

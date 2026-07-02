@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # Point ALLEGRO_API_URL to a mock server to run fully offline.
     allegro_mock_token: str = ""
 
+    # ── Split deployment ──────────────────────────────────────────────────────
+    # Public URL of the GitHub Pages frontend, e.g. https://user.github.io/alleasystent
+    # Leave empty for all-in-one deployment (Cloud Run / Railway serving web/).
+    # When set: CORS is locked to this origin (+ localhost), JWT cookie uses
+    # SameSite=None;Secure so the browser sends it on cross-domain API calls,
+    # and OAuth redirects back here after login/logout.
+    frontend_url: str = ""
+
     # ── Redis ─────────────────────────────────────────────────────────────────
     # Railway sets REDIS_URL automatically when a Redis service is added to the project.
     redis_url: str = ""

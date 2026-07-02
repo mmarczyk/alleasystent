@@ -91,9 +91,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Split deployment (GitHub Pages + Cloud Run): lock to specific origin so the
+# browser accepts credentials=include requests.  All-in-one: wildcard is fine
+# because frontend and backend share an origin and CORS never triggers.
+_cors_origins = (
+    [settings.frontend_url.rstrip("/"), "http://localhost:8080", "http://localhost:3000"]
+    if settings.frontend_url
+    else ["*"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=bool(settings.frontend_url),
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Server-Instance"],
@@ -240,13 +249,17 @@ async def allegro_callback(request: Request, code: str = "", state: str = "", er
     await service._save_tokens()
     # Create JWT session
     session_token = create_session_token({"sub": login, "name": login})
-    response = RedirectResponse(url="/", status_code=302)
+    # Split deployment: redirect back to GitHub Pages after OAuth.
+    # Cookie must be SameSite=None;Secure so the browser sends it on
+    # cross-domain API calls from GitHub Pages to Cloud Run.
+    is_split = bool(settings.frontend_url)
+    response = RedirectResponse(url=settings.frontend_url or "/", status_code=302)
     response.set_cookie(
         "session", session_token,
         httponly=True,
         max_age=60 * 60 * 24 * 30,
-        samesite="lax",
-        secure=settings.is_production,
+        samesite="none" if is_split else "lax",
+        secure=True if is_split else settings.is_production,
     )
     response.delete_cookie("oauth_state")
     logger.info("Allegro login successful for user: %s", login)
@@ -255,7 +268,7 @@ async def allegro_callback(request: Request, code: str = "", state: str = "", er
 
 @app.get("/auth/logout", tags=["Auth"])
 async def auth_logout():
-    response = RedirectResponse(url="/", status_code=302)
+    response = RedirectResponse(url=settings.frontend_url or "/", status_code=302)
     response.delete_cookie("session")
     return response
 
