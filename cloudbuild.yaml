@@ -1,25 +1,18 @@
 # GCP Cloud Build — builds and deploys to Cloud Run
-# Trigger: push to main branch
+# Triggered automatically by Cloud Run's GitHub integration on each push to main.
 #
-# Required GCP Secret Manager secrets (create once with `gcloud secrets create`):
-#   google-api-key         — Gemini API key (GOOGLE_API_KEY)
-#   fb-page-token          — Facebook Page Access Token
-#   fb-app-secret          — Facebook App Secret
-#   allegro-client-id      — Allegro OAuth client ID
-#   allegro-client-secret  — Allegro OAuth client secret
-#   redis-url              — Redis connection string (e.g. from Railway / Upstash)
-#   jwt-secret             — Random secret for JWT session tokens
+# One-time setup in Cloud Run console (Variables & Secrets tab) after first deploy:
+#   FRONTEND_URL        = https://mmarczyk.github.io/alleasystent
+#   ALLEGRO_REDIRECT_URI = https://YOUR-SERVICE.run.app/allegro/callback
 #
-# Configure these Cloud Build substitution variables (or set them directly
-# in the --set-env-vars below after the first deployment):
-#   _FRONTEND_URL          — GitHub Pages URL, e.g. https://user.github.io/alleasystent
-#                            (leave empty for all-in-one mode where Cloud Run serves web/)
-#   _SERVICE_URL           — Cloud Run service URL (needed for ALLEGRO_REDIRECT_URI)
-#                            e.g. https://alleasystent-abc123-ew.a.run.app
-
-substitutions:
-  _FRONTEND_URL: ''
-  _SERVICE_URL: ''
+# Required GCP Secret Manager secrets (create once):
+#   google-api-key        — Gemini API key
+#   allegro-client-id     — Allegro OAuth client ID
+#   allegro-client-secret — Allegro OAuth client secret
+#   redis-url             — Redis connection string
+#   jwt-secret            — Random string for JWT signing
+#   fb-page-token         — Facebook Page Access Token (or empty)
+#   fb-app-secret         — Facebook App Secret (or empty)
 
 steps:
   # Build Docker image
@@ -36,14 +29,12 @@ steps:
   - name: "gcr.io/cloud-builders/docker"
     args:
       - push
-      - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:$COMMIT_SHA"
-
-  - name: "gcr.io/cloud-builders/docker"
-    args:
-      - push
-      - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:latest"
+      - "--all-tags"
+      - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app"
 
   # Deploy to Cloud Run
+  # --update-* flags: only touch the listed vars/secrets, preserve everything else
+  # (including FRONTEND_URL and ALLEGRO_REDIRECT_URI set via Cloud Run console)
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: gcloud
     args:
@@ -59,9 +50,9 @@ steps:
       - "--cpu=1"
       - "--min-instances=0"
       - "--max-instances=10"
-      - "--set-secrets=GOOGLE_API_KEY=google-api-key:latest,FACEBOOK_PAGE_ACCESS_TOKEN=fb-page-token:latest,FACEBOOK_APP_SECRET=fb-app-secret:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest"
-      - "--set-env-vars=APP_ENV=production,GCP_PROJECT_ID=$PROJECT_ID,RAG_BACKEND=chromadb,PORT=8080,FRONTEND_URL=${_FRONTEND_URL},ALLEGRO_REDIRECT_URI=${_SERVICE_URL}/allegro/callback"
       - "--service-account=alleasystent-sa@$PROJECT_ID.iam.gserviceaccount.com"
+      - "--update-secrets=GOOGLE_API_KEY=google-api-key:latest,FACEBOOK_PAGE_ACCESS_TOKEN=fb-page-token:latest,FACEBOOK_APP_SECRET=fb-app-secret:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest"
+      - "--update-env-vars=APP_ENV=production,GCP_PROJECT_ID=$PROJECT_ID,RAG_BACKEND=chromadb,PORT=8080"
 
 images:
   - "europe-central2-docker.pkg.dev/$PROJECT_ID/alleasystent/app:$COMMIT_SHA"
