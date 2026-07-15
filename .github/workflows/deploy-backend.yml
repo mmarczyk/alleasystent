@@ -47,15 +47,6 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
 
-      - name: Ensure Artifact Registry repository exists
-        run: |
-          gcloud artifacts repositories create alleasystent \
-            --repository-format=docker \
-            --location=${{ env.REGION }} \
-            --project=${{ vars.GCP_PROJECT_ID }} \
-            --description="AllEasystent Docker images" \
-            2>/dev/null || true
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
