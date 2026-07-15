@@ -1,0 +1,74 @@
+name: Deploy AllEasystent Backend to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'web/**'
+      - '.github/workflows/deploy-chat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGION: europe-central2
+  SERVICE: alleasystent
+  REGISTRY: europe-central2-docker.pkg.dev
+
+jobs:
+  deploy:
+    name: Build & Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Authenticate with a service account key stored in GitHub Secrets.
+      # Required secret: GCP_SA_KEY — JSON key of a service account with roles:
+      #   - Artifact Registry Writer
+      #   - Cloud Run Developer
+      #   - Service Account User (on alleasystent-sa)
+      # Required variable: GCP_PROJECT_ID — your GCP project ID
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GHA layer cache: pip packages and the ~400 MB HuggingFace model are
+      # cached between runs.  A code-only change skips both expensive layers.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE }} \
+            --image=${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8080 \
+            --memory=2Gi \
+            --cpu=1 \
+            --min-instances=0 \
+            --max-instances=10 \
+            --service-account=alleasystent-sa@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com \
+            --update-secrets=GOOGLE_API_KEY=google-api-key:latest,FACEBOOK_PAGE_ACCESS_TOKEN=fb-page-token:latest,FACEBOOK_APP_SECRET=fb-app-secret:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest \
+            --update-env-vars=APP_ENV=production,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},RAG_BACKEND=chromadb,PORT=8080
