@@ -276,7 +276,15 @@ async def auth_logout():
 @app.get("/auth/me", tags=["Auth"])
 async def auth_me(request: Request):
     from services.auth_service import get_current_user
+    from services.allegro_service import AllegroService
     user = await get_current_user(request)
+    # Allegro token may be missing after container restart (file-based storage lost).
+    # Force re-login so the user completes OAuth again and gets a fresh token.
+    svc = AllegroService(user_id=user["sub"])
+    if svc._tokens is None:
+        await svc._load_tokens_from_redis()
+    if svc._tokens is None:
+        raise HTTPException(status_code=401, detail="allegro_auth_required")
     return {"sub": user["sub"], "name": user["name"]}
 
 
