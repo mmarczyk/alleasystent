@@ -43,7 +43,10 @@ async def _poll_all_users() -> None:
     import redis.asyncio as aioredis
     from config.settings import get_settings
 
-    r = aioredis.from_url(get_settings().redis_url, decode_responses=True)
+    redis_url = get_settings().redis_url
+    if not redis_url:
+        return
+    r = aioredis.from_url(redis_url, decode_responses=True)
     try:
         # Collect user IDs that have at least one push subscription
         sub_keys = await r.keys("push:sub:*")
