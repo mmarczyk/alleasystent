@@ -845,10 +845,16 @@ window.addEventListener('DOMContentLoaded', async () => {
   const logoutLink = document.getElementById('logout-link');
   if (logoutLink) logoutLink.href = Settings.api('/auth/logout');
 
-  // Handle Allegro OAuth callback: Allegro redirects back here with ?code=&state=
-  const params = new URLSearchParams(window.location.search);
-  const oauthCode = params.get('code');
-  const oauthState = params.get('state');
+  // Handle Allegro OAuth callback.
+  // Allegro redirects to /oauth-callback.html?code=&state=, which stores the
+  // params in sessionStorage and immediately redirects here (to avoid GitHub
+  // Pages' directory 301 that can drop the ?code= query string).
+  // Fallback: also read directly from the URL in case of same-origin deployment.
+  const _urlParams = new URLSearchParams(window.location.search);
+  const oauthCode = _urlParams.get('code') || sessionStorage.getItem('ae_oauth_code');
+  const oauthState = _urlParams.get('state') || sessionStorage.getItem('ae_oauth_state');
+  sessionStorage.removeItem('ae_oauth_code');
+  sessionStorage.removeItem('ae_oauth_state');
   if (oauthCode && oauthState) {
     // Clean URL immediately so refresh doesn't re-trigger exchange
     window.history.replaceState({}, '', window.location.pathname);

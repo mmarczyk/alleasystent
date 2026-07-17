@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v28';
+const CACHE = 'alleasystent-v29';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
@@ -75,8 +75,9 @@ self.addEventListener('fetch', e => {
   ) return;
 
   // App shell HTML — network-first so auth state stays fresh;
-  // fall back to cached shell so the UI opens even when offline
-  if (url.pathname === '/' || url.pathname.endsWith('.html')) {
+  // fall back to cached shell so the UI opens even when offline.
+  // Paths ending in '/' cover GitHub Pages subdir URLs (/alleasystent/).
+  if (url.pathname === '/' || url.pathname.endsWith('/') || url.pathname.endsWith('.html')) {
     e.respondWith(
       fetch(e.request)
         .then(r => {

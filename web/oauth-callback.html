@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Logowanie Allegro…</title>
+<script>
+(function () {
+  var p = new URLSearchParams(window.location.search);
+  var code = p.get('code'), state = p.get('state');
+  if (code && state) {
+    try {
+      sessionStorage.setItem('ae_oauth_code', code);
+      sessionStorage.setItem('ae_oauth_state', state);
+    } catch (_) {}
+  }
+  // Redirect to the main app. sessionStorage survives within the same tab.
+  window.location.replace('./');
+})();
+</script>
+</head>
+<body></body>
+</html>

@@ -295,16 +295,31 @@ def _verify_oauth_state(state: str) -> bool:
     return _hmac.compare_digest(expected, state)
 
 
+def _oauth_redirect_uri() -> str:
+    """Build the Allegro OAuth redirect URI.
+
+    When FRONTEND_URL is set (split deployment), we point Allegro at
+    /oauth-callback.html — a real file that GitHub Pages serves directly
+    without any trailing-slash redirect.  A 301 redirect (e.g. /alleasystent
+    → /alleasystent/) drops the ?code= query param in some CDN configurations,
+    so using a direct .html file avoids that problem entirely.
+    """
+    if settings.frontend_url:
+        base = settings.frontend_url.rstrip("/")
+        return f"{base}/oauth-callback.html"
+    return settings.allegro_redirect_uri
+
+
 @app.get("/allegro/auth-url", tags=["Auth"])
 async def allegro_auth_url():
     """Return Allegro OAuth URL for the frontend-initiated flow.
-    Frontend redirects the user there; Allegro redirects back to FRONTEND_URL with ?code=."""
+    Frontend redirects the user there; Allegro redirects back to oauth-callback.html with ?code=."""
     if not settings.allegro_client_id:
         raise HTTPException(503, "Allegro credentials not configured")
     from urllib.parse import urlencode
     nonce = _secrets.token_urlsafe(16)
     state = _sign_oauth_state(nonce)
-    redirect_uri = settings.frontend_url or settings.allegro_redirect_uri
+    redirect_uri = _oauth_redirect_uri()
     params = urlencode({
         "response_type": "code",
         "client_id": settings.allegro_client_id,
@@ -323,7 +338,7 @@ async def allegro_exchange(body: AllegroExchangeRequest):
         raise HTTPException(400, "Invalid or expired OAuth state")
     from services.allegro_service import AllegroService, exchange_allegro_code
     from services.auth_service import create_session_token
-    redirect_uri = settings.frontend_url or settings.allegro_redirect_uri
+    redirect_uri = _oauth_redirect_uri()
     try:
         login, tokens = await exchange_allegro_code(body.code, redirect_uri=redirect_uri)
     except Exception as exc:
