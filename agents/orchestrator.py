@@ -224,13 +224,33 @@ class Orchestrator:
 
     # ── Classification ─────────────────────────────────────────────────────────
 
-    def _detect_format(self, query: str) -> str:
-        """Keyword-based output format detection. Defaults to 'chat'."""
+    def _detect_format(self, query: str, history: list[dict[str, str]] | None = None) -> str:
+        """Keyword-based output format detection. Defaults to 'chat'.
+
+        For short follow-up queries (≤4 words, no format keywords), inherit the
+        format from the most recent user turn in history so that "A teraz" or
+        "Spróbuj ponownie" after a document request stays in document mode.
+        """
         q = query.lower()
         for keywords, fmt in _FORMAT_KEYWORDS:
             if any(kw in q for kw in keywords):
                 logger.info("Format keyword match: %r -> %s", query[:60], fmt)
                 return fmt
+
+        # Short follow-up: inherit format from most recent user message in history
+        if len(query.split()) <= 4 and history:
+            for msg in reversed(history):
+                if msg.get("role") == "user":
+                    prev_q = msg.get("content", "").lower()
+                    for keywords, fmt in _FORMAT_KEYWORDS:
+                        if any(kw in prev_q for kw in keywords):
+                            logger.info(
+                                "Format inherited from history: %r -> %s (prev: %.40r)",
+                                query[:40], fmt, prev_q,
+                            )
+                            return fmt
+                    break  # Only look one user message back
+
         return "chat"
 
     def _detect_source_keyword(self, query: str) -> str | None:
@@ -295,7 +315,7 @@ class Orchestrator:
         history: list[dict[str, str]],
     ) -> tuple[str, str]:
         """Return (data_source, output_format) for the query."""
-        output_format = self._detect_format(query)
+        output_format = self._detect_format(query, history)
         data_source = self._detect_source_keyword(query)
 
         if data_source is None:
