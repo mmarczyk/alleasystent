@@ -185,7 +185,11 @@ const DocViewer = (() => {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  return { open, openFromKey, setActive, closeTab, close, copyActive, register };
+  function getContent(key) {
+    return _registry[key] || null;
+  }
+
+  return { open, openFromKey, setActive, closeTab, close, copyActive, register, getContent };
 })();
 
 // ── Settings ─────────────────────────────────────
@@ -766,16 +770,25 @@ const Chat = (() => {
     div.dataset.index = index ?? '';
 
     const avatar = isUser ? '👤' : '🛒';
-    const html = isUser ? escHtml(content).replace(/\n/g, '<br>') : renderMarkdown(content);
     const time = ts ? new Date(ts).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '';
 
     // Register long bot responses so "Pełny widok" button can re-open the doc viewer
     const docKey = isLong ? DocViewer.register(content) : null;
 
+    // Long responses: show a compact preview in the bubble — full content is in the doc viewer
+    let bubbleHtml;
+    if (isLong) {
+      const preview = content.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
+      const previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
+      bubbleHtml = `<p style="color:var(--text-muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>`;
+    } else {
+      bubbleHtml = isUser ? escHtml(content).replace(/\n/g, '<br>') : renderMarkdown(content);
+    }
+
     div.innerHTML = `
       <div class="msg-avatar">${avatar}</div>
       <div class="msg-content">
-        <div class="msg-bubble">${html}</div>
+        <div class="msg-bubble"${docKey !== null ? ` data-doc-key="${docKey}"` : ''}>${bubbleHtml}</div>
         <div class="msg-actions">
           <button class="msg-act-btn" onclick="Chat.copyMessage(this)" title="Kopiuj">📋 Kopiuj</button>
           ${!isUser ? `<button class="msg-act-btn" onclick="Chat.regenerate()" title="Generuj ponownie">↺ Nowa odpowiedź</button>` : ''}
@@ -917,7 +930,9 @@ const Chat = (() => {
 
   function copyMessage(btn) {
     const bubble = btn.closest('.msg-content').querySelector('.msg-bubble');
-    navigator.clipboard?.writeText(bubble.innerText).then(() => UI.toast('Skopiowano ✓')).catch(() => UI.toast('Błąd kopiowania'));
+    const docKey = bubble.dataset.docKey;
+    const text = docKey ? (DocViewer.getContent(parseInt(docKey)) || bubble.innerText) : bubble.innerText;
+    navigator.clipboard?.writeText(text).then(() => UI.toast('Skopiowano ✓')).catch(() => UI.toast('Błąd kopiowania'));
   }
 
   async function regenerate() {

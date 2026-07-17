@@ -53,25 +53,31 @@ Output the label only. No punctuation, no explanation.
 
 _FORMAT_PREFIXES: dict[str, str] = {
     "document": (
-        "[TRYB DOKUMENTU — WAŻNE] Ta odpowiedź musi być PEŁNYM, GOTOWYM DOKUMENTEM. "
-        "Nie odpowiadaj 'krótko i zwięźle' — dokument musi być kompletny, profesjonalny i szczegółowy. "
-        "Format markdown: zacznij od nagłówka (# Tytuł), dodaj datę, pełną treść, "
-        "tabele jeśli potrzebne, zakończ podpisem lub stopką. "
-        "Użyj narzędzi, aby pobrać aktualne dane ze sklepu jeśli są potrzebne do treści. "
-        "Minimum 400 słów — dokument musi być kompletny i gotowy do użycia.\n\n"
+        "[TRYB DOKUMENTU — ZASADY BEZWZGLĘDNE]\n"
+        "1. NIE pisz żadnych wstępów ani potwierdzeń — ŻADNEGO 'Jasne', 'Rozumiem', 'Oczywiście', "
+        "'Przygotuję', 'Oto' ani żadnej innej preambuły. Zacznij NATYCHMIAST od dokumentu.\n"
+        "2. Pierwsza linia odpowiedzi MUSI być nagłówkiem markdown: # Tytuł dokumentu\n"
+        "3. Użyj narzędzi, aby pobrać aktualne dane ze sklepu PRZED napisaniem treści. "
+        "Dane muszą być prawdziwe — nie wymyślaj produktów, cen ani stanów.\n"
+        "4. Dokument musi być kompletny i profesjonalny: data, pełna treść, "
+        "tabele z danymi jeśli potrzebne, podpis/stopka.\n"
+        "5. Minimum 300 słów — dokument musi nadawać się do natychmiastowego użycia.\n\n"
         "Polecenie użytkownika: "
     ),
     "table": (
-        "[TRYB TABELI] Przedstaw wynik jako tabelę markdown (| kolumna | ... |). "
-        "Użyj narzędzi do pobrania danych, a wynik zaprezentuj w czytelnej tabeli z nagłówkami. "
-        "Po tabeli dodaj jedno–dwa zdania podsumowania.\n\n"
+        "[TRYB TABELI — ZASADY]\n"
+        "1. Odpowiedz WYŁĄCZNIE tabelą markdown. NIE pisz wstępu ani preambuły.\n"
+        "2. Pierwsza linia: nagłówek tabeli | kolumna1 | kolumna2 | ...\n"
+        "3. Użyj narzędzi do pobrania aktualnych danych — tabela musi zawierać prawdziwe wartości.\n"
+        "4. Po tabeli: maksymalnie 1-2 zdania podsumowania.\n\n"
         "Zapytanie: "
     ),
     "dashboard": (
-        "[TRYB DASHBOARD] Przygotuj wielosekcyjne podsumowanie zarządcze. "
-        "Struktura: kilka sekcji z nagłówkami (## Sekcja), kluczowe liczby pogrubione (**x**), "
-        "porównania i trendy gdzie to możliwe. "
-        "Pobierz wszystkie potrzebne dane narzędziami i przedstaw jako przejrzysty raport.\n\n"
+        "[TRYB DASHBOARD — ZASADY]\n"
+        "1. Zacznij od ## nagłówka sekcji — NIE od wstępu.\n"
+        "2. Przygotuj wielosekcyjny raport zarządczy: każda sekcja z nagłówkiem ##, "
+        "kluczowe liczby pogrubione (**x**), porównania i trendy gdzie możliwe.\n"
+        "3. Pobierz WSZYSTKIE potrzebne dane narzędziami.\n\n"
         "Zapytanie: "
     ),
 }
@@ -85,16 +91,18 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
     # Store policies / FAQs — check BEFORE orders so "polityka zwrotów" → rag not orders
     (["polityk", "faq", "regulamin", "kiedy wysyłacie", "kiedy wysyłają"],
      "rag"),
-    # Orders
+    # Offers / products — checked BEFORE orders so "dostawcy" (supplier) → offers not orders.
+    # "dostawc" covers: dostawca, dostawcy, dostawcę, dostawców (all mean supplier)
+    (["ofert", "offer", "listing", "produkt", "cen", "price", "stock",
+      "stan magaz", "aktywn", "wystawion", "dodaj ofert", "dostawc",
+      "włóczk", "tkanin", "materiał", "przędz", "lista produktów", "lista towarów"],
+     "allegro_offers"),
+    # Orders — "dostaw" covers dostawy/dostawę (delivery) but comes after offers
+    # so "dostawcy" (supplier) is already caught above
     (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
       "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
       "niespakow", "wysłan", "niewysłan", "nieopakow", "wartość zam"],
      "allegro_orders"),
-    # Offers / products
-    (["ofert", "offer", "listing", "produkt", "cen", "price", "stock",
-      "stan magaz", "aktywn", "wystawion", "dodaj ofert", "włóczk", "tkanin",
-      "materiał", "przędz"],
-     "allegro_offers"),
     # Messaging
     (["wiadomoś", "wiadomo", "message", "napisz do kupując", "wyślij do kupując",
       "kupując", "buyer", "odpowiedz na wiadomość"],
