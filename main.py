@@ -487,11 +487,45 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
     except Exception as exc:
         logger.exception("Orchestrator error: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error.")
+
+    # Fire-and-forget: log query for analytics (never blocks the response)
+    asyncio.create_task(
+        __import__("services.analytics_service", fromlist=["log_query"]).log_query(
+            user_id=user_sub,
+            text=request_body.message,
+            intent=response.agent_type,
+            response_len=len(response.text),
+        )
+    )
+
     return {
         "response": response.text,
         "agent": response.agent_type,
         "sources": response.sources,
     }
+
+
+# ── Analytics Admin endpoints ─────────────────────────────────────────────────
+
+@app.get("/admin/analytics", tags=["Analytics Admin"])
+async def admin_analytics(request: Request) -> dict:
+    """Return aggregated query analytics (intent counts, recent queries, gap suggestions)."""
+    from services.auth_service import get_current_user
+    from services.analytics_service import get_stats
+    await get_current_user(request)  # auth required
+    return await get_stats()
+
+
+@app.post("/admin/analytics/analyze", tags=["Analytics Admin"])
+async def admin_analytics_analyze(request: Request) -> dict:
+    """Run LLM clustering on recent queries to surface missing features."""
+    from services.auth_service import get_current_user
+    from services.analytics_service import analyze_with_llm
+    await get_current_user(request)  # auth required
+    return await analyze_with_llm(
+        client=_orchestrator._client,
+        model_pool=_orchestrator._settings.model_pool(),
+    )
 
 
 @app.get("/allegro/order-event-stats", tags=["Allegro"])

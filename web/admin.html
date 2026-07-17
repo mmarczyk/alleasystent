@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AllEasystent — Panel Analityczny</title>
+  <style>
+    :root {
+      --bg:      #0f0f1a;
+      --bg2:     #16162a;
+      --bg3:     #1e1e36;
+      --card:    #1a1a30;
+      --border:  #2a2a50;
+      --primary: #6366f1;
+      --accent:  #818cf8;
+      --text:    #e2e8f0;
+      --muted:   #64748b;
+      --success: #10b981;
+      --danger:  #ef4444;
+      --warn:    #f59e0b;
+      --radius:  10px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%; background: var(--bg); color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px; line-height: 1.6;
+    }
+
+    /* ── LAYOUT ── */
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 0 1.25rem 3rem; }
+
+    .topbar {
+      display: flex; align-items: center; gap: 1rem;
+      padding: .85rem 1.25rem; border-bottom: 1px solid var(--border);
+      background: var(--bg2); position: sticky; top: 0; z-index: 10;
+    }
+    .topbar h1 { font-size: 1.1rem; font-weight: 800; color: var(--accent); flex: 1; }
+    .topbar-sub { font-size: .78rem; color: var(--muted); }
+    .btn {
+      background: var(--primary); color: #fff; border: none;
+      border-radius: 6px; padding: .45rem 1rem; font-size: .85rem;
+      font-weight: 600; cursor: pointer; transition: filter .15s;
+    }
+    .btn:hover:not(:disabled) { filter: brightness(1.12); }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .btn-outline {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+    }
+    .btn-outline:hover { border-color: var(--accent); color: var(--accent); background: none; }
+    .back-link {
+      color: var(--accent); text-decoration: none; font-size: .88rem; font-weight: 600;
+    }
+    .back-link:hover { text-decoration: underline; }
+
+    /* ── CARDS ── */
+    .section { margin-top: 1.75rem; }
+    .section-title {
+      font-size: .72rem; text-transform: uppercase; letter-spacing: .8px;
+      color: var(--muted); margin-bottom: .75rem; font-weight: 700;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.25rem;
+    }
+
+    /* ── STAT TILES ── */
+    .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .75rem; }
+    .stat-tile {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1rem 1.25rem;
+    }
+    .stat-num { font-size: 2rem; font-weight: 800; color: var(--accent); line-height: 1.1; }
+    .stat-lbl { font-size: .78rem; color: var(--muted); margin-top: .2rem; }
+
+    /* ── INTENT BARS ── */
+    .intent-table { width: 100%; border-collapse: collapse; }
+    .intent-table td { padding: .45rem .5rem; vertical-align: middle; }
+    .intent-table td:last-child { width: 50px; text-align: right; font-size: .82rem; color: var(--muted); }
+    .intent-name { font-size: .88rem; white-space: nowrap; width: 160px; }
+    .intent-bar-wrap { padding-left: .5rem; }
+    .intent-bar-bg { background: var(--bg3); border-radius: 4px; height: 8px; overflow: hidden; }
+    .intent-bar-fill { height: 100%; border-radius: 4px; background: var(--primary); transition: width .4s; }
+    .intent-count { font-size: .82rem; color: var(--muted); width: 50px; text-align: right; }
+
+    /* ── RECENT QUERIES ── */
+    .query-list { display: flex; flex-direction: column; gap: .5rem; }
+    .query-item {
+      display: flex; align-items: flex-start; gap: .75rem;
+      padding: .6rem .75rem; background: var(--bg2);
+      border: 1px solid var(--border); border-radius: 8px;
+    }
+    .query-badge {
+      flex-shrink: 0; font-size: .7rem; padding: .15rem .5rem;
+      border-radius: 20px; font-weight: 600; white-space: nowrap;
+      margin-top: .1rem;
+    }
+    .badge-orders    { background: rgba(99,102,241,.25); color: #a5b4fc; }
+    .badge-offers    { background: rgba(16,185,129,.2);  color: #6ee7b7; }
+    .badge-messaging { background: rgba(245,158,11,.2);  color: #fcd34d; }
+    .badge-account   { background: rgba(239,68,68,.2);   color: #fca5a5; }
+    .badge-general   { background: rgba(99,102,241,.15); color: #818cf8; }
+    .badge-chitchat  { background: var(--bg3); color: var(--muted); }
+    .query-text { font-size: .88rem; color: var(--text); flex: 1; }
+    .query-ts { font-size: .72rem; color: var(--muted); white-space: nowrap; }
+
+    /* ── GAP CARDS ── */
+    .gap-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .75rem; }
+    .gap-card {
+      background: var(--bg2); border: 1px solid rgba(245,158,11,.3);
+      border-radius: var(--radius); padding: 1rem;
+    }
+    .gap-tool { font-size: .82rem; font-weight: 700; color: var(--warn); font-family: monospace; }
+    .gap-count { font-size: .75rem; color: var(--muted); margin-left: .4rem; }
+    .gap-desc { font-size: .85rem; color: var(--text); margin: .4rem 0 .5rem; }
+    .gap-examples { list-style: none; }
+    .gap-examples li {
+      font-size: .78rem; color: var(--muted); padding: .15rem 0;
+    }
+    .gap-examples li::before { content: "→ "; color: var(--warn); }
+
+    /* ── LLM CLUSTERS ── */
+    .cluster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .75rem; }
+    .cluster-card {
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1rem;
+    }
+    .cluster-card.unhandled { border-color: rgba(239,68,68,.4); }
+    .cluster-card.handled   { border-color: rgba(16,185,129,.3); }
+    .cluster-header { display: flex; align-items: center; gap: .5rem; margin-bottom: .5rem; }
+    .cluster-label { font-size: .95rem; font-weight: 700; flex: 1; }
+    .cluster-pct { font-size: .78rem; color: var(--muted); }
+    .cluster-status {
+      font-size: .7rem; padding: .1rem .45rem; border-radius: 20px; font-weight: 700;
+    }
+    .status-ok  { background: rgba(16,185,129,.2); color: #6ee7b7; }
+    .status-gap { background: rgba(239,68,68,.2);  color: #fca5a5; }
+    .cluster-examples { list-style: none; margin: .5rem 0; }
+    .cluster-examples li { font-size: .8rem; color: var(--muted); padding: .1rem 0; }
+    .cluster-examples li::before { content: "• "; }
+    .cluster-agent {
+      font-size: .75rem; font-family: monospace;
+      color: var(--accent); margin-top: .35rem;
+    }
+    .cluster-why { font-size: .8rem; color: #a5b4fc; margin-top: .25rem; }
+
+    .missing-list { list-style: none; display: flex; flex-direction: column; gap: .4rem; }
+    .missing-list li {
+      display: flex; align-items: flex-start; gap: .5rem;
+      font-size: .9rem; padding: .5rem .75rem;
+      background: rgba(239,68,68,.07); border: 1px solid rgba(239,68,68,.2);
+      border-radius: 8px;
+    }
+    .missing-list li::before { content: "🚧"; flex-shrink: 0; }
+
+    .summary-box {
+      background: rgba(99,102,241,.1); border: 1px solid rgba(99,102,241,.3);
+      border-radius: var(--radius); padding: 1rem 1.25rem;
+      font-size: .9rem; line-height: 1.7; color: #c7d2fe;
+      margin-bottom: 1.25rem;
+    }
+
+    /* ── SPINNER / STATES ── */
+    .loading { color: var(--muted); padding: 2rem; text-align: center; }
+    .empty { color: var(--muted); font-size: .85rem; padding: .5rem; }
+    .error-msg { color: var(--danger); font-size: .85rem; padding: .5rem; }
+    .spinner {
+      display: inline-block; width: 16px; height: 16px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 600px) {
+      .stat-row { grid-template-columns: 1fr 1fr; }
+      .intent-name { width: 110px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <a href="./" class="back-link">← Chat</a>
+  <h1>📊 Panel Analityczny</h1>
+  <span class="topbar-sub" id="last-updated"></span>
+  <button class="btn btn-outline" id="btn-refresh" onclick="refresh()">↺ Odśwież</button>
+</div>
+
+<div class="wrap">
+
+  <!-- Stat tiles -->
+  <div class="section">
+    <div class="stat-row" id="stat-row">
+      <div class="stat-tile"><div class="stat-num" id="s-total">—</div><div class="stat-lbl">Łączne zapytania</div></div>
+      <div class="stat-tile"><div class="stat-num" id="s-gaps">—</div><div class="stat-lbl">Wykryte luki</div></div>
+      <div class="stat-tile"><div class="stat-num" id="s-intents">—</div><div class="stat-lbl">Aktywne intencje</div></div>
+      <div class="stat-tile"><div class="stat-num" id="s-chitchat">—</div><div class="stat-lbl">% Chitchat (nienazwane)</div></div>
+    </div>
+  </div>
+
+  <!-- Intent distribution -->
+  <div class="section">
+    <div class="section-title">Rozkład intencji</div>
+    <div class="card" id="panel-intents"><div class="loading"><span class="spinner"></span> Ładowanie…</div></div>
+  </div>
+
+  <!-- Recent queries -->
+  <div class="section">
+    <div class="section-title">Ostatnie zapytania</div>
+    <div class="card" id="panel-recent"><div class="loading"><span class="spinner"></span> Ładowanie…</div></div>
+  </div>
+
+  <!-- Gap analysis -->
+  <div class="section">
+    <div class="section-title">Wykryte luki funkcjonalności (tool gap analyzer)</div>
+    <div id="panel-gaps"><div class="loading"><span class="spinner"></span> Ładowanie…</div></div>
+  </div>
+
+  <!-- LLM clustering -->
+  <div class="section">
+    <div class="section-title">Analiza LLM — klastrowanie zapytań</div>
+    <div class="card" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.75rem;">
+      <span style="font-size:.88rem;color:var(--muted);flex:1">
+        Używa Gemini do grupowania ostatnich zapytań i identyfikacji niezaimplementowanych funkcji.
+        Zajmuje ~10 sekund.
+      </span>
+      <button class="btn" id="btn-analyze" onclick="runAnalysis()">🧠 Uruchom analizę</button>
+    </div>
+    <div id="panel-llm"></div>
+  </div>
+
+</div>
+
+<script>
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  const TOKEN_KEY = 'ae_session_token';
+  const SETTINGS_KEY = 'ae_settings';
+
+  function getToken() { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } }
+
+  function apiBase() {
+    try {
+      const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+      const b = (s.backendUrl || window.__BACKEND_URL__ || '').replace(/\/$/, '');
+      return b;
+    } catch { return ''; }
+  }
+
+  function authHeaders() {
+    const t = getToken();
+    return t ? { 'Authorization': 'Bearer ' + t } : {};
+  }
+
+  async function apiFetch(path, opts = {}) {
+    const url = apiBase() + path;
+    const res = await fetch(url, {
+      credentials: 'include',
+      headers: { ...authHeaders(), ...(opts.headers || {}) },
+      ...opts,
+    });
+    if (res.status === 401) { window.location.href = './'; throw new Error('401'); }
+    return res;
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function fmtTs(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return d.toLocaleDateString('pl-PL') + ' ' + d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  const BADGE_CLASS = {
+    allegro_orders:    'badge-orders',
+    allegro_offers:    'badge-offers',
+    allegro_messaging: 'badge-messaging',
+    allegro_account:   'badge-account',
+    general_knowledge: 'badge-general',
+    chitchat:          'badge-chitchat',
+  };
+
+  // ── Main load ─────────────────────────────────────────────────────────────
+  async function refresh() {
+    document.getElementById('btn-refresh').disabled = true;
+    try {
+      const res = await apiFetch('/admin/analytics');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      renderStats(data);
+      renderIntents(data.intents || []);
+      renderRecent(data.recent || []);
+      renderGaps(data.gaps || []);
+      document.getElementById('last-updated').textContent =
+        'Odświeżono: ' + new Date().toLocaleTimeString('pl-PL');
+    } catch (e) {
+      if (e.message !== '401')
+        document.getElementById('panel-intents').innerHTML =
+          '<div class="error-msg">Błąd ładowania: ' + esc(e.message) + '</div>';
+    } finally {
+      document.getElementById('btn-refresh').disabled = false;
+    }
+  }
+
+  function renderStats(data) {
+    document.getElementById('s-total').textContent = data.total ?? '—';
+    document.getElementById('s-gaps').textContent = (data.gaps || []).length;
+    document.getElementById('s-intents').textContent = (data.intents || []).length;
+    const chitchat = (data.intents || []).find(i => i.intent === 'chitchat');
+    document.getElementById('s-chitchat').textContent =
+      chitchat ? chitchat.pct + '%' : '0%';
+  }
+
+  function renderIntents(intents) {
+    const el = document.getElementById('panel-intents');
+    if (!intents.length) { el.innerHTML = '<div class="empty">Brak danych.</div>'; return; }
+    const max = intents[0].count;
+    el.innerHTML = '<table class="intent-table">' +
+      intents.map(i => `
+        <tr>
+          <td class="intent-name">${esc(i.label)}</td>
+          <td class="intent-bar-wrap">
+            <div class="intent-bar-bg">
+              <div class="intent-bar-fill" style="width:${Math.round(i.count / max * 100)}%"></div>
+            </div>
+          </td>
+          <td class="intent-count">${i.count}</td>
+          <td style="width:40px;font-size:.78rem;color:var(--muted)">${i.pct}%</td>
+        </tr>
+      `).join('') +
+      '</table>';
+  }
+
+  function renderRecent(recent) {
+    const el = document.getElementById('panel-recent');
+    if (!recent.length) { el.innerHTML = '<div class="empty">Brak zapytań.</div>'; return; }
+    el.innerHTML = '<div class="query-list">' +
+      recent.map(q => {
+        const cls = BADGE_CLASS[q.intent] || 'badge-chitchat';
+        return `<div class="query-item">
+          <span class="query-badge ${cls}">${esc(q.label || q.intent)}</span>
+          <span class="query-text">${esc(q.text)}</span>
+          <span class="query-ts">${fmtTs(q.ts)}</span>
+        </div>`;
+      }).join('') +
+      '</div>';
+  }
+
+  function renderGaps(gaps) {
+    const el = document.getElementById('panel-gaps');
+    if (!gaps.length) {
+      el.innerHTML = '<div class="card"><div class="empty">Brak wykrytych luk. Luki pojawiają się gdy agent nie może odpowiedzieć na zapytanie.</div></div>';
+      return;
+    }
+    el.innerHTML = '<div class="gap-grid">' +
+      gaps.map(g => `
+        <div class="gap-card">
+          <div style="display:flex;align-items:center">
+            <span class="gap-tool">${esc(g.tool)}</span>
+            <span class="gap-count">(${g.count}×)</span>
+          </div>
+          <div class="gap-desc">${esc(g.desc)}</div>
+          ${g.examples.length ? `<ul class="gap-examples">${g.examples.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
+        </div>
+      `).join('') +
+      '</div>';
+  }
+
+  // ── LLM Analysis ──────────────────────────────────────────────────────────
+  async function runAnalysis() {
+    const btn = document.getElementById('btn-analyze');
+    const panel = document.getElementById('panel-llm');
+    btn.disabled = true;
+    btn.textContent = '⏳ Analizuję…';
+    panel.innerHTML = '<div class="card loading"><span class="spinner"></span> Gemini analizuje wzorce zapytań… (~10s)</div>';
+
+    try {
+      const res = await apiFetch('/admin/analytics/analyze', { method: 'POST' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+
+      if (data.error) {
+        panel.innerHTML = '<div class="card error-msg">Błąd analizy: ' + esc(data.error) + '</div>';
+        return;
+      }
+      renderLLMResult(data);
+    } catch (e) {
+      if (e.message !== '401')
+        panel.innerHTML = '<div class="card error-msg">Błąd: ' + esc(e.message) + '</div>';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '🧠 Uruchom ponownie';
+    }
+  }
+
+  function renderLLMResult(data) {
+    const panel = document.getElementById('panel-llm');
+    let html = '';
+
+    // Summary box
+    if (data.summary) {
+      html += `<div class="summary-box">${esc(data.summary)}</div>`;
+    }
+
+    // Missing features
+    if (data.top_missing?.length) {
+      html += `<div class="section-title" style="margin-top:0">🚧 Brakujące funkcje — najwyższy priorytet</div>
+        <ul class="missing-list" style="margin-bottom:1.25rem">` +
+        data.top_missing.map(f => `<li>${esc(f)}</li>`).join('') +
+        `</ul>`;
+    }
+
+    // Clusters
+    if (data.clusters?.length) {
+      html += `<div class="section-title">Klastry zapytań</div>
+        <div class="cluster-grid">` +
+        data.clusters.map(c => {
+          const handled = c.is_handled;
+          return `<div class="cluster-card ${handled ? 'handled' : 'unhandled'}">
+            <div class="cluster-header">
+              <span class="cluster-label">${esc(c.label)}</span>
+              <span class="cluster-status ${handled ? 'status-ok' : 'status-gap'}">
+                ${handled ? '✓ obsługiwane' : '✗ brakuje'}
+              </span>
+            </div>
+            <div class="cluster-pct" style="margin-bottom:.35rem">~${c.count_pct}% zapytań</div>
+            ${c.examples?.length ? `<ul class="cluster-examples">${c.examples.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
+            ${!handled && c.suggested_agent ? `<div class="cluster-agent">→ ${esc(c.suggested_agent)}</div>` : ''}
+            ${c.why_valuable ? `<div class="cluster-why">${esc(c.why_valuable)}</div>` : ''}
+          </div>`;
+        }).join('') +
+        `</div>`;
+    }
+
+    panel.innerHTML = html || '<div class="card empty">Brak wyników analizy.</div>';
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+  if (!getToken()) {
+    // No token — redirect to main app which will show the login overlay
+    window.location.href = './';
+  } else {
+    refresh();
+  }
+</script>
+
+<script src="config.js"></script>
+</body>
+</html>

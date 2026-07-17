@@ -85,13 +85,20 @@ async def analyze_for_tool_gap(
             "example_queries": examples,
         }
 
-        # Always log — visible in Railway dashboard even without persistent volume
+        # Always log — visible in Cloud Run logs even without persistent volume
         logger.info(
             "TOOL_GAP | tool=%s | %s | query=%r",
             tool_name,
             description,
             query[:120],
         )
+
+        # Persist to Redis (survives container restarts unlike local file)
+        try:
+            from services.analytics_service import log_gap
+            await log_gap(tool_name, description, query, examples)
+        except Exception as exc:
+            logger.debug("Could not log gap to Redis: %s", exc)
 
         # Also persist to file (useful when a data volume is mounted)
         try:
