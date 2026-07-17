@@ -622,45 +622,46 @@ class AllegroService:
         if cached is not None:
             logger.info("get_all_offers: returning %d offers from cache", len(cached))
             return cached
+
         all_offers: list[dict[str, Any]] = []
-        page_size = 50
-        page, total_count = await self.get_offers(
-            publication_status=publication_status,
-            limit=page_size,
-            offset=0,
-        )
-        all_offers.extend(page)
-        logger.info(
-            "get_all_offers: page 1 → %d offers, API total_count=%d (mode=%s)",
-            len(page), total_count, "count" if total_count else "fallback",
-        )
-        if total_count == 0:
-            page_num = 2
-            while len(page) == page_size:
-                page, _ = await self.get_offers(
-                    publication_status=publication_status,
-                    limit=page_size,
-                    offset=len(all_offers),
-                )
-                all_offers.extend(page)
-                logger.info("get_all_offers: page %d → %d offers (running total: %d)", page_num, len(page), len(all_offers))
-                page_num += 1
-        else:
-            pages_needed = -(-total_count // page_size)  # ceiling div
-            logger.info("get_all_offers: %d total offers, %d pages needed", total_count, pages_needed)
-            offset = page_size
-            page_num = 2
-            while offset < total_count:
-                page, _ = await self.get_offers(
-                    publication_status=publication_status,
-                    limit=page_size,
-                    offset=offset,
-                )
-                all_offers.extend(page)
-                logger.info("get_all_offers: page %d/%d → %d offers (running total: %d)", page_num, pages_needed, len(page), len(all_offers))
-                offset += page_size
-                page_num += 1
-        logger.info("get_all_offers: done — %d offers fetched total", len(all_offers))
+        page_size = 100  # Allegro max per page
+        offset = 0
+        page_num = 0
+        total_count: int | None = None
+
+        while True:
+            page_num += 1
+            page, tc = await self.get_offers(
+                publication_status=publication_status,
+                limit=page_size,
+                offset=offset,
+            )
+            # Capture totalCount from first page that reports it
+            if total_count is None and tc:
+                total_count = tc
+                logger.info("get_all_offers: API reports totalCount=%d (status=%s)", total_count, publication_status)
+
+            if not page:
+                logger.info("get_all_offers: page %d empty — stopping", page_num)
+                break
+
+            all_offers.extend(page)
+            offset += len(page)  # advance by actual items received, not assumed page_size
+            logger.info("get_all_offers: page %d → %d offers (running: %d)", page_num, len(page), len(all_offers))
+
+            # Stop when totalCount reached, or partial page signals end of results
+            if total_count and offset >= total_count:
+                break
+            if len(page) < page_size:
+                break
+
+        if total_count and len(all_offers) != total_count:
+            logger.warning(
+                "get_all_offers: fetched %d but API totalCount=%d (status=%s) — mismatch, check offer statuses",
+                len(all_offers), total_count, publication_status,
+            )
+
+        logger.info("get_all_offers: done — %d offers total", len(all_offers))
         self._all_offers_cache.set(publication_status, all_offers)
         return all_offers
 
