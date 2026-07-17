@@ -61,7 +61,10 @@ const AppUpdater = (() => {
 // ── Auth check ────────────────────────────────────
 async function checkAuth() {
   try {
-    const res = await fetch(Settings.api('/auth/me'), { credentials: 'include' });
+    const res = await fetch(Settings.api('/auth/me'), {
+      credentials: 'include',
+      headers: Auth.headers(),
+    });
     AppUpdater.check(res.headers);
     if (res.status === 401) {
       document.getElementById('login-overlay').style.display = 'flex';
@@ -81,6 +84,23 @@ async function checkAuth() {
     return false;
   }
 }
+
+// ── Session token (Safari ITP workaround) ────────
+// Safari blocks cross-site Set-Cookie responses (ITP), so in split deployment
+// (GitHub Pages → Cloud Run) we store the JWT in localStorage and send it as
+// a Bearer token.  Chrome/Firefox still use the cookie automatically.
+const Auth = (() => {
+  const KEY = 'ae_session_token';
+  function getToken() { try { return localStorage.getItem(KEY); } catch { return null; } }
+  function setToken(t) { try { if (t) localStorage.setItem(KEY, t); } catch {} }
+  function clearToken() { try { localStorage.removeItem(KEY); } catch {} }
+  // Returns headers object with Authorization if a token is stored.
+  function headers() {
+    const t = getToken();
+    return t ? { Authorization: 'Bearer ' + t } : {};
+  }
+  return { getToken, setToken, clearToken, headers };
+})();
 
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
@@ -167,7 +187,7 @@ const Backend = (() => {
     const res = await fetch(Settings.api('/query'), {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...Auth.headers() },
       body: JSON.stringify({
         message,
         session_id: sessionId,
@@ -202,7 +222,7 @@ const WebPush = (() => {
   async function subscribe() {
     if (!isSupported()) return false;
     try {
-      const keyRes = await fetch(Settings.api('/push/vapid-public-key'), { credentials: 'include' });
+      const keyRes = await fetch(Settings.api('/push/vapid-public-key'), { credentials: 'include', headers: Auth.headers() });
       if (!keyRes.ok) return false;
       const { publicKey } = await keyRes.json();
 
@@ -219,7 +239,7 @@ const WebPush = (() => {
       await fetch(Settings.api('/push/subscribe'), {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...Auth.headers() },
         body: JSON.stringify(sub.toJSON()),
       });
       localStorage.setItem(SUB_KEY, '1');
@@ -254,7 +274,7 @@ const WebPush = (() => {
       fetch(Settings.api('/push/notify'), {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...Auth.headers() },
         body: JSON.stringify(payload),
       }).catch(() => {});
     }
@@ -264,7 +284,7 @@ const WebPush = (() => {
     // Retrieve and remove the oldest pending chat message from the server.
     // Called on app startup so devices that were offline during polling still see messages.
     try {
-      const res = await fetch(Settings.api('/push/pending'), { credentials: 'include' });
+      const res = await fetch(Settings.api('/push/pending'), { credentials: 'include', headers: Auth.headers() });
       if (!res.ok) return null;
       const data = await res.json();
       return data.chatMessage || null;
@@ -868,13 +888,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   const logoutLink = document.getElementById('logout-link');
-  if (logoutLink) logoutLink.href = Settings.api('/auth/logout');
+  if (logoutLink) {
+    logoutLink.href = Settings.api('/auth/logout');
+    logoutLink.addEventListener('click', () => Auth.clearToken());
+  }
 
-  // Handle Allegro OAuth callback.
-  // Allegro redirects to /oauth-callback.html?code=&state=, which stores the
-  // params in sessionStorage and immediately redirects here (to avoid GitHub
-  // Pages' directory 301 that can drop the ?code= query string).
-  // Fallback: also read directly from the URL in case of same-origin deployment.
+  // Handle Allegro OAuth callback: read ?code= and ?state= from URL.
   const _urlParams = new URLSearchParams(window.location.search);
   const oauthCode = _urlParams.get('code') || sessionStorage.getItem('ae_oauth_code');
   const oauthState = _urlParams.get('state') || sessionStorage.getItem('ae_oauth_state');
@@ -890,7 +909,12 @@ window.addEventListener('DOMContentLoaded', async () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: oauthCode, state: oauthState }),
       });
-      if (!res.ok) {
+      if (res.ok) {
+        // Store the JWT in localStorage so Safari (which blocks cross-site
+        // Set-Cookie) can still authenticate subsequent requests via Bearer token.
+        const data = await res.json().catch(() => ({}));
+        if (data.token) Auth.setToken(data.token);
+      } else {
         const err = await res.json().catch(() => ({}));
         const msg = err.detail || res.status;
         console.error('[allegro/exchange] failed:', res.status, err);

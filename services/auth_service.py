@@ -33,7 +33,14 @@ def decode_session_token(token: str) -> dict[str, Any]:
 
 
 async def get_current_user(request: Request) -> dict[str, Any]:
-    token = request.cookies.get("session")
+    # Authorization header takes priority — Safari ITP blocks cross-site cookies,
+    # so the split-deployment frontend (GitHub Pages → Cloud Run) sends the JWT
+    # as a Bearer token stored in localStorage instead.
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.cookies.get("session")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
