@@ -97,8 +97,14 @@ app = FastAPI(
 # Split deployment (GitHub Pages + Cloud Run): lock to specific origin so the
 # browser accepts credentials=include requests.  All-in-one: wildcard is fine
 # because frontend and backend share an origin and CORS never triggers.
+def _origin_from_url(url: str) -> str:
+    """Extract scheme+host from a full URL (strips path/query)."""
+    from urllib.parse import urlparse
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}"
+
 _cors_origins = (
-    [settings.frontend_url.rstrip("/"), "http://localhost:8080", "http://localhost:3000"]
+    [_origin_from_url(settings.frontend_url), "http://localhost:8080", "http://localhost:3000"]
     if settings.frontend_url
     else ["*"]
 )
