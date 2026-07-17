@@ -33,20 +33,40 @@ from services.gcp_service import FirestoreService
 
 logger = logging.getLogger(__name__)
 
-# ── LLM prompt for data-source classification ─────────────────────────────────
-# (output format is detected via keywords — more reliable than LLM for that)
+# ── Context-aware 2D classifier prompt ────────────────────────────────────────
+# Single LLM call with full conversation history → returns "source|format".
+# This is the primary classifier; keywords are used only as a cheap fast-path
+# for long, self-contained queries where context is irrelevant.
 
-_SOURCE_SYSTEM_PROMPT = """
-Classify what DATA SOURCE is needed to answer the user's message. Reply with EXACTLY ONE label and nothing else:
+_CLASSIFY_SYSTEM = """
+Jesteś klasyfikatorem routingu dla asystenta AI właścicieli sklepów Allegro.
 
-allegro_orders     — order data: shipping, tracking, returns, invoices, buyer addresses
-allegro_offers     — offer listings: prices, stock, product management
-allegro_messaging  — buyer messages: reading threads, drafting replies
-allegro_account    — seller account: fees, billing, statistics, limits
-rag                — store knowledge base: policies, FAQs, shipping rules (static info, no live data)
-none               — no data needed: greetings, meta-questions, general chat, anything non-Allegro
+Sklasyfikuj wiadomość użytkownika NA PODSTAWIE PEŁNEJ HISTORII ROZMOWY na dwóch wymiarach.
+Odpowiedz TYLKO dwoma etykietami oddzielonymi "|" — nic więcej.
 
-Output the label only. No punctuation, no explanation.
+WYMIAR 1 — ŹRÓDŁO DANYCH (co pobrać żeby odpowiedzieć):
+  allegro_orders    — dane zamówień: statusy, wysyłka, śledzenie, zwroty, faktury
+  allegro_offers    — oferty: ceny, stany magazynowe, produkty, dostawcy
+  allegro_messaging — wiadomości od kupujących: czytanie, odpowiadanie
+  allegro_account   — konto sprzedawcy: opłaty, prowizje, statystyki, limity
+  rag               — statyczna baza wiedzy sklepu: polityki, FAQ (nie żywe dane)
+  none              — nie trzeba danych: pozdrowienia, rozmowa, pytania o asystenta
+
+WYMIAR 2 — FORMAT ODPOWIEDZI (jak ma wyglądać wynik):
+  chat      — krótka konwersacyjna odpowiedź
+  table     — tabela markdown z wierszami i kolumnami
+  document  — pełny sformatowany dokument (mail, raport, list, szablon)
+  dashboard — wielosekcyjne podsumowanie z kilkoma metrykami
+
+KLUCZOWE ZASADY:
+- Uwzględnij CAŁĄ historię rozmowy, szczególnie gdy bieżąca wiadomość jest krótka
+- Krótkie follow-upy ("A teraz", "Spróbuj ponownie", "Ok", "Zrób to", "I co?", "Dobra")
+  dziedziczą kontekst z poprzednich wiadomości — nie traktuj ich jako nowych tematów
+- Jeśli user kontynuuje temat z historii, użyj tego samego źródła i formatu
+- Gdy user poprawia lub doprecyzowuje — to nadal ten sam kontekst
+
+Format odpowiedzi: source|format
+Przykłady: allegro_offers|document   allegro_orders|table   none|chat
 """.strip()
 
 # ── Output-format prefixes injected before the user's query ───────────────────
@@ -224,104 +244,108 @@ class Orchestrator:
 
     # ── Classification ─────────────────────────────────────────────────────────
 
-    def _detect_format(self, query: str, history: list[dict[str, str]] | None = None) -> str:
-        """Keyword-based output format detection. Defaults to 'chat'.
+    _KNOWN_SOURCES = frozenset([
+        "allegro_orders", "allegro_offers", "allegro_messaging",
+        "allegro_account", "rag", "none",
+    ])
+    _KNOWN_FORMATS = frozenset(["chat", "table", "document", "dashboard"])
 
-        For short follow-up queries (≤4 words, no format keywords), inherit the
-        format from the most recent user turn in history so that "A teraz" or
-        "Spróbuj ponownie" after a document request stays in document mode.
-        """
-        q = query.lower()
-        for keywords, fmt in _FORMAT_KEYWORDS:
-            if any(kw in q for kw in keywords):
-                logger.info("Format keyword match: %r -> %s", query[:60], fmt)
-                return fmt
-
-        # Short follow-up: inherit format from most recent user message in history
-        if len(query.split()) <= 4 and history:
-            for msg in reversed(history):
-                if msg.get("role") == "user":
-                    prev_q = msg.get("content", "").lower()
-                    for keywords, fmt in _FORMAT_KEYWORDS:
-                        if any(kw in prev_q for kw in keywords):
-                            logger.info(
-                                "Format inherited from history: %r -> %s (prev: %.40r)",
-                                query[:40], fmt, prev_q,
-                            )
-                            return fmt
-                    break  # Only look one user message back
-
-        return "chat"
-
-    def _detect_source_keyword(self, query: str) -> str | None:
-        """Keyword-based data source detection. Returns None if uncertain."""
+    def _keyword_source(self, query: str) -> str | None:
         q = query.lower()
         for keywords, source in _SOURCE_KEYWORDS:
             if any(kw in q for kw in keywords):
-                logger.info("Source keyword match: %r -> %s", query[:60], source)
                 return source
         return None
 
-    async def _classify_source_llm(
+    def _keyword_format(self, query: str) -> str | None:
+        q = query.lower()
+        for keywords, fmt in _FORMAT_KEYWORDS:
+            if any(kw in q for kw in keywords):
+                return fmt
+        return None
+
+    def _is_self_contained(self, query: str) -> bool:
+        """True when the query is long enough to be understood without conversation history."""
+        return len(query.split()) >= 6
+
+    async def _classify_with_llm(
         self,
         query: str,
         history: list[dict[str, str]],
-    ) -> str:
-        """LLM fallback for data source when keywords are ambiguous."""
-        history_snippet = history[-4:] if len(history) > 4 else history
-        history_text = "\n".join(
-            f"{m['role'].upper()}: {m['content'][:200]}" for m in history_snippet
-        )
-        prompt = query
-        if history_text:
-            prompt = f"Recent conversation:\n{history_text}\n\nNew message: {query}"
+        known_sources: list[str],
+    ) -> tuple[str, str]:
+        """Single LLM call — full history context → returns (source, format)."""
+        # Build a conversation-style prompt so the LLM sees the full flow
+        history_snippet = history[-8:] if len(history) > 8 else history
+        messages = [{"role": "system", "content": _CLASSIFY_SYSTEM}]
+        # Add recent history so the model understands context
+        for m in history_snippet:
+            role = m.get("role", "user")
+            content = m.get("content", "")[:300]
+            messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": f"[KLASYFIKUJ] {query}"})
 
-        known = [
-            "allegro_orders", "allegro_offers", "allegro_messaging",
-            "allegro_account", "rag", "none",
-            *self._extra_agents.keys(),
-        ]
+        all_sources = list(known_sources) + list(self._extra_agents.keys())
         try:
-            msgs = [
-                {"role": "system", "content": _SOURCE_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ]
             resp = await _call_with_retry(
                 self._client,
                 self._settings.model_fast_pool(),
-                "orchestrator/classify-source",
-                max_tokens=20,
-                messages=msgs,
+                "orchestrator/classify",
+                max_tokens=30,
+                messages=messages,
             )
-            raw = resp.choices[0].message.content.strip().lower()
-            logger.info("LLM source classifier raw output: %r", raw)
+            raw = (resp.choices[0].message.content or "").strip().lower()
+            logger.info("LLM classifier raw: %r (query=%.50r)", raw, query)
 
-            if raw in known:
-                return raw
-            for k in known:
-                if k in raw:
-                    return k
-            logger.warning("Unknown source %r, falling back to none", raw)
-            return "none"
+            # Parse "source|format"
+            parts = raw.replace(" ", "").split("|")
+            if len(parts) == 2:
+                src, fmt = parts[0].strip(), parts[1].strip()
+                # Validate — fuzzy match for robustness
+                matched_src = next((s for s in all_sources if s in src or src in s), None)
+                matched_fmt = next((f for f in self._KNOWN_FORMATS if f in fmt or fmt in f), None)
+                if matched_src and matched_fmt:
+                    return matched_src, matched_fmt
+
+            # Fallback: try substring match on the whole output
+            src = next((s for s in all_sources if s in raw), "none")
+            fmt = next((f for f in self._KNOWN_FORMATS if f in raw), "chat")
+            logger.warning("LLM classifier fallback parse: src=%s fmt=%s from %r", src, fmt, raw)
+            return src, fmt
+
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError):
             raise
         except Exception as exc:
-            logger.error("Source classification failed: %s", exc)
-            return "none"
+            logger.error("Classification LLM failed: %s", exc)
+            return "none", "chat"
 
     async def _classify(
         self,
         query: str,
         history: list[dict[str, str]],
     ) -> tuple[str, str]:
-        """Return (data_source, output_format) for the query."""
-        output_format = self._detect_format(query, history)
-        data_source = self._detect_source_keyword(query)
+        """Classify query into (data_source, output_format) using full conversation context.
 
-        if data_source is None:
-            data_source = await self._classify_source_llm(query, history)
+        Strategy:
+          1. If query is long and self-contained: try keywords for both dimensions.
+             Only skip LLM when BOTH are found — guarantees no ambiguity.
+          2. Everything else (short queries, follow-ups, ambiguous): single LLM call
+             with last 8 turns of history. The LLM understands context like a human.
+        """
+        known_sources = list(self._KNOWN_SOURCES)
 
-        return data_source, output_format
+        if self._is_self_contained(query):
+            kw_source = self._keyword_source(query)
+            kw_format = self._keyword_format(query)
+            if kw_source is not None and kw_format is not None:
+                logger.info("Keyword fast-path: src=%s fmt=%s | %.60s", kw_source, kw_format, query)
+                return kw_source, kw_format
+            # One dimension known — LLM still sees context for the other
+            # (fall through to LLM which is smarter and costs only ~30 tokens)
+
+        source, fmt = await self._classify_with_llm(query, history, known_sources)
+        logger.info("LLM routing: src=%s fmt=%s | %.60s", source, fmt, query)
+        return source, fmt
 
     # ── Routing ────────────────────────────────────────────────────────────────
 
