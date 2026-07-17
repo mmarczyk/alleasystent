@@ -37,6 +37,9 @@ allegro_messaging   — buyer messages, send message, "wiadomości", "napisz do 
 allegro_account     — seller account, fees, billing, statistics, "konto", "opłaty", "prowizja"
 general_knowledge   — product FAQs, store policies, shipping schedule
                        (e.g. "polityka zwrotów", "kiedy wysyłacie zamówienia?", "ile dni na zwrot?")
+document_generation — user wants to generate, draft, or write a document, email, report, or template
+                       that requires fetching store data (e.g. "wygeneruj maila do dostawcy",
+                       "przygotuj raport sprzedaży", "stwórz listę produktów", "napisz szablon email")
 chitchat            — greetings, small talk, questions about assistant capabilities/features,
                        AND meta-questions where the user asks to recall what THEY THEMSELVES said
                        or requested earlier in this conversation (NOT follow-up data requests)
@@ -108,7 +111,7 @@ class Orchestrator:
         logger.info("Intent: %s | message: %.60s…", intent, message.text)
 
         # Derive agent_type from intent for use in error responses
-        if intent.startswith("allegro_"):
+        if intent.startswith("allegro_") or intent == "document_generation":
             _agent_type = "allegro"
         elif intent == "general_knowledge":
             _agent_type = "rag"
@@ -134,6 +137,11 @@ class Orchestrator:
 
     # ── Keyword pre-routing (no LLM call needed for obvious patterns) ──────────
     _KEYWORD_MAP: list[tuple[list[str], str]] = [
+        # Document generation — MUST come before allegro_orders because "dostawcy" contains "dostaw"
+        (["wygeneruj", "generuj ", "napisz mail", "napisz email", "email do ",
+          "mail do ", "stwórz raport", "utwórz raport", "przygotuj raport",
+          "szablon maila", "szablon email", "lista produktów do", "zestawienie produktów"],
+         "document_generation"),
         # Capability / meta questions always → chitchat
         # Also: "szukam?" catches "Jakich zamówień szukam?" and similar recall meta-questions
         (["funkcj", "możliwości", "co potrafisz", "co umiesz", "co możesz", "jakie masz",
@@ -197,7 +205,7 @@ class Orchestrator:
 
         known_intents = [
             "allegro_orders", "allegro_offers", "allegro_messaging",
-            "allegro_account", "general_knowledge", "chitchat",
+            "allegro_account", "general_knowledge", "document_generation", "chitchat",
             *self._extra_agents.keys(),
         ]
         try:
@@ -246,6 +254,10 @@ class Orchestrator:
             if intent.startswith(prefix):
                 return await agent.run(message.text, history)
 
+        # Document generation — fetch Allegro data and produce a formatted document
+        if intent == "document_generation":
+            return await self._handle_document_generation(message.text, history, user_id)
+
         # Allegro intents → live API via AllegroAgent (no static context needed)
         if intent.startswith("allegro_"):
             return await self._get_allegro_agent(user_id).run(message.text, history)
@@ -264,6 +276,25 @@ class Orchestrator:
 
         # Default fallback → chitchat (safe, no auth side-effects)
         return await self._handle_chitchat(message.text, history)
+
+    async def _handle_document_generation(
+        self,
+        query: str,
+        history: list[dict[str, str]],
+        user_id: str | None = None,
+    ) -> AgentResponse:
+        """Generate a complete formatted document using live Allegro data."""
+        doc_query = (
+            "[TRYB DOKUMENTU — WAŻNE] Ta odpowiedź musi być PEŁNYM, GOTOWYM DOKUMENTEM. "
+            "Nie 'krótko i zwięźle' — dokument powinien być kompletny, profesjonalny i szczegółowy. "
+            "Format markdown: zacznij od nagłówka (# Tytuł), dodaj datę, pełną treść, tabele jeśli potrzebne, zakończ podpisem. "
+            "Użyj narzędzi, aby pobrać aktualne dane ze sklepu (produkty, zamówienia itp.) potrzebne do treści dokumentu. "
+            "Minimum 400 słów — dokument musi być kompletny i gotowy do użycia.\n\n"
+            f"Polecenie użytkownika: {query}"
+        )
+        response = await self._get_allegro_agent(user_id).run(doc_query, history)
+        response.agent_type = "document"
+        return response
 
     async def _handle_chitchat(
         self,
