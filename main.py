@@ -12,6 +12,9 @@ Entry point: FastAPI application with:
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac as _hmac
 import logging
 import os
 import pathlib
@@ -263,6 +266,75 @@ async def allegro_callback(request: Request, code: str = "", state: str = "", er
     )
     response.delete_cookie("oauth_state")
     logger.info("Allegro login successful for user: %s", login)
+    return response
+
+
+class AllegroExchangeRequest(BaseModel):
+    code: str
+    state: str
+
+
+def _sign_oauth_state(nonce: str) -> str:
+    """Return HMAC-SHA256 signed state token. Stateless — works across Cloud Run instances."""
+    key = settings.jwt_secret.encode() or b"dev-fallback-key"
+    sig = _hmac.new(key, nonce.encode(), hashlib.sha256).digest()
+    return nonce + "." + base64.urlsafe_b64encode(sig).decode().rstrip("=")
+
+
+def _verify_oauth_state(state: str) -> bool:
+    nonce, _, sig_b64 = state.rpartition(".")
+    if not nonce or not sig_b64:
+        return False
+    expected = _sign_oauth_state(nonce)
+    return _hmac.compare_digest(expected, state)
+
+
+@app.get("/allegro/auth-url", tags=["Auth"])
+async def allegro_auth_url():
+    """Return Allegro OAuth URL for the frontend-initiated flow.
+    Frontend redirects the user there; Allegro redirects back to FRONTEND_URL with ?code=."""
+    if not settings.allegro_client_id:
+        raise HTTPException(503, "Allegro credentials not configured")
+    from urllib.parse import urlencode
+    nonce = _secrets.token_urlsafe(16)
+    state = _sign_oauth_state(nonce)
+    redirect_uri = settings.frontend_url or settings.allegro_redirect_uri
+    params = urlencode({
+        "response_type": "code",
+        "client_id": settings.allegro_client_id,
+        "redirect_uri": redirect_uri,
+        "prompt": "confirm",
+        "state": state,
+    })
+    return {"auth_url": f"{settings.allegro_auth_url}/authorize?{params}", "state": state}
+
+
+@app.post("/allegro/exchange", tags=["Auth"])
+async def allegro_exchange(body: AllegroExchangeRequest):
+    """Exchange Allegro authorization code for token (frontend-initiated OAuth flow).
+    Sets session cookie and returns user info as JSON."""
+    if not _verify_oauth_state(body.state):
+        raise HTTPException(400, "Invalid or expired OAuth state")
+    from services.allegro_service import AllegroService, exchange_allegro_code
+    from services.auth_service import create_session_token
+    redirect_uri = settings.frontend_url or settings.allegro_redirect_uri
+    try:
+        login, tokens = await exchange_allegro_code(body.code, redirect_uri=redirect_uri)
+    except Exception as exc:
+        logger.error("Allegro code exchange failed: %s", exc)
+        raise HTTPException(502, "Failed to exchange Allegro authorization code")
+    service = AllegroService(user_id=login)
+    service._tokens = tokens
+    await service._save_tokens()
+    session_token = create_session_token({"sub": login, "name": login})
+    response = JSONResponse({"ok": True, "name": login})
+    response.set_cookie(
+        "session", session_token,
+        httponly=True,
+        max_age=60 * 60 * 24 * 30,
+        samesite="none",
+        secure=True,
+    )
     return response
 
 

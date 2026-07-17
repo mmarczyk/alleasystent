@@ -48,7 +48,7 @@ class AllegroAuthError(Exception):
     pass
 
 
-async def exchange_allegro_code(code: str) -> tuple[str, "AllegroTokens"]:
+async def exchange_allegro_code(code: str, redirect_uri: str | None = None) -> tuple[str, "AllegroTokens"]:
     """
     Exchange Allegro authorization code for tokens.
     Returns (allegro_login, tokens) — login is used as the user_id.
@@ -61,7 +61,7 @@ async def exchange_allegro_code(code: str) -> tuple[str, "AllegroTokens"]:
             data={
                 "grant_type": "authorization_code",
                 "code": code,
-                "redirect_uri": settings.allegro_redirect_uri,
+                "redirect_uri": redirect_uri or settings.allegro_redirect_uri,
             },
         )
         resp.raise_for_status()

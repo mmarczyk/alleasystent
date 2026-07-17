@@ -824,12 +824,49 @@ window.addEventListener('DOMContentLoaded', async () => {
   Settings.load();
   Store.load();
 
-  // Point login / logout links at the backend (handles split deployment where
-  // frontend lives on GitHub Pages and backend on Cloud Run).
+  // Login button: fetch auth URL from backend, then redirect.
+  // (Backend generates a signed state token and returns the full Allegro OAuth URL.)
   const loginBtn = document.getElementById('login-btn');
-  if (loginBtn) loginBtn.href = Settings.api('/allegro/login');
+  if (loginBtn) {
+    loginBtn.removeAttribute('href');
+    loginBtn.style.cursor = 'pointer';
+    loginBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try {
+        const res = await fetch(Settings.api('/allegro/auth-url'), { credentials: 'include' });
+        const { auth_url } = await res.json();
+        window.location.href = auth_url;
+      } catch {
+        UI.toast('Błąd połączenia z backendem', 'error');
+      }
+    });
+  }
+
   const logoutLink = document.getElementById('logout-link');
   if (logoutLink) logoutLink.href = Settings.api('/auth/logout');
+
+  // Handle Allegro OAuth callback: Allegro redirects back here with ?code=&state=
+  const params = new URLSearchParams(window.location.search);
+  const oauthCode = params.get('code');
+  const oauthState = params.get('state');
+  if (oauthCode && oauthState) {
+    // Clean URL immediately so refresh doesn't re-trigger exchange
+    window.history.replaceState({}, '', window.location.pathname);
+    try {
+      const res = await fetch(Settings.api('/allegro/exchange'), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: oauthCode, state: oauthState }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        UI.toast('Błąd logowania przez Allegro: ' + (err.detail || res.status), 'error');
+      }
+    } catch {
+      UI.toast('Błąd połączenia podczas logowania', 'error');
+    }
+  }
 
   // Check authentication first — show login overlay if not logged in
   const authed = await checkAuth();
