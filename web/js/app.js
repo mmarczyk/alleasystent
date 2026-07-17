@@ -824,19 +824,44 @@ window.addEventListener('DOMContentLoaded', async () => {
   Settings.load();
   Store.load();
 
-  // Login button: fetch auth URL from backend, then redirect.
-  // (Backend generates a signed state token and returns the full Allegro OAuth URL.)
+  // Pre-fetch the Allegro auth URL immediately (in parallel with checkAuth).
+  // By the time the user reads the overlay and clicks, the URL is already cached
+  // and the redirect is instant.  On click we still show a loading state as a
+  // safety net in case the fetch is still in progress (slow network / cold start).
+  let _allegroAuthUrlPromise = null;
+  function _prefetchAllegroAuthUrl() {
+    _allegroAuthUrlPromise = fetch(Settings.api('/allegro/auth-url'), { credentials: 'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(d => d.auth_url)
+      .catch(() => null);
+  }
+  _prefetchAllegroAuthUrl();
+
   const loginBtn = document.getElementById('login-btn');
   if (loginBtn) {
     loginBtn.removeAttribute('href');
-    loginBtn.style.cursor = 'pointer';
+    let _loginInProgress = false;
     loginBtn.addEventListener('click', async (e) => {
       e.preventDefault();
+      if (_loginInProgress) return;
+      _loginInProgress = true;
+
+      const origHTML = loginBtn.innerHTML;
+      loginBtn.innerHTML = '⏳ Łączenie…';
+      loginBtn.style.opacity = '0.65';
+      loginBtn.style.pointerEvents = 'none';
+
       try {
-        const res = await fetch(Settings.api('/allegro/auth-url'), { credentials: 'include' });
-        const { auth_url } = await res.json();
+        const auth_url = await _allegroAuthUrlPromise;
+        if (!auth_url) throw new Error('no url');
         window.location.href = auth_url;
+        // don't restore — page is navigating away
       } catch {
+        loginBtn.innerHTML = origHTML;
+        loginBtn.style.opacity = '';
+        loginBtn.style.pointerEvents = '';
+        _loginInProgress = false;
+        _prefetchAllegroAuthUrl(); // refresh so user can retry
         UI.toast('Błąd połączenia z backendem', 'error');
       }
     });
