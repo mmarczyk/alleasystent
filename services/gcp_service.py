@@ -53,29 +53,34 @@ class FirestoreService:
             logger.warning("Firestore init failed (%s) — skipping Firestore", exc)
 
     def _init_redis(self) -> None:
-        if self._db is not None:
-            # Firestore takes priority — don't bother with Redis
-            return
-        if not self._settings.redis_url:
-            logger.info("REDIS_URL not set — using in-memory session store")
+        redis_url = self._settings.redis_url
+        if not redis_url or not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
+            logger.info("REDIS_URL not set or invalid — using in-memory session store")
             return
         try:
             import redis.asyncio as aioredis
-            self._redis = aioredis.from_url(self._settings.redis_url, decode_responses=True)
+            self._redis = aioredis.from_url(redis_url, decode_responses=True)
             logger.info("Redis client initialized for conversation sessions")
         except Exception as exc:
             logger.warning("Redis init failed (%s) — using in-memory session store", exc)
+
+    def _disable_firestore(self, reason: Exception) -> None:
+        logger.warning("Firestore operation failed (%s) — disabling Firestore, falling back to Redis/memory", reason)
+        self._db = None
 
     # ── Session CRUD ─────────────────────────────────────────────────────────
 
     async def get_session(self, session_id: str) -> ConversationSession | None:
         if self._db is not None:
-            doc = await self._db.collection(
-                self._settings.firestore_collection_conversations
-            ).document(session_id).get()
-            if not doc.exists:
-                return None
-            return ConversationSession.model_validate(doc.to_dict())
+            try:
+                doc = await self._db.collection(
+                    self._settings.firestore_collection_conversations
+                ).document(session_id).get()
+                if not doc.exists:
+                    return None
+                return ConversationSession.model_validate(doc.to_dict())
+            except Exception as exc:
+                self._disable_firestore(exc)
 
         if self._redis is not None:
             raw = await self._redis.get(f"{_REDIS_SESSION_PREFIX}{session_id}")
@@ -93,10 +98,13 @@ class FirestoreService:
         data = json.loads(session.model_dump_json())
 
         if self._db is not None:
-            await self._db.collection(
-                self._settings.firestore_collection_conversations
-            ).document(session.session_id).set(data)
-            return
+            try:
+                await self._db.collection(
+                    self._settings.firestore_collection_conversations
+                ).document(session.session_id).set(data)
+                return
+            except Exception as exc:
+                self._disable_firestore(exc)
 
         if self._redis is not None:
             await self._redis.set(
@@ -131,12 +139,15 @@ class FirestoreService:
         limit: int = 50,
     ) -> list[ConversationSession]:
         if self._db is not None:
-            query = self._db.collection(self._settings.firestore_collection_conversations)
-            if channel:
-                query = query.where("channel", "==", channel.value)
-            query = query.limit(limit)
-            docs = await query.get()
-            return [ConversationSession.model_validate(doc.to_dict()) for doc in docs]
+            try:
+                query = self._db.collection(self._settings.firestore_collection_conversations)
+                if channel:
+                    query = query.where("channel", "==", channel.value)
+                query = query.limit(limit)
+                docs = await query.get()
+                return [ConversationSession.model_validate(doc.to_dict()) for doc in docs]
+            except Exception as exc:
+                self._disable_firestore(exc)
 
         if self._redis is not None:
             keys = await self._redis.keys(f"{_REDIS_SESSION_PREFIX}*")
