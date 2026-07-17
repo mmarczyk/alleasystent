@@ -143,7 +143,12 @@ _FORMAT_KEYWORDS: list[tuple[list[str], str]] = [
     (["wygeneruj", "generuj ", "napisz mail", "napisz email", "email do ",
       "mail do ", "stwórz raport", "utwórz raport", "przygotuj raport",
       "przygotuj dokument", "stwórz dokument", "napisz list", "szablon maila",
-      "szablon email", "napisz pismo", "przygotuj pismo"],
+      "szablon email", "napisz pismo", "przygotuj pismo",
+      "przygotuj maila", "przygotuj mail", "przygotuj email",
+      "przygotuj wiadomość", "napisz wiadomość", "utwórz maila",
+      "utwórz mail", "utwórz email", "utwórz wiadomość",
+      "przygotuj ofertę", "napisz ofertę", "przygotuj list",
+      "wyślij maila", "wyślij mail", "wyślij email"],
      "document"),
     # Dashboard — multi-metric summary
     (["dashboard", "panel sterowania", "podsumowanie całościowe", "przegląd całościowy",
