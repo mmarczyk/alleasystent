@@ -861,10 +861,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        UI.toast('Błąd logowania przez Allegro: ' + (err.detail || res.status), 'error');
+        const msg = err.detail || res.status;
+        console.error('[allegro/exchange] failed:', res.status, err);
+        alert('Błąd logowania przez Allegro (' + res.status + '): ' + msg);
       }
-    } catch {
-      UI.toast('Błąd połączenia podczas logowania', 'error');
+    } catch (e) {
+      console.error('[allegro/exchange] network error:', e);
+      alert('Błąd połączenia podczas logowania: ' + e.message);
     }
   }
 
