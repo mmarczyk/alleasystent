@@ -56,10 +56,16 @@
     <div style="font-size:2.5rem; margin-bottom:12px;">🛒</div>
     <h1 style="margin:0 0 8px; font-size:1.5rem; font-weight:700;">AllEasystent</h1>
     <p style="color:#666; margin:0 0 36px; font-size:.95rem;">Asystent AI dla sprzedawców Allegro</p>
-    <a id="login-btn" href="/allegro/login" style="display:inline-flex; align-items:center; gap:10px; padding:13px 28px; background:#FF5A00; border-radius:8px; text-decoration:none; color:#fff; font-weight:600; font-size:1rem; box-shadow:0 2px 8px rgba(255,90,0,.35);">
-      Zaloguj się przez Allegro
-    </a>
-    <p style="color:#aaa; margin:24px 0 0; font-size:.8rem;">Wymagane konto sprzedawcy na Allegro</p>
+    <div id="login-action">
+      <a id="login-btn" href="/allegro/login" style="display:inline-flex; align-items:center; gap:10px; padding:13px 28px; background:#FF5A00; border-radius:8px; text-decoration:none; color:#fff; font-weight:600; font-size:1rem; box-shadow:0 2px 8px rgba(255,90,0,.35);">
+        Zaloguj się przez Allegro
+      </a>
+      <p id="login-note" style="color:#aaa; margin:24px 0 0; font-size:.8rem;">Wymagane konto sprzedawcy na Allegro</p>
+    </div>
+    <div id="login-spinner" style="display:none; color:#666; font-size:1rem; padding:8px 0;">
+      <div style="font-size:2rem; margin-bottom:12px;">⏳</div>
+      Logowanie przez Allegro…
+    </div>
   </div>
 </div>
 

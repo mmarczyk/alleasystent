@@ -900,6 +900,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   sessionStorage.removeItem('ae_oauth_code');
   sessionStorage.removeItem('ae_oauth_state');
   if (oauthCode && oauthState) {
+    // Show spinner immediately — user already returned from Allegro, hide the button.
+    const _loginAction = document.getElementById('login-action');
+    const _loginSpinner = document.getElementById('login-spinner');
+    document.getElementById('login-overlay').style.display = 'flex';
+    if (_loginAction) _loginAction.style.display = 'none';
+    if (_loginSpinner) _loginSpinner.style.display = '';
     // Clean URL immediately so refresh doesn't re-trigger exchange
     window.history.replaceState({}, '', window.location.pathname);
     try {
@@ -918,10 +924,14 @@ window.addEventListener('DOMContentLoaded', async () => {
         const err = await res.json().catch(() => ({}));
         const msg = err.detail || res.status;
         console.error('[allegro/exchange] failed:', res.status, err);
+        if (_loginSpinner) _loginSpinner.style.display = 'none';
+        if (_loginAction) _loginAction.style.display = '';
         alert('Błąd logowania przez Allegro (' + res.status + '): ' + msg);
       }
     } catch (e) {
       console.error('[allegro/exchange] network error:', e);
+      if (_loginSpinner) _loginSpinner.style.display = 'none';
+      if (_loginAction) _loginAction.style.display = '';
       alert('Błąd połączenia podczas logowania: ' + e.message);
     }
   }

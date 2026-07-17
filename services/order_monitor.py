@@ -24,8 +24,9 @@ async def run_order_monitor() -> None:
     """Entry point — call as asyncio.create_task() from FastAPI lifespan."""
     from config.settings import get_settings
 
-    if not get_settings().redis_url:
-        logger.info("Order monitor disabled: REDIS_URL not set")
+    redis_url = get_settings().redis_url
+    if not redis_url or not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
+        logger.info("Order monitor disabled: REDIS_URL not set or has invalid scheme")
         return
 
     await asyncio.sleep(_STARTUP_DELAY)
@@ -44,7 +45,7 @@ async def _poll_all_users() -> None:
     from config.settings import get_settings
 
     redis_url = get_settings().redis_url
-    if not redis_url:
+    if not redis_url or not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
         return
     r = aioredis.from_url(redis_url, decode_responses=True)
     try:

@@ -13,12 +13,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_VALID_SCHEMES = ('redis://', 'rediss://', 'unix://')
+
+
+def _valid_redis_url(url: str | None) -> bool:
+    return bool(url and url.startswith(_VALID_SCHEMES))
+
 
 async def save_subscription(user_id: str, subscription: dict) -> None:
     """Persist a push subscription for a user (upsert by endpoint)."""
     from config.settings import get_settings
     settings = get_settings()
-    if not settings.redis_url:
+    if not _valid_redis_url(settings.redis_url):
         logger.warning("No Redis URL — push subscriptions are not persisted")
         return
     import redis.asyncio as aioredis
@@ -39,7 +45,7 @@ async def store_pending_chat(user_id: str, text: str, ttl: int = 1800) -> None:
     """
     from config.settings import get_settings
     settings = get_settings()
-    if not settings.redis_url:
+    if not _valid_redis_url(settings.redis_url):
         return
     import redis.asyncio as aioredis
     key = f"push:chat:{user_id}"
@@ -55,7 +61,7 @@ async def pop_pending_chat(user_id: str) -> str | None:
     """Pop and return the oldest pending chat message, or None if queue is empty."""
     from config.settings import get_settings
     settings = get_settings()
-    if not settings.redis_url:
+    if not _valid_redis_url(settings.redis_url):
         return None
     import redis.asyncio as aioredis
     key = f"push:chat:{user_id}"
@@ -70,7 +76,7 @@ async def remove_subscription(user_id: str, endpoint: str) -> None:
     """Remove a specific push subscription by endpoint URL."""
     from config.settings import get_settings
     settings = get_settings()
-    if not settings.redis_url:
+    if not _valid_redis_url(settings.redis_url):
         return
     import redis.asyncio as aioredis
     key = f"push:sub:{user_id}:{hashlib.md5(endpoint.encode()).hexdigest()}"
@@ -84,7 +90,7 @@ async def remove_subscription(user_id: str, endpoint: str) -> None:
 async def _get_subscriptions(user_id: str) -> list[dict]:
     from config.settings import get_settings
     settings = get_settings()
-    if not settings.redis_url:
+    if not _valid_redis_url(settings.redis_url):
         return []
     import redis.asyncio as aioredis
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
