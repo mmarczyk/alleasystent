@@ -298,15 +298,14 @@ def _verify_oauth_state(state: str) -> bool:
 def _oauth_redirect_uri() -> str:
     """Build the Allegro OAuth redirect URI.
 
-    When FRONTEND_URL is set (split deployment), we point Allegro at
-    /oauth-callback.html — a real file that GitHub Pages serves directly
-    without any trailing-slash redirect.  A 301 redirect (e.g. /alleasystent
-    → /alleasystent/) drops the ?code= query param in some CDN configurations,
-    so using a direct .html file avoids that problem entirely.
+    Use the frontend URL with a trailing slash so Allegro redirects to
+    https://…/alleasystent/?code=…  GitHub Pages serves index.html directly
+    for that URL (no 301 redirect), so ?code= is never dropped.
+    Register exactly this URL (with trailing slash) in the Allegro portal.
     """
     if settings.frontend_url:
         base = settings.frontend_url.rstrip("/")
-        return f"{base}/oauth-callback.html"
+        return f"{base}/"
     return settings.allegro_redirect_uri
 
 
