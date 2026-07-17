@@ -102,6 +102,92 @@ const Auth = (() => {
   return { getToken, setToken, clearToken, headers };
 })();
 
+// ── Document Viewer ──────────────────────────────
+// Full-screen tab-based viewer for long responses (> 500 chars).
+const DocViewer = (() => {
+  const _tabs = [];  // [{id, title, content}]
+  let _activeId = null;
+  let _nextId = 0;
+  const _registry = {};  // key → content, for "Pełny widok" buttons on existing bubbles
+
+  function _titleFromContent(content) {
+    const heading = content.match(/^#{1,3}\s+(.+)/m);
+    if (heading) return heading[1].replace(/[*`]/g, '').trim().slice(0, 60);
+    return content.replace(/[#*`_[\]]/g, '').trim().slice(0, 60);
+  }
+
+  function register(content) {
+    const key = ++_nextId;
+    _registry[key] = content;
+    return key;
+  }
+
+  function openFromKey(key) {
+    const content = _registry[key];
+    if (content) open(_titleFromContent(content), content);
+  }
+
+  function open(title, content) {
+    const id = ++_nextId;
+    _tabs.push({ id, title: (title || _titleFromContent(content)).slice(0, 60), content });
+    _activeId = id;
+    _render();
+    document.getElementById('doc-viewer').classList.remove('hidden');
+  }
+
+  function setActive(id) {
+    _activeId = id;
+    _render();
+  }
+
+  function closeTab(id) {
+    const idx = _tabs.findIndex(t => t.id === id);
+    if (idx < 0) return;
+    _tabs.splice(idx, 1);
+    if (!_tabs.length) { close(); return; }
+    if (_activeId === id) _activeId = _tabs[Math.min(idx, _tabs.length - 1)].id;
+    _render();
+  }
+
+  function close() {
+    document.getElementById('doc-viewer').classList.add('hidden');
+  }
+
+  async function copyActive() {
+    const active = _tabs.find(t => t.id === _activeId);
+    if (!active) return;
+    try {
+      await navigator.clipboard.writeText(active.content);
+      UI.toast('Skopiowano!', 2000);
+    } catch { UI.toast('Nie można skopiować', 2000); }
+  }
+
+  function _render() {
+    const tabList = document.getElementById('doc-tab-list');
+    if (!tabList) return;
+    tabList.innerHTML = _tabs.map(t =>
+      `<button class="doc-tab${t.id === _activeId ? ' active' : ''}" onclick="DocViewer.setActive(${t.id})">` +
+        `<span class="doc-tab-name">📄 ${_esc(t.title)}</span>` +
+        `<button class="doc-tab-x" onclick="event.stopPropagation();DocViewer.closeTab(${t.id})">✕</button>` +
+      `</button>`
+    ).join('');
+
+    const active = _tabs.find(t => t.id === _activeId);
+    const content = document.getElementById('doc-content');
+    if (!content) return;
+    content.innerHTML = active ? renderMarkdown(active.content) : '';
+    if (typeof hljs !== 'undefined') {
+      content.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
+    }
+  }
+
+  function _esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  return { open, openFromKey, setActive, closeTab, close, copyActive, register };
+})();
+
 // ── Settings ─────────────────────────────────────
 const Settings = (() => {
   const DEFAULTS = { backendUrl: '' };
@@ -674,6 +760,7 @@ const Chat = (() => {
 
   function buildBubble(role, content, ts, index) {
     const isUser = role === 'user';
+    const isLong = !isUser && content.length > 500;
     const div = document.createElement('div');
     div.className = `msg msg-${isUser ? 'user' : 'bot'}`;
     div.dataset.index = index ?? '';
@@ -682,6 +769,9 @@ const Chat = (() => {
     const html = isUser ? escHtml(content).replace(/\n/g, '<br>') : renderMarkdown(content);
     const time = ts ? new Date(ts).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '';
 
+    // Register long bot responses so "Pełny widok" button can re-open the doc viewer
+    const docKey = isLong ? DocViewer.register(content) : null;
+
     div.innerHTML = `
       <div class="msg-avatar">${avatar}</div>
       <div class="msg-content">
@@ -689,6 +779,7 @@ const Chat = (() => {
         <div class="msg-actions">
           <button class="msg-act-btn" onclick="Chat.copyMessage(this)" title="Kopiuj">📋 Kopiuj</button>
           ${!isUser ? `<button class="msg-act-btn" onclick="Chat.regenerate()" title="Generuj ponownie">↺ Nowa odpowiedź</button>` : ''}
+          ${docKey !== null ? `<button class="msg-act-btn msg-act-doc" onclick="DocViewer.openFromKey(${docKey})">📄 Pełny widok</button>` : ''}
         </div>
         ${time ? `<span class="msg-time">${time}</span>` : ''}
       </div>`;
@@ -784,6 +875,9 @@ const Chat = (() => {
       document.getElementById('btn-send').disabled = false;
       finalizeWaitingBubble(fullText, ts);
       renderSidebar();
+      if (fullText.length > 500 && !fullText.startsWith('**Błąd:**')) {
+        DocViewer.open(msgText.slice(0, 60), fullText);
+      }
       if (typeof hljs !== 'undefined') {
         document.querySelectorAll('#messages pre code').forEach(b => hljs.highlightElement(b));
       }

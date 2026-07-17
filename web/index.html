@@ -167,6 +167,18 @@
   </main>
 </div>
 
+<!-- DOCUMENT VIEWER -->
+<div id="doc-viewer" class="doc-viewer hidden">
+  <div class="doc-tabbar">
+    <button class="doc-back-btn" onclick="DocViewer.close()">← Chat</button>
+    <div class="doc-tab-list" id="doc-tab-list"></div>
+    <button class="doc-copy-btn" onclick="DocViewer.copyActive()" title="Kopiuj treść">📋</button>
+  </div>
+  <div class="doc-body">
+    <article class="doc-content" id="doc-content"></article>
+  </div>
+</div>
+
 <!-- TOAST -->
 <div id="toast" class="toast hidden"></div>
 
