@@ -19,14 +19,34 @@ _GAP_KEY   = "analytics:gaps"      # Redis list of LLM-detected tool gaps
 _MAX_QUERIES = 2000
 _MAX_GAPS    = 500
 
-_INTENT_LABELS = {
+_SOURCE_LABELS = {
     "allegro_orders":    "Zamówienia",
     "allegro_offers":    "Oferty",
     "allegro_messaging": "Wiadomości",
     "allegro_account":   "Konto",
+    "rag":               "Baza wiedzy",
+    "none":              "Chitchat / inne",
+    # legacy keys (pre-2D routing)
     "general_knowledge": "Baza wiedzy",
     "chitchat":          "Chitchat / inne",
 }
+
+_FORMAT_LABELS = {
+    "chat":      "chat",
+    "table":     "tabela",
+    "document":  "dokument",
+    "dashboard": "dashboard",
+}
+
+
+def _intent_label(intent: str) -> str:
+    """Convert 'source:format' (or legacy flat intent) to a human-readable label."""
+    if ":" in intent:
+        source, fmt = intent.split(":", 1)
+        src_label = _SOURCE_LABELS.get(source, source)
+        fmt_label = _FORMAT_LABELS.get(fmt, fmt)
+        return f"{src_label} [{fmt_label}]" if fmt != "chat" else src_label
+    return _SOURCE_LABELS.get(intent, intent)
 
 _LLM_SYSTEM = (
     "You are an expert product analyst. Respond ONLY with valid JSON — no markdown fences, "
@@ -35,13 +55,13 @@ _LLM_SYSTEM = (
 
 _LLM_PROMPT = """You are analyzing queries sent to an AI assistant for Allegro (Polish e-commerce) store owners.
 
-CURRENTLY HANDLED intents:
-- allegro_orders: orders, shipping, tracking, returns, invoices
-- allegro_offers: product listings, prices, stock levels
-- allegro_messaging: messages to/from buyers
-- allegro_account: fees, billing, statistics
-- general_knowledge: store FAQ, policies
-- chitchat: greetings, capability questions (poorly handled — often catches queries that need a new agent)
+CURRENTLY HANDLED routing (source:format):
+- allegro_orders:{chat|table|document|dashboard}: order data, shipping, tracking, returns, invoices
+- allegro_offers:{chat|table|document|dashboard}: product listings, prices, stock levels
+- allegro_messaging:{chat|document}: messages to/from buyers
+- allegro_account:{chat|table|dashboard}: fees, billing, statistics
+- rag:{chat|document}: store FAQ, policies (static knowledge base)
+- none:chat: greetings, capability questions, chitchat (no data needed)
 
 LAST {n} USER QUERIES (most recent first):
 {queries}
@@ -140,7 +160,7 @@ async def get_stats() -> dict:
     for intent, count in intent_counts.most_common():
         intents.append({
             "intent": intent,
-            "label": _INTENT_LABELS.get(intent, intent),
+            "label": _intent_label(intent),
             "count": count,
             "pct": round(count / total * 100) if total else 0,
         })
@@ -150,7 +170,7 @@ async def get_stats() -> dict:
         {
             "text": q.get("text", ""),
             "intent": q.get("intent", ""),
-            "label": _INTENT_LABELS.get(q.get("intent", ""), q.get("intent", "")),
+            "label": _intent_label(q.get("intent", "")),
             "ts": q.get("ts", 0),
         }
         for q in queries[:30]

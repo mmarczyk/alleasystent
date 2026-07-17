@@ -6,9 +6,16 @@ Orchestrator Agent — the central brain of the system.
 Responsibilities:
   1. Receive normalized IncomingMessage from any communication channel.
   2. Load/save conversation history from Firestore.
-  3. Classify the query intent (keyword rules first, LLM fallback).
-  4. Route to the appropriate specialized agent.
+  3. Classify the query on two dimensions: data source + output format.
+  4. Route to the appropriate specialized agent with the right output mode.
   5. Return the AgentResponse.
+
+Routing model (2D):
+  Dimension 1 — DATA SOURCE: what data is needed to answer?
+    allegro_orders | allegro_offers | allegro_messaging | allegro_account | rag | none
+
+  Dimension 2 — OUTPUT FORMAT: how should the answer look?
+    chat | table | document | dashboard
 """
 
 import logging
@@ -26,37 +33,112 @@ from services.gcp_service import FirestoreService
 
 logger = logging.getLogger(__name__)
 
-INTENT_SYSTEM_PROMPT = """
-Classify the user's message. Reply with EXACTLY ONE of these labels and nothing else:
+# ── LLM prompt for data-source classification ─────────────────────────────────
+# (output format is detected via keywords — more reliable than LLM for that)
 
-allegro_orders      — requests for order data, shipping, delivery, tracking, returns, invoices, "zamówienia", "paczka";
-                       ALSO follow-up data questions about orders in conversation context
-                       (e.g. "Ile ich jest?", "Co kupiło się u mnie ostatnio?", "Ile to razem?")
-allegro_offers      — listings, prices, stock, offer management, "oferty", "cena", "stan magazynowy"
-allegro_messaging   — buyer messages, send message, "wiadomości", "napisz do kupującego"
-allegro_account     — seller account, fees, billing, statistics, "konto", "opłaty", "prowizja"
-general_knowledge   — product FAQs, store policies, shipping schedule
-                       (e.g. "polityka zwrotów", "kiedy wysyłacie zamówienia?", "ile dni na zwrot?")
-document_generation — user wants to generate, draft, or write a document, email, report, or template
-                       that requires fetching store data (e.g. "wygeneruj maila do dostawcy",
-                       "przygotuj raport sprzedaży", "stwórz listę produktów", "napisz szablon email")
-chitchat            — greetings, small talk, questions about assistant capabilities/features,
-                       AND meta-questions where the user asks to recall what THEY THEMSELVES said
-                       or requested earlier in this conversation (NOT follow-up data requests)
-                       (e.g. "What was I asking about?", "Jakich zamówień szukam?", "Co chciałem?")
+_SOURCE_SYSTEM_PROMPT = """
+Classify what DATA SOURCE is needed to answer the user's message. Reply with EXACTLY ONE label and nothing else:
+
+allegro_orders     — order data: shipping, tracking, returns, invoices, buyer addresses
+allegro_offers     — offer listings: prices, stock, product management
+allegro_messaging  — buyer messages: reading threads, drafting replies
+allegro_account    — seller account: fees, billing, statistics, limits
+rag                — store knowledge base: policies, FAQs, shipping rules (static info, no live data)
+none               — no data needed: greetings, meta-questions, general chat, anything non-Allegro
 
 Output the label only. No punctuation, no explanation.
 """.strip()
+
+# ── Output-format prefixes injected before the user's query ───────────────────
+
+_FORMAT_PREFIXES: dict[str, str] = {
+    "document": (
+        "[TRYB DOKUMENTU — WAŻNE] Ta odpowiedź musi być PEŁNYM, GOTOWYM DOKUMENTEM. "
+        "Nie odpowiadaj 'krótko i zwięźle' — dokument musi być kompletny, profesjonalny i szczegółowy. "
+        "Format markdown: zacznij od nagłówka (# Tytuł), dodaj datę, pełną treść, "
+        "tabele jeśli potrzebne, zakończ podpisem lub stopką. "
+        "Użyj narzędzi, aby pobrać aktualne dane ze sklepu jeśli są potrzebne do treści. "
+        "Minimum 400 słów — dokument musi być kompletny i gotowy do użycia.\n\n"
+        "Polecenie użytkownika: "
+    ),
+    "table": (
+        "[TRYB TABELI] Przedstaw wynik jako tabelę markdown (| kolumna | ... |). "
+        "Użyj narzędzi do pobrania danych, a wynik zaprezentuj w czytelnej tabeli z nagłówkami. "
+        "Po tabeli dodaj jedno–dwa zdania podsumowania.\n\n"
+        "Zapytanie: "
+    ),
+    "dashboard": (
+        "[TRYB DASHBOARD] Przygotuj wielosekcyjne podsumowanie zarządcze. "
+        "Struktura: kilka sekcji z nagłówkami (## Sekcja), kluczowe liczby pogrubione (**x**), "
+        "porównania i trendy gdzie to możliwe. "
+        "Pobierz wszystkie potrzebne dane narzędziami i przedstaw jako przejrzysty raport.\n\n"
+        "Zapytanie: "
+    ),
+}
+
+# ── Keyword maps ───────────────────────────────────────────────────────────────
+
+# Ordered list — first match wins.
+# Each entry: (keyword_list, label)
+
+_SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
+    # Store policies / FAQs — check BEFORE orders so "polityka zwrotów" → rag not orders
+    (["polityk", "faq", "regulamin", "kiedy wysyłacie", "kiedy wysyłają"],
+     "rag"),
+    # Orders
+    (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
+      "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
+      "niespakow", "wysłan", "niewysłan", "nieopakow", "wartość zam"],
+     "allegro_orders"),
+    # Offers / products
+    (["ofert", "offer", "listing", "produkt", "cen", "price", "stock",
+      "stan magaz", "aktywn", "wystawion", "dodaj ofert", "włóczk", "tkanin",
+      "materiał", "przędz"],
+     "allegro_offers"),
+    # Messaging
+    (["wiadomoś", "wiadomo", "message", "napisz do kupując", "wyślij do kupując",
+      "kupując", "buyer", "odpowiedz na wiadomość"],
+     "allegro_messaging"),
+    # Account / billing
+    (["konto", "opłat", "prowizj", "statystyk", "rozliczen", "account",
+      "fees", "billing", "limit sprzedaży"],
+     "allegro_account"),
+    # Chitchat / meta — check last so Allegro keywords take priority
+    (["cześć", "hej", "witaj", "dzień dobry", "dobry wieczór", "siema",
+      "hello", "hi ", "hey ", "funkcj", "możliwości", "co potrafisz", "co umiesz",
+      "capabilities", "what can you", "pomoc", "co chciałem", "czego szukam"],
+     "none"),
+]
+
+_FORMAT_KEYWORDS: list[tuple[list[str], str]] = [
+    # Document — email, report, letter, template
+    (["wygeneruj", "generuj ", "napisz mail", "napisz email", "email do ",
+      "mail do ", "stwórz raport", "utwórz raport", "przygotuj raport",
+      "przygotuj dokument", "stwórz dokument", "napisz list", "szablon maila",
+      "szablon email", "napisz pismo", "przygotuj pismo"],
+     "document"),
+    # Dashboard — multi-metric summary
+    (["dashboard", "panel sterowania", "podsumowanie całościowe", "przegląd całościowy",
+      "raport zarządczy", "zestawienie zbiorcze"],
+     "dashboard"),
+    # Table — structured data
+    (["w tabeli", "jako tabela", "tabelę", "tabelarycznie", "zestawienie w tabeli",
+      "pokaż tabelę", "csv", "w formie tabeli"],
+     "table"),
+]
 
 
 class Orchestrator:
     """
     Routes incoming messages to the correct specialized agent.
 
+    Classification is 2D:
+      - data_source: which Allegro sub-system (or rag/none) to query
+      - output_format: chat | table | document | dashboard
+
     Agent pool:
-      - AllegroAgent: all Allegro marketplace operations (orders, offers, messages, account)
-      - RAGAgent: store knowledge base Q&A — only for general_knowledge intent, lazy-loaded
-      (More agents can be registered via register_agent())
+      - AllegroAgent: all Allegro marketplace operations
+      - RAGAgent: store knowledge base Q&A (lazy-loaded)
     """
 
     def __init__(self):
@@ -67,11 +149,10 @@ class Orchestrator:
         )
         self._firestore = FirestoreService()
         self._allegro_agents: dict[str, AllegroAgent] = {}
-        self._rag_agent: RAGAgent | None = None  # lazy — only loaded for general_knowledge
+        self._rag_agent: RAGAgent | None = None
         self._extra_agents: dict[str, BaseAgent] = {}
 
     def _get_rag_agent(self) -> RAGAgent:
-        """Return (and lazily create) the RAGAgent."""
         if self._rag_agent is None:
             self._rag_agent = RAGAgent()
         return self._rag_agent
@@ -83,228 +164,196 @@ class Orchestrator:
         return self._allegro_agents[key]
 
     def register_agent(self, intent_prefix: str, agent: BaseAgent) -> None:
-        """Register an additional specialized agent for a custom intent prefix."""
         self._extra_agents[intent_prefix] = agent
 
     async def handle(self, message: IncomingMessage, user_id: str | None = None) -> AgentResponse:
-        """Main entry point — process an incoming message end-to-end."""
-        # 1. Load conversation history
+        """Main entry point — classify, route, persist, return."""
         session = await self._firestore.get_or_create_session(
             session_id=message.session_id,
             channel=message.channel,
             sender_id=message.sender_id,
         )
 
-        # 2. Classify intent
+        # Classify on both dimensions
         try:
-            intent = await self._classify_intent(message.text, session.to_anthropic_messages())
+            data_source, output_format = await self._classify(
+                message.text, session.to_anthropic_messages()
+            )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
-            logger.error("LLM API error during intent classification: %s", exc)
+            logger.error("LLM API error during classification: %s", exc)
             response = AgentResponse(
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
-                agent_type="base",
+                agent_type="error",
             )
             session.add_message(MessageRole.USER, message.text)
             session.add_message(MessageRole.ASSISTANT, response.text)
             await self._firestore.save_session(session)
             return response
-        logger.info("Intent: %s | message: %.60s…", intent, message.text)
 
-        # Derive agent_type from intent for use in error responses
-        if intent.startswith("allegro_") or intent == "document_generation":
-            _agent_type = "allegro"
-        elif intent == "general_knowledge":
-            _agent_type = "rag"
-        else:
-            _agent_type = "chitchat"
+        logger.info(
+            "Routing: source=%s format=%s | %.60s…",
+            data_source, output_format, message.text,
+        )
 
-        # 3. Route to specialized agent
+        # Route to the right agent + format mode
         try:
-            response = await self._route(intent, message, session.to_anthropic_messages(), user_id=user_id)
+            response = await self._route(
+                data_source, output_format, message, session.to_anthropic_messages(), user_id
+            )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
-            logger.error("LLM API error during routing (intent=%s): %s", intent, exc)
+            logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
             response = AgentResponse(
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
-                agent_type=_agent_type,
+                agent_type=data_source,
             )
 
-        # 4. Persist conversation
+        # Persist conversation
         session.add_message(MessageRole.USER, message.text)
         session.add_message(MessageRole.ASSISTANT, response.text)
         await self._firestore.save_session(session)
 
         return response
 
-    # ── Keyword pre-routing (no LLM call needed for obvious patterns) ──────────
-    _KEYWORD_MAP: list[tuple[list[str], str]] = [
-        # Document generation — MUST come before allegro_orders because "dostawcy" contains "dostaw"
-        (["wygeneruj", "generuj ", "napisz mail", "napisz email", "email do ",
-          "mail do ", "stwórz raport", "utwórz raport", "przygotuj raport",
-          "szablon maila", "szablon email", "lista produktów do", "zestawienie produktów"],
-         "document_generation"),
-        # Capability / meta questions always → chitchat
-        # Also: "szukam?" catches "Jakich zamówień szukam?" and similar recall meta-questions
-        (["funkcj", "możliwości", "co potrafisz", "co umiesz", "co możesz", "jakie masz",
-          "capabilities", "what can you", "what do you", "features", "help me", "pomoc",
-          "szukam?", "co chciałem", "o co mi chodzi", "czego szukam"],
-         "chitchat"),
-        # Greetings
-        (["cześć", "hej", "witaj", "dzień dobry", "dobry wieczór", "siema",
-          "hello", "hi ", "hey "],
-         "chitchat"),
-        # Store policies / FAQs — checked BEFORE orders so "polityka zwrotów" → general_knowledge
-        (["polityk", "faq", "regulamin", "kiedy wysyłacie", "kiedy wysyłają"],
-         "general_knowledge"),
-        # Orders — use "zamówien" (matches zamówień/zamówienia etc.) but NOT "zamówi"
-        # which would also match "zamówień" in meta-questions like "Jakich zamówień szukam?"
-        (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
-          "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
-          "niespakow", "wysłan", "niewysłan", "nieopakow", "wartość zam"],
-         "allegro_orders"),
-        # Offers
-        (["ofert", "offer", "listing", "produkt", "cen", "price", "stock",
-          "stan magaz", "aktywn", "wystawion", "dodaj ofert"],
-         "allegro_offers"),
-        # Messaging
-        (["wiadomoś", "wiadomo", "message", "napisz do", "wyślij do", "kupując",
-          "buyer", "odpowiedz"],
-         "allegro_messaging"),
-        # Account
-        (["konto", "opłat", "prowizj", "statystyk", "rozliczen", "account",
-          "fees", "billing", "limit sprzedaży"],
-         "allegro_account"),
-    ]
+    # ── Classification ─────────────────────────────────────────────────────────
 
-    def _keyword_classify(self, query: str) -> str | None:
+    def _detect_format(self, query: str) -> str:
+        """Keyword-based output format detection. Defaults to 'chat'."""
         q = query.lower()
-        for keywords, intent in self._KEYWORD_MAP:
+        for keywords, fmt in _FORMAT_KEYWORDS:
             if any(kw in q for kw in keywords):
-                logger.info("Keyword pre-route: %r -> %s", query[:60], intent)
-                return intent
+                logger.info("Format keyword match: %r -> %s", query[:60], fmt)
+                return fmt
+        return "chat"
+
+    def _detect_source_keyword(self, query: str) -> str | None:
+        """Keyword-based data source detection. Returns None if uncertain."""
+        q = query.lower()
+        for keywords, source in _SOURCE_KEYWORDS:
+            if any(kw in q for kw in keywords):
+                logger.info("Source keyword match: %r -> %s", query[:60], source)
+                return source
         return None
 
-    async def _classify_intent(
+    async def _classify_source_llm(
         self,
         query: str,
         history: list[dict[str, str]],
     ) -> str:
-        # Fast keyword check — no LLM call needed for obvious patterns
-        keyword_intent = self._keyword_classify(query)
-        if keyword_intent:
-            return keyword_intent
-
-        # Use a recent snippet of history for context (last 4 turns)
+        """LLM fallback for data source when keywords are ambiguous."""
         history_snippet = history[-4:] if len(history) > 4 else history
         history_text = "\n".join(
             f"{m['role'].upper()}: {m['content'][:200]}" for m in history_snippet
         )
-
         prompt = query
         if history_text:
             prompt = f"Recent conversation:\n{history_text}\n\nNew message: {query}"
 
-        known_intents = [
+        known = [
             "allegro_orders", "allegro_offers", "allegro_messaging",
-            "allegro_account", "general_knowledge", "document_generation", "chitchat",
+            "allegro_account", "rag", "none",
             *self._extra_agents.keys(),
         ]
         try:
             msgs = [
-                {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+                {"role": "system", "content": _SOURCE_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ]
             resp = await _call_with_retry(
                 self._client,
                 self._settings.model_fast_pool(),
-                "orchestrator/intent",
-                max_tokens=30,
+                "orchestrator/classify-source",
+                max_tokens=20,
                 messages=msgs,
             )
             raw = resp.choices[0].message.content.strip().lower()
-            logger.info("Intent classifier raw output: %r", raw)
+            logger.info("LLM source classifier raw output: %r", raw)
 
-            # Exact match first
-            if raw in known_intents:
+            if raw in known:
                 return raw
-
-            # Substring match — handles verbose output like "The intent is allegro_orders"
-            for ki in known_intents:
-                if ki in raw:
-                    logger.info("Intent matched via substring: %r -> %s", raw, ki)
-                    return ki
-
-            logger.warning("Unknown intent %r, falling back to chitchat", raw)
-            return "chitchat"
+            for k in known:
+                if k in raw:
+                    return k
+            logger.warning("Unknown source %r, falling back to none", raw)
+            return "none"
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError):
-            raise  # propagate — handle() will catch and return a friendly error
+            raise
         except Exception as exc:
-            logger.error("Intent classification failed: %s", exc)
-            return "chitchat"
+            logger.error("Source classification failed: %s", exc)
+            return "none"
+
+    async def _classify(
+        self,
+        query: str,
+        history: list[dict[str, str]],
+    ) -> tuple[str, str]:
+        """Return (data_source, output_format) for the query."""
+        output_format = self._detect_format(query)
+        data_source = self._detect_source_keyword(query)
+
+        if data_source is None:
+            data_source = await self._classify_source_llm(query, history)
+
+        return data_source, output_format
+
+    # ── Routing ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_format_prefix(query: str, output_format: str) -> str:
+        """Prepend format instructions to the user query when not in chat mode."""
+        prefix = _FORMAT_PREFIXES.get(output_format, "")
+        return prefix + query if prefix else query
 
     async def _route(
         self,
-        intent: str,
+        data_source: str,
+        output_format: str,
         message: IncomingMessage,
         history: list[dict[str, str]],
         user_id: str | None = None,
     ) -> AgentResponse:
-        """Dispatch to the appropriate agent based on intent."""
+        """Dispatch to the right agent based on data source + output format."""
+
         # Extra registered agents
         for prefix, agent in self._extra_agents.items():
-            if intent.startswith(prefix):
-                return await agent.run(message.text, history)
+            if data_source.startswith(prefix):
+                query = self._apply_format_prefix(message.text, output_format)
+                response = await agent.run(query, history)
+                response.agent_type = f"{data_source}:{output_format}"
+                return response
 
-        # Document generation — fetch Allegro data and produce a formatted document
-        if intent == "document_generation":
-            return await self._handle_document_generation(message.text, history, user_id)
+        query = self._apply_format_prefix(message.text, output_format)
 
-        # Allegro intents → live API via AllegroAgent (no static context needed)
-        if intent.startswith("allegro_"):
-            return await self._get_allegro_agent(user_id).run(message.text, history)
+        # Allegro sub-systems → AllegroAgent
+        if data_source.startswith("allegro_"):
+            response = await self._get_allegro_agent(user_id).run(query, history)
+            response.agent_type = f"{data_source}:{output_format}"
+            return response
 
-        # Store knowledge (FAQs, policies) → RAGAgent (lazy-loaded)
-        if intent == "general_knowledge":
+        # Knowledge base
+        if data_source == "rag":
             try:
-                return await self._get_rag_agent().run(message.text, history)
+                response = await self._get_rag_agent().run(query, history)
+                response.agent_type = f"rag:{output_format}"
+                return response
             except Exception as exc:
                 logger.error("RAGAgent failed, falling back to chitchat: %s", exc)
-                return await self._handle_chitchat(message.text, history)
+                response = await self._handle_chitchat(message.text, history)
+                response.agent_type = "rag:fallback"
+                return response
 
-        # Chitchat / capabilities
-        if intent == "chitchat":
-            return await self._handle_chitchat(message.text, history)
-
-        # Default fallback → chitchat (safe, no auth side-effects)
-        return await self._handle_chitchat(message.text, history)
-
-    async def _handle_document_generation(
-        self,
-        query: str,
-        history: list[dict[str, str]],
-        user_id: str | None = None,
-    ) -> AgentResponse:
-        """Generate a complete formatted document using live Allegro data."""
-        doc_query = (
-            "[TRYB DOKUMENTU — WAŻNE] Ta odpowiedź musi być PEŁNYM, GOTOWYM DOKUMENTEM. "
-            "Nie 'krótko i zwięźle' — dokument powinien być kompletny, profesjonalny i szczegółowy. "
-            "Format markdown: zacznij od nagłówka (# Tytuł), dodaj datę, pełną treść, tabele jeśli potrzebne, zakończ podpisem. "
-            "Użyj narzędzi, aby pobrać aktualne dane ze sklepu (produkty, zamówienia itp.) potrzebne do treści dokumentu. "
-            "Minimum 400 słów — dokument musi być kompletny i gotowy do użycia.\n\n"
-            f"Polecenie użytkownika: {query}"
-        )
-        response = await self._get_allegro_agent(user_id).run(doc_query, history)
-        response.agent_type = "document"
+        # No data needed → conversational handler
+        response = await self._handle_chitchat(query, history)
+        response.agent_type = f"none:{output_format}"
         return response
+
+    # ── Chitchat handler ───────────────────────────────────────────────────────
 
     async def _handle_chitchat(
         self,
         query: str,
         history: list[dict[str, str]],
     ) -> AgentResponse:
-        """Handle greetings and small talk without hitting specialized agents."""
-        # Deterministic guard: name queries always return a canned "don't know" response.
-        # Users authenticate via Allegro OAuth, not by self-introduction in chat.
-        # This prevents hallucinated or contaminated history from leaking names.
+        """Handle greetings, small talk, and document generation without store data."""
         q_lower = query.lower()
         name_query = any(kw in q_lower for kw in [
             "na imię", "jak się nazywam", "jakie mam imię", "my name", "what is my name",
@@ -315,7 +364,7 @@ class Orchestrator:
                 "W czym mogę Ci pomóc?" if "imię" in q_lower or "nazywam" in q_lower
                 else "You haven't told me your name in this conversation, so I don't know it. How can I help you?"
             )
-            return AgentResponse(text=text, agent_type="chitchat")
+            return AgentResponse(text=text, agent_type="none:chat")
 
         msgs = [
             {
@@ -332,11 +381,13 @@ class Orchestrator:
                     "- Czytanie i wysyłanie wiadomości do kupujących\n"
                     "- Informacje o koncie sprzedawcy (opłaty, statystyki, limity)\n"
                     "- Odpowiedzi na pytania z bazy wiedzy sklepu (polityki, FAQ, wysyłka)\n"
+                    "- Generowanie dokumentów i maili na podstawie danych sklepu\n"
+                    "- Zestawianie danych w tabele i dashboardy\n"
                     "After greeting, gently ask how you can help.\n\n"
                     "ABSOLUTE RULE — PERSONAL DETAILS: You have zero knowledge of the user's "
                     "real name, company, or identity unless they explicitly stated it in THIS "
-                    "conversation. NEVER guess, invent, or assume a name (not 'Jan', 'Anna', "
-                    "or any other). If asked and no name was given, say you don't know."
+                    "conversation. NEVER guess, invent, or assume a name. If asked and no name "
+                    "was given, say you don't know."
                 ),
             },
             *list(history),
@@ -349,5 +400,5 @@ class Orchestrator:
             max_tokens=512,
             messages=msgs,
         )
-        text = resp.choices[0].message.content or "Hello! How can I help you?"
-        return AgentResponse(text=text, agent_type="chitchat")
+        text = resp.choices[0].message.content or "Cześć! W czym mogę pomóc?"
+        return AgentResponse(text=text, agent_type="none:chat")
