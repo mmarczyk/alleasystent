@@ -227,7 +227,7 @@ async def allegro_auth_status(request: Request):
     except HTTPException:
         return {"status": "idle", "authenticated": False}
 
-    service = AllegroService(user_id=user_id)
+    service = AllegroService.get_instance(user_id)
     if service._tokens is None:
         await service._load_tokens_from_redis()
 
@@ -253,7 +253,7 @@ async def allegro_callback(request: Request, code: str = "", state: str = "", er
         logger.error("Allegro code exchange failed: %s", exc)
         raise HTTPException(502, "Failed to exchange Allegro authorization code")
     # Persist tokens to Redis under the user's Allegro login
-    service = AllegroService(user_id=login)
+    service = AllegroService.get_instance(login)
     service._tokens = tokens
     await service._save_tokens()
     # Create JWT session
@@ -343,7 +343,7 @@ async def allegro_exchange(body: AllegroExchangeRequest):
     except Exception as exc:
         logger.error("Allegro code exchange failed: %s", exc)
         raise HTTPException(502, "Failed to exchange Allegro authorization code")
-    service = AllegroService(user_id=login)
+    service = AllegroService.get_instance(login)
     service._tokens = tokens
     await service._save_tokens()
     session_token = create_session_token({"sub": login, "name": login})
@@ -375,7 +375,7 @@ async def auth_me(request: Request):
     user = await get_current_user(request)
     # Allegro token may be missing after container restart (file-based storage lost).
     # Force re-login so the user completes OAuth again and gets a fresh token.
-    svc = AllegroService(user_id=user["sub"])
+    svc = AllegroService.get_instance(user["sub"])
     if svc._tokens is None:
         await svc._load_tokens_from_redis()
     if svc._tokens is None:
@@ -430,7 +430,7 @@ async def index_allegro_offers() -> dict:
     from agents.rag.indexer import DocumentIndexer
     from services.allegro_service import AllegroService
 
-    allegro = AllegroService()
+    allegro = AllegroService.get_instance()
     indexer = DocumentIndexer()
     offers, _ = await allegro.get_offers(limit=50)
     count = await indexer.index_allegro_offers(offers)
@@ -535,7 +535,7 @@ async def allegro_order_event_stats(request: Request):
     from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
 
     user = await get_current_user(request)
-    service = AllegroService(user_id=user["sub"])
+    service = AllegroService.get_instance(user["sub"])
     if service._tokens is None:
         await service._load_tokens_from_redis()
     if service._tokens is None:
@@ -555,7 +555,7 @@ async def allegro_get_order(order_id: str, request: Request):
     from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
 
     user = await get_current_user(request)
-    service = AllegroService(user_id=user["sub"])
+    service = AllegroService.get_instance(user["sub"])
     if service._tokens is None:
         await service._load_tokens_from_redis()
     if service._tokens is None:
@@ -586,7 +586,7 @@ async def allegro_order_events(request: Request, since: str | None = None):
     from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
 
     user = await get_current_user(request)
-    service = AllegroService(user_id=user["sub"])
+    service = AllegroService.get_instance(user["sub"])
     if service._tokens is None:
         await service._load_tokens_from_redis()
     if service._tokens is None:
@@ -609,7 +609,7 @@ async def allegro_pending_invoices(request: Request):
     from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
 
     user = await get_current_user(request)
-    service = AllegroService(user_id=user["sub"])
+    service = AllegroService.get_instance(user["sub"])
     if service._tokens is None:
         await service._load_tokens_from_redis()
     if service._tokens is None:

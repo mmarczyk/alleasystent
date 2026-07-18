@@ -70,7 +70,7 @@ async def _poll_user(r, user_id: str) -> None:
     if not await r.exists(f"allegro:tokens:{user_id}"):
         return
 
-    allegro = AllegroService(user_id=user_id)
+    allegro = AllegroService.get_instance(user_id)
     await allegro._load_tokens_from_redis()
     if not allegro._tokens:
         return

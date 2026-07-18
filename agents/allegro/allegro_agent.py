@@ -76,7 +76,7 @@ class AllegroAgent(BaseAgent):
     def __init__(self, user_id: str | None = None):
         super().__init__()
         self.model_override = self._settings.gemini_model_fast
-        self._allegro = AllegroService(user_id=user_id)
+        self._allegro = AllegroService.get_instance(user_id)
 
     async def run(
         self,

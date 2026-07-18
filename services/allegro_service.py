@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Allegro REST API client with OAuth2 device-flow authentication."""
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -98,7 +99,20 @@ class AllegroService:
     Tokens are refreshed automatically before expiry.
     Token persistence: Redis when REDIS_URL is set (survives redeployments),
     otherwise local file fallback.
+
+    One instance is kept per user_id for the lifetime of the process so that
+    the httpx connection pool, in-memory caches, and loaded tokens are reused
+    across requests instead of being rebuilt from scratch every time.
     """
+
+    _instances: dict[str, "AllegroService"] = {}
+
+    @classmethod
+    def get_instance(cls, user_id: str | None = None) -> "AllegroService":
+        key = user_id or "default"
+        if key not in cls._instances:
+            cls._instances[key] = cls(user_id)
+        return cls._instances[key]
 
     def __init__(self, user_id: str | None = None):
         self._user_id = user_id or "default"
@@ -585,13 +599,11 @@ class AllegroService:
         # Client-side filter: buyer wants invoice
         candidates = [o for o in all_orders if o.invoice_required]
 
-        # Keep only those without any uploaded invoice
-        result = []
-        for order in candidates:
-            invoices = await self.get_order_invoices(order.order_id)
-            if not invoices:
-                result.append(order)
-        return result
+        # Keep only those without any uploaded invoice — fetch all in parallel
+        invoice_lists = await asyncio.gather(*[
+            self.get_order_invoices(o.order_id) for o in candidates
+        ])
+        return [o for o, invs in zip(candidates, invoice_lists) if not invs]
 
     # ── Offers ────────────────────────────────────────────────────────────────
 
@@ -617,47 +629,43 @@ class AllegroService:
         return offers, total
 
     async def get_all_offers(self, publication_status: str = "ACTIVE") -> list[dict[str, Any]]:
-        """Fetch every offer with pagination. Cached for 5 minutes."""
+        """Fetch every offer with pagination, parallelising after the first page. Cached for 5 min."""
+        import asyncio as _asyncio
+
         cached = self._all_offers_cache.get(publication_status)
         if cached is not None:
             logger.info("get_all_offers: returning %d offers from cache", len(cached))
             return cached
 
-        all_offers: list[dict[str, Any]] = []
         page_size = 100  # Allegro max per page
-        offset = 0
-        page_num = 0
-        total_count: int | None = None
 
-        while True:
-            page_num += 1
-            page, tc = await self.get_offers(
-                publication_status=publication_status,
-                limit=page_size,
-                offset=offset,
-            )
-            # Capture totalCount from first page that reports it
-            if total_count is None and tc:
-                total_count = tc
-                logger.info("get_all_offers: API reports totalCount=%d (status=%s)", total_count, publication_status)
+        # First page tells us totalCount so we can fan out the rest in parallel.
+        first_page, total_count = await self.get_offers(
+            publication_status=publication_status,
+            limit=page_size,
+            offset=0,
+        )
+        logger.info("get_all_offers: first page %d offers, totalCount=%s", len(first_page), total_count)
 
-            if not page:
-                logger.info("get_all_offers: page %d empty — stopping", page_num)
-                break
+        all_offers = list(first_page)
 
-            all_offers.extend(page)
-            offset += len(page)  # advance by actual items received, not assumed page_size
-            logger.info("get_all_offers: page %d → %d offers (running: %d)", page_num, len(page), len(all_offers))
-
-            # Stop when totalCount reached, or partial page signals end of results
-            if total_count and offset >= total_count:
-                break
-            if len(page) < page_size:
-                break
+        if total_count and total_count > len(first_page):
+            offsets = range(page_size, total_count, page_size)
+            pages = await _asyncio.gather(*[
+                self.get_offers(
+                    publication_status=publication_status,
+                    limit=page_size,
+                    offset=off,
+                )
+                for off in offsets
+            ])
+            for page, _ in pages:
+                all_offers.extend(page)
+            logger.info("get_all_offers: fetched %d parallel pages", len(pages))
 
         if total_count and len(all_offers) != total_count:
             logger.warning(
-                "get_all_offers: fetched %d but API totalCount=%d (status=%s) — mismatch, check offer statuses",
+                "get_all_offers: fetched %d but API totalCount=%d (status=%s)",
                 len(all_offers), total_count, publication_status,
             )
 
