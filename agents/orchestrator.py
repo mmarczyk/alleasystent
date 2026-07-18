@@ -85,11 +85,15 @@ _FORMAT_PREFIXES: dict[str, str] = {
         "Polecenie użytkownika: "
     ),
     "table": (
-        "[TRYB TABELI — ZASADY]\n"
-        "1. Odpowiedz WYŁĄCZNIE tabelą markdown. NIE pisz wstępu ani preambuły.\n"
-        "2. Pierwsza linia: nagłówek tabeli | kolumna1 | kolumna2 | ...\n"
-        "3. Użyj narzędzi do pobrania aktualnych danych — tabela musi zawierać prawdziwe wartości.\n"
-        "4. Po tabeli: maksymalnie 1-2 zdania podsumowania.\n\n"
+        "[TRYB TABELI — ZASADY BEZWZGLĘDNE]\n"
+        "KROK 1 — DANE PIERWSZE: wywołaj odpowiednie narzędzie(a) i poczekaj na wynik.\n"
+        "         BEZ WYWOŁANIA NARZĘDZIA = BEZ TABELI. Nigdy nie generuj danych z pamięci.\n"
+        "KROK 2 — TABELA: zbuduj tabelę markdown WYŁĄCZNIE z danych zwróconych przez narzędzie.\n"
+        "         Pierwsza linia: nagłówek | kolumna1 | kolumna2 | ...\n"
+        "         NIE pisz żadnego wstępu, potwierdzenia ani preambuły przed tabelą.\n"
+        "KROK 3 — maksymalnie 1-2 zdania podsumowania po tabeli.\n"
+        "UWAGA: ID ofert Allegro to 11-cyfrowe liczby (np. 12345678901), NIE UUID.\n"
+        "Jeśli w odpowiedzi pojawiają się UUID — to halucynacja. Wywołaj narzędzie.\n\n"
         "Zapytanie: "
     ),
     "dashboard": (
