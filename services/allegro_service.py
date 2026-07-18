@@ -136,10 +136,8 @@ class AllegroService:
                 refresh_token="mock-refresh",
                 expires_at=datetime.utcnow() + timedelta(days=365),
             )
-        # Static order fields (items, price, buyer) don't change — 5 min TTL
+        # Single order details (buyer, items, price) — static once placed, 5 min TTL
         self._order_cache: _TTLCache = _TTLCache(ttl=300.0)
-        # Order list results — 60 s TTL (new orders can arrive)
-        self._orders_list_cache: _TTLCache = _TTLCache(ttl=60.0)
         # Invoice status per order — 2 min TTL
         self._invoice_cache: _TTLCache = _TTLCache(ttl=120.0)
         # Full offer catalogue — 5 min TTL (stock/prices change infrequently)
@@ -405,8 +403,11 @@ class AllegroService:
         paid_at_lte: str | None = None,
         limit: int = 100,
         offset: int = 0,
-        bypass_cache: bool = False,
     ) -> list[AllegroOrder]:
+        # Order lists are never cached — new orders can arrive at any time and
+        # stale counts/statuses would be misleading.  Only individual order
+        # details (get_order) are cached because they don't change once placed.
+
         # When filtering by payment time the Allegro API has no direct parameter —
         # fetch READY_FOR_PROCESSING orders with a broad boughtAt window (last 7 days)
         # and filter client-side by paid_at.
@@ -420,7 +421,6 @@ class AllegroService:
                 status="READY_FOR_PROCESSING",
                 bought_at_gte=start_window,
                 limit=200,
-                bypass_cache=True,
             )
             result = raw
             if paid_at_gte:
@@ -428,15 +428,6 @@ class AllegroService:
             if paid_at_lte:
                 result = [o for o in result if (o.paid_at or "") <= paid_at_lte]
             return result[:limit]
-        cache_key = (
-            f"{status}:{buyer_login}:{fulfillment_status}:{line_items_sent}:"
-            f"{bought_at_gte}:{bought_at_lte}:{limit}:{offset}"
-        )
-        if not bypass_cache:
-            cached = self._orders_list_cache.get(cache_key)
-            if cached is not None:
-                logger.debug("orders list cache hit: %s", cache_key)
-                return cached
 
         base_params: dict[str, Any] = {}
         if status:
@@ -467,7 +458,8 @@ class AllegroService:
             cur_offset += page_size
 
         result = all_orders[:limit]
-        self._orders_list_cache.set(cache_key, result)
+        # Populate the single-order detail cache as a side-effect so that
+        # a subsequent get_order(id) for any of these doesn't need a round-trip.
         for order in result:
             self._order_cache.set(order.order_id, order)
         return result

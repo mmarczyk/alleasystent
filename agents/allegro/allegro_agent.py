@@ -268,7 +268,6 @@ class AllegroAgent(BaseAgent):
                 fulfillment_status="NEW",
                 buyer_login=tool_input.get("buyer_login"),
                 limit=min(int(tool_input.get("limit", 100)), 100),
-                bypass_cache=True,
             )
             if not orders:
                 return "Brak nowych zamówień."
