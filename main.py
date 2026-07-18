@@ -56,15 +56,23 @@ async def lifespan(app: FastAPI):
         settings.app_env,
         settings.port,
     )
-    # Ensure ChromaDB directory exists and pre-warm the retriever
+    # Ensure ChromaDB directory exists
     if settings.rag_backend == "chromadb":
         pathlib.Path(settings.chromadb_path).mkdir(parents=True, exist_ok=True)
+
+    # Pre-warm the retriever in the background so sentence-transformers model
+    # loading (can take 1-3 min on cold start) does NOT block server startup.
+    # The server starts accepting requests immediately; first RAG query may
+    # take a moment longer while the model finishes loading.
+    async def _prewarm_retriever() -> None:
         try:
             from agents.rag.retriever import build_retriever
-            build_retriever()
+            await asyncio.to_thread(build_retriever)
             logger.info("ChromaDB retriever pre-warmed successfully")
         except Exception as exc:
             logger.warning("ChromaDB pre-warm failed (non-fatal): %s", exc)
+
+    asyncio.create_task(_prewarm_retriever())
 
     # Backend order monitor: sends push notifications when new Allegro orders
     # arrive — works even when iOS PWA is backgrounded (JS can't run then).
