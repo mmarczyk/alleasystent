@@ -199,18 +199,25 @@ class AllegroService:
             return
         data = self._tokens.model_dump()
         data["expires_at"] = data["expires_at"].isoformat()
-        # File — fast local cache (ephemeral, but useful within a single deployment)
-        try:
-            self._token_file().write_text(json.dumps(data, indent=2))
-        except Exception as exc:
-            logger.warning("Could not write token file: %s", exc)
-        # Redis — persists across Railway redeployments
-        if self._redis is not None:
+        raw = json.dumps(data, indent=2)
+
+        async def _write_file() -> None:
             try:
-                await self._redis.set(self._redis_tokens_key, json.dumps(data))
+                await asyncio.to_thread(self._token_file().write_text, raw)
+            except Exception as exc:
+                logger.warning("Could not write token file: %s", exc)
+
+        async def _write_redis() -> None:
+            if self._redis is None:
+                return
+            try:
+                # 90-day TTL so stale/revoked tokens don't linger forever
+                await self._redis.set(self._redis_tokens_key, raw, ex=86400 * 90)
                 logger.info("Saved Allegro tokens to Redis")
             except Exception as exc:
                 logger.warning("Failed to save Allegro tokens to Redis: %s", exc)
+
+        await asyncio.gather(_write_file(), _write_redis())
 
     def _load_pending_device_code(self) -> None:
         path = Path(self._device_code_file)
