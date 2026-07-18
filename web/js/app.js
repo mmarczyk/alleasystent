@@ -59,7 +59,37 @@ const AppUpdater = (() => {
 })();
 
 // ── Auth check ────────────────────────────────────
+function _applyAuthUser(user) {
+  window._currentUser = user;
+  document.getElementById('login-overlay').style.display = 'none';
+  document.getElementById('app').style.display = '';
+  const userEl = document.getElementById('user-info');
+  if (userEl) {
+    userEl.innerHTML = `<span style="font-size:1.1rem">🛒</span> <span style="overflow:hidden;text-overflow:ellipsis;font-weight:500">${user.name}</span>`;
+  }
+}
+
 async function checkAuth() {
+  // Fast path: the JWT is already in localStorage and contains exp + name.
+  // Decode it client-side (base64, no signature check needed — we trust our own LS)
+  // and show the app immediately without a network round-trip.
+  // A background request to /auth/me still runs to catch token revocation;
+  // if it returns 401 we force re-login.
+  const token = Auth.getToken();
+  if (token) {
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (payload.exp > Date.now() / 1000 + 30) {
+        _applyAuthUser({ sub: payload.sub, name: payload.name || payload.sub });
+        // Background verify — only reacts if server says 401
+        fetch(Settings.api('/auth/me'), { credentials: 'include', headers: Auth.headers() })
+          .then(r => { AppUpdater.check(r.headers); if (r.status === 401) { Auth.clearToken(); location.reload(); } })
+          .catch(() => {});
+        return true;
+      }
+    } catch {}
+  }
+  // Slow path: no valid token in LS — hit the server (uses cookie on same-origin)
   try {
     const res = await fetch(Settings.api('/auth/me'), {
       credentials: 'include',
@@ -70,16 +100,9 @@ async function checkAuth() {
       document.getElementById('login-overlay').style.display = 'flex';
       return false;
     }
-    const user = await res.json();
-    window._currentUser = user;
-    document.getElementById('login-overlay').style.display = 'none';
-    document.getElementById('app').style.display = '';
-    const userEl = document.getElementById('user-info');
-    if (userEl) {
-      userEl.innerHTML = `<span style="font-size:1.1rem">🛒</span> <span style="overflow:hidden;text-overflow:ellipsis;font-weight:500">${user.name}</span>`;
-    }
+    _applyAuthUser(await res.json());
     return true;
-  } catch (e) {
+  } catch {
     document.getElementById('login-overlay').style.display = 'flex';
     return false;
   }
@@ -953,16 +976,38 @@ window.addEventListener('DOMContentLoaded', async () => {
   Settings.load();
   Store.load();
 
-  // Pre-fetch the Allegro auth URL immediately (in parallel with checkAuth).
-  // By the time the user reads the overlay and clicks, the URL is already cached
-  // and the redirect is instant.  On click we still show a loading state as a
-  // safety net in case the fetch is still in progress (slow network / cold start).
-  let _allegroAuthUrlPromise = null;
+  // ── Allegro auth URL cache ────────────────────────────────────────────────
+  // Cache the OAuth URL in localStorage (4-minute TTL) so the Login button
+  // redirects instantly even on a cold-start — the prefetch fires immediately
+  // on page load to wake the container, and the result is cached for the next
+  // time the user visits.  The HMAC-signed state has no server-side expiry so
+  // caching for a few minutes is safe.
+  const _AUTH_URL_LS_KEY = 'ae_allegro_auth_url';
+  const _AUTH_URL_TTL_MS = 4 * 60 * 1000;
+
+  function _getCachedAuthUrl() {
+    try {
+      const raw = localStorage.getItem(_AUTH_URL_LS_KEY);
+      if (!raw) return null;
+      const { url, ts } = JSON.parse(raw);
+      if (Date.now() - ts > _AUTH_URL_TTL_MS) { localStorage.removeItem(_AUTH_URL_LS_KEY); return null; }
+      return url;
+    } catch { return null; }
+  }
+
+  function _setCachedAuthUrl(url) {
+    try { localStorage.setItem(_AUTH_URL_LS_KEY, JSON.stringify({ url, ts: Date.now() })); } catch {}
+  }
+
+  // Seed the promise from cache so first click is instant; prefetch always
+  // fires to wake the container and refresh the cached URL for next time.
+  let _allegroAuthUrlPromise = Promise.resolve(_getCachedAuthUrl());
+
   function _prefetchAllegroAuthUrl() {
     _allegroAuthUrlPromise = fetch(Settings.api('/allegro/auth-url'), { credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then(d => d.auth_url)
-      .catch(() => null);
+      .then(d => { _setCachedAuthUrl(d.auth_url); return d.auth_url; })
+      .catch(() => _getCachedAuthUrl()); // fall back to stale cache on network error
   }
   _prefetchAllegroAuthUrl();
 
@@ -975,6 +1020,11 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (_loginInProgress) return;
       _loginInProgress = true;
 
+      // Fast path: cached URL → redirect immediately, no spinner needed
+      const cachedUrl = _getCachedAuthUrl();
+      if (cachedUrl) { window.location.href = cachedUrl; return; }
+
+      // Slow path: still waiting for backend
       const origHTML = loginBtn.innerHTML;
       loginBtn.innerHTML = '⏳ Łączenie…';
       loginBtn.style.opacity = '0.65';
@@ -1029,6 +1079,10 @@ window.addEventListener('DOMContentLoaded', async () => {
         // Set-Cookie) can still authenticate subsequent requests via Bearer token.
         const data = await res.json().catch(() => ({}));
         if (data.token) Auth.setToken(data.token);
+        // Cache Allegro token expiry so the UI can inform the user
+        if (data.allegro_expires_at) {
+          try { localStorage.setItem('ae_allegro_expires', data.allegro_expires_at); } catch {}
+        }
       } else {
         const err = await res.json().catch(() => ({}));
         const msg = err.detail || res.status;

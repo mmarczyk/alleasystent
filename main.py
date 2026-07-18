@@ -358,7 +358,12 @@ async def allegro_exchange(body: AllegroExchangeRequest):
     # Return the token in the body so the frontend can store it in localStorage.
     # Safari ITP blocks cross-site Set-Cookie responses, so the cookie alone is
     # insufficient for split deployments (GitHub Pages → Cloud Run).
-    response = JSONResponse({"ok": True, "name": login, "token": session_token})
+    response = JSONResponse({
+        "ok": True,
+        "name": login,
+        "token": session_token,
+        "allegro_expires_at": tokens.expires_at.isoformat(),
+    })
     response.set_cookie(
         "session", session_token,
         httponly=True,
