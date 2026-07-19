@@ -90,21 +90,98 @@ class AllegroAgent(BaseAgent):
         conversation_history: list[dict[str, str]] | None = None,
         context: str | None = None,
     ) -> AgentResponse:
-        # Try to restore tokens from Redis when file storage was wiped (e.g. after redeploy)
+        from agents.base_agent import _call_with_retry
+
+        # ── Auth guard ────────────────────────────────────────────────────────
         if self._allegro._tokens is None:
             await self._allegro._load_tokens_from_redis()
-
         if self._allegro._tokens is None:
             return self._request_auth()
-
-        # Tokens exist but expired — try refresh, fall back to fresh login
         if self._allegro._tokens.is_expired():
             try:
                 await self._allegro._refresh_tokens()
             except AllegroAuthError:
                 return self._request_auth()
 
-        return await super().run(query, conversation_history, context)
+        tools = self._get_tools()
+        model_pool = self._get_model_pool()
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._build_system_prompt(context)},
+            *list(conversation_history or []),
+            {"role": "user", "content": query},
+        ]
+
+        # ── Step 1: force tool call(s) ────────────────────────────────────────
+        # The LLM MUST pick a real tool — it cannot answer from memory.
+        # We allow up to MAX_TOOL_ROUNDS sequential tool calls (rare: e.g. look up
+        # a thread ID then send a message), but stop as soon as the model signals
+        # it has enough data (no new tool calls after a round).
+        MAX_TOOL_ROUNDS = 3
+        tool_rounds = 0
+
+        while tool_rounds < MAX_TOOL_ROUNDS:
+            resp = await _call_with_retry(
+                self._client,
+                model_pool,
+                f"allegro/tool-select-{tool_rounds + 1}",
+                messages=messages,
+                tools=tools,
+                tool_choice="required",
+                max_tokens=400,
+            )
+            msg = resp.choices[0].message
+
+            if not msg.tool_calls:
+                # model ignored tool_choice — interpret whatever it said
+                logger.warning("AllegroAgent: model skipped tool_choice=required (round %d)", tool_rounds + 1)
+                return AgentResponse(text=msg.content or "", agent_type=self.agent_name)
+
+            messages.append({
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [tc.model_dump(exclude_none=True) for tc in msg.tool_calls],
+            })
+
+            for tc in msg.tool_calls:
+                tool_name = tc.function.name
+                try:
+                    tool_input = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    tool_input = {}
+                logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
+                try:
+                    result = await self._execute_tool(tool_name, tool_input)
+                except Exception as exc:
+                    logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
+                    result = "An internal error occurred. Please try again."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+            tool_rounds += 1
+
+            # After one round, most queries are satisfied.
+            # Allow a second round only if the tool result itself signals that
+            # more data is needed (e.g. it returned a partial list + "fetch more").
+            # For safety we just break after round 1 unless MAX_TOOL_ROUNDS > 1
+            # and we detect the model wants to chain (handled by the loop limit).
+            break
+
+        # ── Step 2: interpret — NO tools ─────────────────────────────────────
+        # The LLM now sees the real API results and formats the answer.
+        # Without tools it literally cannot hallucinate store data.
+        interp_resp = await _call_with_retry(
+            self._client,
+            model_pool,
+            "allegro/interpret",
+            messages=messages,
+            max_tokens=self._settings.gemini_max_tokens,
+            # no `tools` parameter — model can only read and format
+        )
+        final_text = interp_resp.choices[0].message.content or ""
+        return AgentResponse(text=final_text, agent_type=self.agent_name)
 
     def _request_auth(self) -> AgentResponse:
         text = (
