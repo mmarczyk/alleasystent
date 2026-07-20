@@ -59,6 +59,16 @@ const AppUpdater = (() => {
 })();
 
 // ── Auth check ────────────────────────────────────
+// ── Container wake-up ────────────────────────────
+// Fire a lightweight /health ping that starts the container without blocking
+// anything. Call this as early as possible so the container is warm by the
+// time the user's first real API request lands.
+function wakeContainer() {
+  fetch(Settings.api('/health'), { credentials: 'include' })
+    .then(r => AppUpdater.check(r.headers))
+    .catch(() => {});
+}
+
 function _applyAuthUser(user) {
   window._currentUser = user;
   document.getElementById('login-overlay').style.display = 'none';
@@ -70,42 +80,45 @@ function _applyAuthUser(user) {
 }
 
 async function checkAuth() {
-  // Fast path: the JWT is already in localStorage and contains exp + name.
-  // Decode it client-side (base64, no signature check needed — we trust our own LS)
-  // and show the app immediately without a network round-trip.
-  // A background request to /auth/me still runs to catch token revocation;
-  // if it returns 401 we force re-login.
+  // ── Fast path: valid JWT in localStorage ──────────────────────────────────
+  // Decode the payload (base64, no network) — exp and name are embedded.
+  // Show the app immediately, then fire /health to wake the container so
+  // it is ready for the first real chat/API request.
   const token = Auth.getToken();
   if (token) {
     try {
       const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       if (payload.exp > Date.now() / 1000 + 30) {
         _applyAuthUser({ sub: payload.sub, name: payload.name || payload.sub });
-        // Background verify — only reacts if server says 401
-        fetch(Settings.api('/auth/me'), { credentials: 'include', headers: Auth.headers() })
-          .then(r => { AppUpdater.check(r.headers); if (r.status === 401) { Auth.clearToken(); location.reload(); } })
-          .catch(() => {});
+        wakeContainer();   // warm the container in the background — don't wait
+        return true;
+      }
+    } catch {}
+    // Token present but expired or malformed — clear it
+    Auth.clearToken();
+  }
+
+  // ── No valid token ────────────────────────────────────────────────────────
+  // Split deployment (GitHub Pages → Cloud Run, backendUrl set): JWT is the
+  // only auth mechanism — no JWT means not logged in, show login immediately.
+  //
+  // Same-origin deployment (no backendUrl): session cookie might still be valid
+  // (e.g. server-side /allegro/callback flow) — verify once via /auth/me.
+  if (!Settings.get('backendUrl')) {
+    try {
+      const res = await fetch('/auth/me', { credentials: 'include' });
+      if (res.ok) {
+        const user = await res.json();
+        // Persist the JWT so next visit is instant
+        // (server doesn't re-issue JWT here, just confirm the cookie)
+        _applyAuthUser(user);
+        wakeContainer();
         return true;
       }
     } catch {}
   }
-  // Slow path: no valid token in LS — hit the server (uses cookie on same-origin)
-  try {
-    const res = await fetch(Settings.api('/auth/me'), {
-      credentials: 'include',
-      headers: Auth.headers(),
-    });
-    AppUpdater.check(res.headers);
-    if (res.status === 401) {
-      document.getElementById('login-overlay').style.display = 'flex';
-      return false;
-    }
-    _applyAuthUser(await res.json());
-    return true;
-  } catch {
-    document.getElementById('login-overlay').style.display = 'flex';
-    return false;
-  }
+  document.getElementById('login-overlay').style.display = 'flex';
+  return false;
 }
 
 // ── Session token (Safari ITP workaround) ────────
@@ -983,7 +996,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // time the user visits.  The HMAC-signed state has no server-side expiry so
   // caching for a few minutes is safe.
   const _AUTH_URL_LS_KEY = 'ae_allegro_auth_url';
-  const _AUTH_URL_TTL_MS = 4 * 60 * 1000;
+  const _AUTH_URL_TTL_MS = 20 * 60 * 1000; // 20 min — state is stateless HMAC, safe to cache longer
 
   function _getCachedAuthUrl() {
     try {
@@ -1020,9 +1033,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (_loginInProgress) return;
       _loginInProgress = true;
 
-      // Fast path: cached URL → redirect immediately, no spinner needed
+      // Fast path: cached URL → fire wake-up ping + redirect immediately (no spinner)
       const cachedUrl = _getCachedAuthUrl();
-      if (cachedUrl) { window.location.href = cachedUrl; return; }
+      if (cachedUrl) {
+        wakeContainer(); // start warming the container while user is on Allegro's page
+        window.location.href = cachedUrl;
+        return;
+      }
 
       // Slow path: still waiting for backend
       const origHTML = loginBtn.innerHTML;
