@@ -61,6 +61,8 @@ class AllegroAgent(BaseAgent):
         "summarize entries by type. Each 'Prowizja od sprzedaży' for a different product is a "
         "SEPARATE entry and must be shown as a separate row. Showing 2 rows when there are 5 "
         "entries is WRONG. If the tool says '5 wpisów', show 5 rows, not 2. "
+        "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order → get_order_invoice_data\n"
+        "• All pending invoices with NIP/address → get_orders_pending_invoice (includes address automatically)\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit → get_sales_summary. "
@@ -881,9 +883,14 @@ class AllegroAgent(BaseAgent):
             )
             if not orders:
                 return "Brak zamówień wymagających wystawienia faktury."
+            # Fetch invoice address data for all orders in parallel
+            inv_results = await asyncio.gather(
+                *[self._allegro.get_order_invoice_data(o.order_id) for o in orders],
+                return_exceptions=True,
+            )
             header = f"**Zamówień bez faktury: {len(orders)}**\n"
             blocks = []
-            for o in orders:
+            for o, inv in zip(orders, inv_results):
                 items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
                 extra = [
                     f"E-mail: {o.buyer_email}",
@@ -891,6 +898,15 @@ class AllegroAgent(BaseAgent):
                     f"Produkty: {items_str}",
                     "**Faktura: niewystawiona**",
                 ]
+                if isinstance(inv, dict) and inv.get("required"):
+                    if inv.get("company_name"):
+                        extra.append(f"Firma: {inv['company_name']}")
+                    if inv.get("vat_id"):
+                        extra.append(f"NIP: {inv['vat_id']}")
+                    if inv.get("first_name") or inv.get("last_name"):
+                        extra.append(f"Nabywca: {inv.get('first_name', '')} {inv.get('last_name', '')}".strip())
+                    if inv.get("street"):
+                        extra.append(f"Adres: {inv['street']}, {inv.get('zip_code', '')} {inv.get('city', '')}".strip(", "))
                 blocks.append(self._order_block(o, extra_lines=extra))
             return header + "\n\n".join(blocks)
 
