@@ -435,6 +435,27 @@ class AllegroAgent(BaseAgent):
                 f"{billing_str}"
             )
 
+        if tool_name == "get_order_invoice_data":
+            inv = await self._allegro.get_order_invoice_data(tool_input["order_id"])
+            if inv.get("dontWant"):
+                return f"Zamówienie {tool_input['order_id']}: kupujący zrezygnował z faktury."
+            if not inv.get("required"):
+                return f"Zamówienie {tool_input['order_id']}: kupujący nie zaznaczył prośby o fakturę."
+            lines = [f"Dane do faktury dla zamówienia {tool_input['order_id']}:"]
+            if inv.get("company_name"):
+                lines.append(f"Firma: {inv['company_name']}")
+            if inv.get("vat_id"):
+                lines.append(f"NIP: {inv['vat_id']}")
+            if inv.get("first_name") or inv.get("last_name"):
+                lines.append(f"Nabywca: {inv.get('first_name', '')} {inv.get('last_name', '')}".strip())
+            if inv.get("street"):
+                lines.append(f"Ulica: {inv['street']}")
+            if inv.get("zip_code") or inv.get("city"):
+                lines.append(f"Kod pocztowy / miasto: {inv.get('zip_code', '')} {inv.get('city', '')}".strip())
+            if inv.get("country_code"):
+                lines.append(f"Kraj: {inv['country_code']}")
+            return "\n".join(lines)
+
         if tool_name == "get_active_offers":
             name_filter = tool_input.get("name")
             if name_filter:

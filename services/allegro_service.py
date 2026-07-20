@@ -548,6 +548,26 @@ class AllegroService:
             invoice_required=invoice_required,
         )
 
+    async def get_order_invoice_data(self, order_id: str) -> dict[str, Any]:
+        """Return the full invoice address block from an order's checkout form."""
+        data = await self._get(f"/order/checkout-forms/{order_id}")
+        invoice = data.get("invoice") or {}
+        address = invoice.get("address") or {}
+        company = address.get("company") or {}
+        natural = address.get("naturalPerson") or {}
+        return {
+            "required": bool(invoice.get("required")),
+            "dontWant": bool(invoice.get("dontWant")),
+            "company_name": company.get("name", ""),
+            "vat_id": company.get("vatId", ""),
+            "first_name": natural.get("firstName", ""),
+            "last_name": natural.get("lastName", ""),
+            "street": address.get("street", ""),
+            "city": address.get("city", ""),
+            "zip_code": address.get("zipCode", ""),
+            "country_code": address.get("countryCode", ""),
+        }
+
     async def get_order_invoices(self, order_id: str) -> list[dict[str, Any]]:
         cached = self._invoice_cache.get(order_id)
         if cached is not None:

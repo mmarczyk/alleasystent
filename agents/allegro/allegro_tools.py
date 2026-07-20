@@ -454,6 +454,28 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_order_invoice_data",
+            "description": (
+                "Fetch the full invoice/billing address for a specific order — "
+                "company name, NIP/VAT ID, buyer's full name (for private persons), "
+                "street, city, ZIP code, and country. "
+                "Use this when the user asks for data needed to issue a VAT invoice (faktura VAT): "
+                "'dane do faktury', 'NIP nabywcy', 'adres do faktury', 'dane firmy z zamówienia', "
+                "'wystaw fakturę dla zamówienia X'. "
+                "Always call this BEFORE drafting or describing invoice data for a specific order."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
+                },
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "disable_invoice_monitoring",
             "description": (
                 "Show a button to disable automatic VAT invoice monitoring in the browser. "
