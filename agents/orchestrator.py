@@ -336,23 +336,35 @@ class Orchestrator:
         """Classify query into (data_source, output_format) using full conversation context.
 
         Strategy:
-          1. If query is long and self-contained: try keywords for both dimensions.
-             Only skip LLM when BOTH are found — guarantees no ambiguity.
-          2. Everything else (short queries, follow-ups, ambiguous): single LLM call
-             with last 8 turns of history. The LLM understands context like a human.
+          1. Always compute a keyword-based source/format guess. Domain nouns like
+             "faktur" or "zamówien" are unambiguous regardless of sentence length.
+          2. If the query is long/self-contained AND both dimensions match keywords,
+             skip the LLM entirely (cheap fast-path).
+          3. Otherwise call the LLM — but never let it silently override an
+             unambiguous keyword match. The classifier occasionally defaults an
+             obvious topic to "none" (flaky output, timeout, parse edge case),
+             which used to leak straight to the user as "I don't have access to
+             your data" even though the query clearly named e.g. invoices.
         """
         known_sources = list(self._KNOWN_SOURCES)
+        kw_source = self._keyword_source(query)
+        kw_format = self._keyword_format(query)
 
-        if self._is_self_contained(query):
-            kw_source = self._keyword_source(query)
-            kw_format = self._keyword_format(query)
-            if kw_source is not None and kw_format is not None:
-                logger.info("Keyword fast-path: src=%s fmt=%s | %.60s", kw_source, kw_format, query)
-                return kw_source, kw_format
-            # One dimension known — LLM still sees context for the other
-            # (fall through to LLM which is smarter and costs only ~30 tokens)
+        if self._is_self_contained(query) and kw_source is not None and kw_format is not None:
+            logger.info("Keyword fast-path: src=%s fmt=%s | %.60s", kw_source, kw_format, query)
+            return kw_source, kw_format
 
         source, fmt = await self._classify_with_llm(query, history, known_sources)
+
+        if kw_source is not None and source != kw_source:
+            logger.warning(
+                "LLM source (%s) overridden by keyword match (%s) | %.60s",
+                source, kw_source, query,
+            )
+            source = kw_source
+        if kw_format is not None and fmt != kw_format:
+            fmt = kw_format
+
         logger.info("LLM routing: src=%s fmt=%s | %.60s", source, fmt, query)
         return source, fmt
 
