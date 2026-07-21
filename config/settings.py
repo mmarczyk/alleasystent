@@ -23,9 +23,10 @@ class Settings(BaseSettings):
     #   gemini-3.5-flash      GA stable, released 2026-05-19 — primary
     #   gemini-3.5-flash-lite GA stable — fastest/cheapest in the 3.5 family, fast model default
     #   gemini-3.1-flash-lite GA stable since 2026-05-07 — extra fallback
-    #   gemini-2.5-flash      RETIRED EARLY — returning 404 since 2026-07-09,
-    #                         well ahead of the announced 2026-10-16 shutdown — do not use
-    #   gemini-2.5-flash-lite RETIRED EARLY alongside gemini-2.5-flash — do not use
+    #   gemini-2.5-flash      reported returning 404 since 2026-07-09, well ahead of the
+    #                         announced 2026-10-16 shutdown — kept as a low-priority fallback;
+    #                         harmless to keep since a 404 just rotates to the next model
+    #   gemini-2.5-flash-lite same situation as gemini-2.5-flash — kept as low-priority fallback
     #   gemini-2.0-flash      SHUT DOWN 2026-06 — do not use
     gemini_model_pool: str = ""
     gemini_model_fast_pool: str = ""
@@ -34,6 +35,8 @@ class Settings(BaseSettings):
         "gemini-3.5-flash",       # primary: GA stable since 2026-05-19
         "gemini-3.5-flash-lite",  # fallback: fastest/cheapest in the 3.5 family
         "gemini-3.1-flash-lite",  # fallback: GA stable since 2026-05-07
+        "gemini-2.5-flash",       # low-priority fallback: reportedly retiring early
+        "gemini-2.5-flash-lite",  # low-priority fallback: reportedly retiring early
     ]
 
     def model_pool(self) -> list[str]:
