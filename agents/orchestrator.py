@@ -214,7 +214,9 @@ class Orchestrator:
         # Classify on both dimensions
         try:
             data_source, output_format = await self._classify(
-                message.text, session.to_anthropic_messages()
+                message.text,
+                session.to_anthropic_messages(),
+                last_source=session.metadata.get("last_data_source"),
             )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
             logger.error("LLM API error during classification: %s", exc)
@@ -243,6 +245,11 @@ class Orchestrator:
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
                 agent_type=data_source,
             )
+
+        # Remember what this turn was about so a keyword-less follow-up
+        # ("sprawdź jeszcze raz") can anchor to it instead of defaulting to none.
+        session.metadata["last_data_source"] = data_source
+        session.metadata["last_output_format"] = output_format
 
         # Persist conversation
         session.add_message(MessageRole.USER, message.text)
@@ -338,6 +345,7 @@ class Orchestrator:
         self,
         query: str,
         history: list[dict[str, str]],
+        last_source: str | None = None,
     ) -> tuple[str, str]:
         """Classify query into (data_source, output_format) using full conversation context.
 
@@ -351,6 +359,10 @@ class Orchestrator:
              obvious topic to "none" (flaky output, timeout, parse edge case),
              which used to leak straight to the user as "I don't have access to
              your data" even though the query clearly named e.g. invoices.
+          4. Keyword-less follow-ups ("sprawdź jeszcze raz", "spróbuj ponownie")
+             that the LLM defaults to "none" almost always mean "continue the
+             previous topic", not a genuine switch to chitchat — anchor to the
+             previous turn's data source instead of trusting that default.
         """
         known_sources = list(self._KNOWN_SOURCES)
         kw_source = self._keyword_source(query)
@@ -370,6 +382,19 @@ class Orchestrator:
             source = kw_source
         if kw_format is not None and fmt != kw_format:
             fmt = kw_format
+
+        if (
+            source == "none"
+            and kw_source is None
+            and last_source
+            and last_source != "none"
+            and not self._is_self_contained(query)
+        ):
+            logger.warning(
+                "Keyword-less follow-up classified as none — inheriting last source %s | %.60s",
+                last_source, query,
+            )
+            source = last_source
 
         logger.info("LLM routing: src=%s fmt=%s | %.60s", source, fmt, query)
         return source, fmt
