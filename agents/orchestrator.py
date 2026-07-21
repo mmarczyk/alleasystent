@@ -300,7 +300,13 @@ class Orchestrator:
                 self._client,
                 self._settings.model_fast_pool(),
                 "orchestrator/classify",
-                max_tokens=30,
+                # Thinking-capable models (gemini-3.5-flash, 2.5-flash) spend part of
+                # max_tokens on invisible reasoning before the visible "source|format"
+                # answer — 30 tokens left no room for it, so the visible output was
+                # sometimes empty/truncated. reasoning_effort="none" skips that for
+                # this simple, deterministic task; max_tokens raised as a safety margin.
+                max_tokens=200,
+                reasoning_effort="none",
                 messages=messages,
             )
             raw = (resp.choices[0].message.content or "").strip().lower()
@@ -476,7 +482,11 @@ class Orchestrator:
             self._client,
             self._settings.model_fast_pool(),
             "orchestrator/chitchat",
-            max_tokens=512,
+            # See comment in _classify_with_llm — thinking models can eat the token
+            # budget on invisible reasoning and cut the visible reply off mid-sentence.
+            # Plain chitchat needs no reasoning, so disable it and raise the ceiling.
+            max_tokens=2048,
+            reasoning_effort="none",
             messages=msgs,
         )
         text = resp.choices[0].message.content or "Cześć! W czym mogę pomóc?"
