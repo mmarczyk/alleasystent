@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v40';
+const CACHE = 'alleasystent-v41';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [

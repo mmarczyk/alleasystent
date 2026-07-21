@@ -152,10 +152,10 @@ function renderMarkdown(text) {
 // ── Document Viewer ──────────────────────────────
 // Full-screen tab-based viewer for long responses (> 500 chars).
 const DocViewer = (() => {
-  const _tabs = [];  // [{id, title, content}]
+  const _tabs = [];  // [{id, title, content, kind}]
   let _activeId = null;
   let _nextId = 0;
-  const _registry = {};  // key → content, for "Pełny widok" buttons on existing bubbles
+  const _registry = {};  // key → {content, kind}, for "Pełny widok" buttons on existing bubbles
 
   function _titleFromContent(content) {
     const heading = content.match(/^#{1,3}\s+(.+)/m);
@@ -163,20 +163,21 @@ const DocViewer = (() => {
     return content.replace(/[#*`_[\]]/g, '').trim().slice(0, 60);
   }
 
-  function register(content) {
+  // kind: 'table' | 'dashboard' | 'document' | 'chat' — drives presentation in _render()
+  function register(content, kind) {
     const key = ++_nextId;
-    _registry[key] = content;
+    _registry[key] = { content, kind };
     return key;
   }
 
   function openFromKey(key) {
-    const content = _registry[key];
-    if (content) open(_titleFromContent(content), content);
+    const entry = _registry[key];
+    if (entry) open(_titleFromContent(entry.content), entry.content, entry.kind);
   }
 
-  function open(title, content) {
+  function open(title, content, kind) {
     const id = ++_nextId;
-    _tabs.push({ id, title: (title || _titleFromContent(content)).slice(0, 60), content });
+    _tabs.push({ id, title: (title || _titleFromContent(content)).slice(0, 60), content, kind });
     _activeId = id;
     _render();
     document.getElementById('doc-viewer').classList.remove('hidden');
@@ -223,9 +224,29 @@ const DocViewer = (() => {
     const content = document.getElementById('doc-content');
     if (!content) return;
     content.innerHTML = active ? renderMarkdown(active.content) : '';
+    content.dataset.kind = active?.kind || '';
+    if (active?.kind === 'dashboard') _wrapDashboardSections(content);
     if (typeof hljs !== 'undefined') {
       content.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
     }
+  }
+
+  // Groups each ## (or #) heading and the elements that follow it into a
+  // ".dash-section" card, so a dashboard-format reply reads as distinct
+  // metric blocks instead of a flat wall of prose.
+  function _wrapDashboardSections(container) {
+    const nodes = Array.from(container.children);
+    const frag = document.createDocumentFragment();
+    let section = null;
+    nodes.forEach(node => {
+      if (/^H[12]$/.test(node.tagName)) {
+        section = document.createElement('div');
+        section.className = 'dash-section';
+        frag.appendChild(section);
+      }
+      (section || frag).appendChild(node);
+    });
+    container.appendChild(frag);
   }
 
   function _esc(s) {
@@ -233,7 +254,7 @@ const DocViewer = (() => {
   }
 
   function getContent(key) {
-    return _registry[key] || null;
+    return _registry[key]?.content || null;
   }
 
   return { open, openFromKey, setActive, closeTab, close, copyActive, register, getContent };
@@ -289,21 +310,24 @@ const Store = (() => {
     return active();
   }
 
-  function addMessage(role, content) {
+  function addMessage(role, content, format) {
     const c = active();
     if (!c) return;
-    c.messages.push({ role, content, ts: Date.now() });
+    c.messages.push({ role, content, ts: Date.now(), format });
     if (c.messages.length === 2 && role === 'assistant') {
       c.title = c.messages[0].content.slice(0, 50).replace(/\n/g, ' ');
     }
     save();
   }
 
-  function updateLastMessage(content) {
+  function updateLastMessage(content, format) {
     const c = active();
     if (!c || !c.messages.length) return;
     const last = c.messages[c.messages.length - 1];
-    if (last.role === 'assistant') last.content = content;
+    if (last.role === 'assistant') {
+      last.content = content;
+      if (format) last.format = format;
+    }
     save();
   }
 
@@ -337,7 +361,10 @@ const Backend = (() => {
       throw new Error(err.detail || `HTTP ${res.status}`);
     }
     const data = await res.json();
-    return data.response;
+    // "agent" is "<data_source>:<output_format>", e.g. "allegro_orders:table" —
+    // the format half drives how the full-view doc viewer presents the reply.
+    const format = (data.agent || '').split(':')[1] || 'chat';
+    return { text: data.response, format };
   }
 
   async function query(message, sessionId) {
@@ -794,7 +821,7 @@ const Chat = (() => {
     }
 
     c.messages.forEach((m, i) => {
-      const el = buildBubble(m.role, m.content, m.ts, i);
+      const el = buildBubble(m.role, m.content, m.ts, i, m.format);
       container.appendChild(el);
       _applyMonitoringState(el);
     });
@@ -853,7 +880,7 @@ const Chat = (() => {
     return `📊 Tabela — ${dataRows} ${noun}. Kliknij „Pełny widok”, aby zobaczyć szczegóły.`;
   }
 
-  function buildBubble(role, content, ts, index) {
+  function buildBubble(role, content, ts, index, format) {
     const isUser = role === 'user';
     const isLong = !isUser && content.length > 500;
     const div = document.createElement('div');
@@ -864,7 +891,7 @@ const Chat = (() => {
     const time = ts ? new Date(ts).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '';
 
     // Register long bot responses so "Pełny widok" button can re-open the doc viewer
-    const docKey = isLong ? DocViewer.register(content) : null;
+    const docKey = isLong ? DocViewer.register(content, format) : null;
 
     // Long responses: show a compact preview in the bubble — full content is in the doc viewer
     let bubbleHtml;
@@ -919,11 +946,11 @@ const Chat = (() => {
     return document.getElementById('waiting-content');
   }
 
-  function finalizeWaitingBubble(fullText, ts) {
+  function finalizeWaitingBubble(fullText, ts, format) {
     const bubble = document.getElementById('waiting-bubble');
     if (!bubble) return;
     const idx = Store.active()?.messages.length - 1;
-    const replacement = buildBubble('assistant', fullText, ts, idx);
+    const replacement = buildBubble('assistant', fullText, ts, idx, format);
     bubble.replaceWith(replacement);
     _applyMonitoringState(replacement);
     if (typeof hljs !== 'undefined') {
@@ -963,11 +990,14 @@ const Chat = (() => {
     const sessionId = Store.active().id;
     const ts = Date.now();
     let fullText = '';
+    let fullFormat = 'chat';
 
     try {
       Store.addMessage('assistant', '');
-      fullText = await Backend.query(msgText, sessionId);
-      Store.updateLastMessage(fullText);
+      const result = await Backend.query(msgText, sessionId);
+      fullText = result.text;
+      fullFormat = result.format;
+      Store.updateLastMessage(fullText, fullFormat);
     } catch (err) {
       fullText = `**Błąd:** ${err.message}`;
       const contentEl = document.getElementById('waiting-content');
@@ -977,11 +1007,8 @@ const Chat = (() => {
     } finally {
       _waiting = false;
       document.getElementById('btn-send').disabled = false;
-      finalizeWaitingBubble(fullText, ts);
+      finalizeWaitingBubble(fullText, ts, fullFormat);
       renderSidebar();
-      if (fullText.length > 500 && !fullText.startsWith('**Błąd:**')) {
-        DocViewer.open(msgText.slice(0, 60), fullText);
-      }
       if (typeof hljs !== 'undefined') {
         document.querySelectorAll('#messages pre code').forEach(b => hljs.highlightElement(b));
       }

@@ -545,6 +545,24 @@ select option { background: var(--bg2); }
 }
 .doc-content tbody tr:last-child td { border-bottom: none; }
 .doc-content tbody tr:nth-child(even) { background: rgba(255,255,255,.025); }
+
+/* Table-format replies: wider canvas, sticky header for long lists */
+.doc-content[data-kind="table"] { max-width: 1200px; }
+.doc-content[data-kind="table"] thead th { position: sticky; top: 0; z-index: 1; }
+
+/* Dashboard-format replies: group each ## section into a distinct card */
+.doc-content[data-kind="dashboard"] .dash-section {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1.1rem 1.4rem; margin: 0 0 1rem;
+}
+.doc-content[data-kind="dashboard"] .dash-section:last-child { margin-bottom: 0; }
+.doc-content[data-kind="dashboard"] .dash-section h1,
+.doc-content[data-kind="dashboard"] .dash-section h2 {
+  margin-top: 0; border-bottom: none; padding-bottom: 0;
+}
+.doc-content[data-kind="dashboard"] .dash-section strong {
+  font-size: 1.15em; color: var(--accent);
+}
 .doc-content tbody tr:hover { background: rgba(99,102,241,.07); }
 
 /* Button in chat bubble to open doc viewer */
