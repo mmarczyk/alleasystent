@@ -95,6 +95,10 @@ settings = get_settings()
 # detect backend redeployments and prompt the user to reload for new assets.
 _SERVER_INSTANCE = _uuid.uuid4().hex[:12]
 
+# Git commit SHA baked into the image at build time (see Dockerfile /
+# .github/workflows/deploy-backend.yml). Falls back to "dev" for local runs.
+_GIT_SHA = os.environ.get("GIT_SHA", "dev")
+
 app = FastAPI(
     title="AllEasystent",
     description="AI assistant for e-store owners — Allegro + Facebook Messenger",
@@ -144,7 +148,12 @@ _orchestrator = Orchestrator()
 
 @app.get("/health", tags=["System"])
 async def health() -> dict:
-    return {"status": "ok", "env": settings.app_env}
+    return {
+        "status": "ok",
+        "env": settings.app_env,
+        "version": app.version,
+        "git_sha": _GIT_SHA,
+    }
 
 
 @app.get("/debug/redis", tags=["System"])

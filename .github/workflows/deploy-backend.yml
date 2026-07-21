@@ -57,6 +57,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
             ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:${{ github.sha }}
             ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:latest
