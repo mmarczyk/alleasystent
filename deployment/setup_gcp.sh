@@ -82,7 +82,8 @@ for SECRET in \
   fb-app-secret \
   fb-verify-token \
   allegro-client-id \
-  allegro-client-secret; do
+  allegro-client-secret \
+  infakt-api-key; do
   gcloud secrets create "$SECRET" \
     --replication-policy=automatic \
     --project="$PROJECT_ID" 2>/dev/null || echo "  $SECRET already exists"

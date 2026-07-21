@@ -75,6 +75,6 @@ jobs:
             --cpu=1 \
             --min-instances=0 \
             --max-instances=10 \
-            --update-secrets=GOOGLE_API_KEY=google-api-key:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest \
+            --update-secrets=GOOGLE_API_KEY=google-api-key:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest,INFAKT_API_KEY=infakt-api-key:latest \
             --remove-secrets=FACEBOOK_PAGE_ACCESS_TOKEN,FACEBOOK_APP_SECRET \
             --update-env-vars=APP_ENV=production,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},RAG_BACKEND=chromadb,FRONTEND_URL=${{ vars.FRONTEND_URL }}
