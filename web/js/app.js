@@ -798,6 +798,33 @@ const Chat = (() => {
     }
   }
 
+  // Table-format responses put the markdown table first and any summary
+  // sentence last — slicing the first 220 raw chars just shows garbled
+  // "| Zamówienie | Kupujący | ... | :…" table syntax. Prefer the trailing
+  // summary sentence, or a row-count label, over dumping the table itself.
+  function _tablePreview(content) {
+    const lines = content.split('\n');
+    const isTableLine = (l) => /^\s*\|.*\|\s*$/.test(l);
+    const isSepLine = (l) => /^\s*\|[\s:|-]+\|\s*$/.test(l);
+    let lastTableLineIdx = -1;
+    let dataRows = 0;
+    lines.forEach((l, i) => {
+      if (isTableLine(l)) {
+        lastTableLineIdx = i;
+        if (!isSepLine(l)) dataRows++;
+      }
+    });
+    if (lastTableLineIdx === -1) return null;
+    dataRows = Math.max(dataRows - 1, 0); // exclude header row
+    const trailing = lines.slice(lastTableLineIdx + 1).join(' ')
+      .replace(/[#*`_[\]]/g, '').trim();
+    if (trailing) {
+      return trailing.slice(0, 220) + (trailing.length > 220 ? '…' : '');
+    }
+    const noun = dataRows === 1 ? 'wiersz' : 'wierszy';
+    return `📊 Tabela — ${dataRows} ${noun}. Kliknij „Pełny widok”, aby zobaczyć szczegóły.`;
+  }
+
   function buildBubble(role, content, ts, index) {
     const isUser = role === 'user';
     const isLong = !isUser && content.length > 500;
@@ -814,8 +841,14 @@ const Chat = (() => {
     // Long responses: show a compact preview in the bubble — full content is in the doc viewer
     let bubbleHtml;
     if (isLong) {
-      const preview = content.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
-      const previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
+      const tablePreview = _tablePreview(content);
+      let previewShort;
+      if (tablePreview !== null) {
+        previewShort = escHtml(tablePreview);
+      } else {
+        const preview = content.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
+        previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
+      }
       bubbleHtml = `<p style="color:var(--text-muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>`;
     } else {
       bubbleHtml = isUser ? escHtml(content).replace(/\n/g, '<br>') : renderMarkdown(content);
