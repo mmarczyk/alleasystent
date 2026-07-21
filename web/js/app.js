@@ -138,6 +138,17 @@ const Auth = (() => {
   return { getToken, setToken, clearToken, headers };
 })();
 
+// ── Shared render helpers ─────────────────────────
+// Global (not nested in Chat/DocViewer) since both modules need them.
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderMarkdown(text) {
+  if (typeof marked === 'undefined') return escHtml(text).replace(/\n/g, '<br>');
+  return marked.parse(text);
+}
+
 // ── Document Viewer ──────────────────────────────
 // Full-screen tab-based viewer for long responses (> 500 chars).
 const DocViewer = (() => {
@@ -866,7 +877,10 @@ const Chat = (() => {
         const preview = content.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
         previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
       }
-      bubbleHtml = `<p style="color:var(--text-muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>`;
+      bubbleHtml = `<p style="color:var(--text-muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>` +
+        `<a href="javascript:void(0)" onclick="DocViewer.openFromKey(${docKey})" ` +
+        `style="display:inline-block;font-size:.85rem;font-weight:600;color:var(--accent);text-decoration:none">` +
+        `📄 Zobacz pełną odpowiedź →</a>`;
     } else {
       bubbleHtml = isUser ? escHtml(content).replace(/\n/g, '<br>') : renderMarkdown(content);
     }
@@ -915,15 +929,6 @@ const Chat = (() => {
     if (typeof hljs !== 'undefined') {
       replacement.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
     }
-  }
-
-  function renderMarkdown(text) {
-    if (typeof marked === 'undefined') return escHtml(text).replace(/\n/g, '<br>');
-    return marked.parse(text);
-  }
-
-  function escHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   function scrollBottom() {
