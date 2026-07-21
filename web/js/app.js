@@ -309,7 +309,7 @@ const Store = (() => {
 
 // ── Backend API ──────────────────────────────────
 const Backend = (() => {
-  async function query(message, sessionId) {
+  async function _doQuery(message, sessionId) {
     const res = await fetch(Settings.api('/query'), {
       method: 'POST',
       credentials: 'include',
@@ -327,6 +327,23 @@ const Backend = (() => {
     }
     const data = await res.json();
     return data.response;
+  }
+
+  async function query(message, sessionId) {
+    try {
+      return await _doQuery(message, sessionId);
+    } catch (err) {
+      // fetch() itself rejects with a TypeError ("Load failed" / "Failed to
+      // fetch") on network-level failures — as opposed to an HTTP error
+      // response, which is thrown as a plain Error above. This is the
+      // classic symptom of racing a Cloud Run cold start (container scaled
+      // to zero, min-instances=0): the very first request after opening the
+      // app can hit the instance before it's ready. One retry after a short
+      // delay is usually enough for the container to be warm.
+      if (!(err instanceof TypeError)) throw err;
+      await new Promise(r => setTimeout(r, 2500));
+      return await _doQuery(message, sessionId);
+    }
   }
   return { query };
 })();
