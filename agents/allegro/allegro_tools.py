@@ -476,6 +476,37 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "issue_pending_invoices",
+            "description": (
+                "Actually CREATE/ISSUE VAT invoices in the seller's inFakt account for orders "
+                "that need one and don't have one yet (for the given month, defaults to current). "
+                "Use when the user explicitly asks to ISSUE/CREATE invoices — "
+                "'wystaw faktury', 'wystaw brakujące faktury', 'wystaw fakturę dla zamówienia X', "
+                "'utwórz faktury za ten miesiąc' — as opposed to just listing which orders need one "
+                "(use get_orders_pending_invoice for a read-only list, or get_order_invoice_data for "
+                "just the billing address of one order). "
+                "This creates real, numbered invoices in inFakt — it is not easily reversible. "
+                "Returns a share link per created invoice for manual review in inFakt (the invoice "
+                "still needs to be checked there — this tool does not generate or store a PDF)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "month": {
+                        "type": "integer",
+                        "description": "Month number (1–12). Defaults to current month.",
+                    },
+                    "year": {
+                        "type": "integer",
+                        "description": "4-digit year. Defaults to current year.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "disable_invoice_monitoring",
             "description": (
                 "Show a button to disable automatic VAT invoice monitoring in the browser. "

@@ -61,8 +61,12 @@ class AllegroAgent(BaseAgent):
         "summarize entries by type. Each 'Prowizja od sprzedaży' for a different product is a "
         "SEPARATE entry and must be shown as a separate row. Showing 2 rows when there are 5 "
         "entries is WRONG. If the tool says '5 wpisów', show 5 rows, not 2. "
-        "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order → get_order_invoice_data\n"
-        "• All pending invoices with NIP/address → get_orders_pending_invoice (includes address automatically)\n"
+        "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order (no issuance verb) → get_order_invoice_data\n"
+        "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'brakujące faktury' "
+        "(read-only list, nothing created) → get_orders_pending_invoice (includes address automatically)\n"
+        "• ISSUE/CREATE the invoice(s) — 'wystaw fakturę/faktury', 'wystaw brakujące faktury', "
+        "'utwórz fakturę dla zamówienia X' → issue_pending_invoices. This is a REAL action that creates "
+        "invoices in inFakt — call it directly and report the result, do not just describe the pending list.\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit → get_sales_summary. "
@@ -342,6 +346,45 @@ class AllegroAgent(BaseAgent):
             lines.extend(f"- {l}" for l in extra_lines)
         lines.append(f"- Link: {link}")
         return "\n".join(lines)
+
+    async def _issue_pending_invoices(self, month: int | None, year: int | None) -> str:
+        """Actually create VAT invoices in inFakt for orders that need one and lack one.
+
+        Sequential on purpose — this creates real, numbered invoices in an
+        external accounting system, so it deliberately doesn't hammer that
+        API with concurrent writes the way read-only Allegro calls do.
+        """
+        from services.infakt_service import (
+            InfaktAPIError,
+            InfaktService,
+            InfaktTaskError,
+            build_invoice_payload,
+        )
+
+        orders = await self._allegro.get_orders_needing_invoice(month=month, year=year)
+        if not orders:
+            return "Brak zamówień wymagających wystawienia faktury."
+
+        infakt = InfaktService.get_instance()
+        is_production = self._settings.is_production
+        lines = []
+        for o in orders:
+            try:
+                address = await self._allegro.get_order_invoice_data(o.order_id)
+                payload = build_invoice_payload(o, address, is_production)
+                status = await infakt.create_invoice(payload)
+                link = await infakt.get_share_link(status["invoice_uuid"])
+                lines.append(f"✅ Zamówienie `{o.order_id}` ({o.buyer_login}): faktura wystawiona — {link}")
+            except (InfaktAPIError, InfaktTaskError, TimeoutError) as exc:
+                logger.error("issue_pending_invoices: order %s failed: %s", o.order_id, exc)
+                lines.append(f"❌ Zamówienie `{o.order_id}` ({o.buyer_login}): błąd — {exc}")
+            except Exception:
+                logger.exception("issue_pending_invoices: unexpected error for order %s", o.order_id)
+                lines.append(f"❌ Zamówienie `{o.order_id}` ({o.buyer_login}): nieoczekiwany błąd")
+
+        header = f"**Przetworzono {len(orders)} zamówień bez faktury:**\n"
+        footer = "\n\nKażdą fakturę warto zweryfikować w inFakt przed wysłaniem do kupującego."
+        return header + "\n".join(lines) + footer
 
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
@@ -909,6 +952,12 @@ class AllegroAgent(BaseAgent):
                         extra.append(f"Adres: {inv['street']}, {inv.get('zip_code', '')} {inv.get('city', '')}".strip(", "))
                 blocks.append(self._order_block(o, extra_lines=extra))
             return header + "\n\n".join(blocks)
+
+        if tool_name == "issue_pending_invoices":
+            return await self._issue_pending_invoices(
+                month=tool_input.get("month"),
+                year=tool_input.get("year"),
+            )
 
         if tool_name == "suggest_order_monitoring":
             return (

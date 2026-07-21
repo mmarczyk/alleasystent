@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # Point ALLEGRO_API_URL to a mock server to run fully offline.
     allegro_mock_token: str = ""
 
+    # ── inFakt (invoicing) ───────────────────────────────────────────────────
+    # Single API key tied to the store owner's own inFakt account — store in
+    # GCP Secret Manager in production, same pattern as allegro_client_secret.
+    infakt_api_key: str = ""
+    infakt_api_url: str = "https://api.infakt.pl/api/v3"
+
     # ── Split deployment ──────────────────────────────────────────────────────
     # Public URL of the GitHub Pages frontend, e.g. https://user.github.io/alleasystent
     # Leave empty for all-in-one deployment (Cloud Run / Railway serving web/).
