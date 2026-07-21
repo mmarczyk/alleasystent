@@ -37,6 +37,12 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # Copy application source (only invalidates layers below this line)
 COPY . .
 
+# Git commit SHA for the running image — surfaced via /health (backend) and
+# window.__FRONTEND_VERSION__ (frontend, all-in-one deployment).
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
+RUN echo "window.__FRONTEND_VERSION__ = '${GIT_SHA}';" >> web/config.js
+
 RUN mkdir -p /app/data/chromadb
 
 # Non-root user for security

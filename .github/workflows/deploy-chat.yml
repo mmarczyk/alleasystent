@@ -38,15 +38,17 @@ jobs:
           curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" \
             -o web/css/vendor/github-dark.min.css
 
-      # Inject Cloud Run backend URL into config.js.
+      # Inject Cloud Run backend URL and this deploy's commit SHA into config.js.
       # Set BACKEND_URL as a GitHub Actions variable (repo → Settings → Variables):
       #   BACKEND_URL = https://alleasystent-<hash>-ew.a.run.app
       # Leave empty to keep same-origin mode (all-in-one deployment).
-      - name: Inject backend URL
+      - name: Inject backend URL and frontend version
         env:
           BACKEND_URL: ${{ vars.BACKEND_URL }}
+          GIT_SHA: ${{ github.sha }}
         run: |
           echo "window.__BACKEND_URL__ = '${BACKEND_URL}';" > web/config.js
+          echo "window.__FRONTEND_VERSION__ = '${GIT_SHA}';" >> web/config.js
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

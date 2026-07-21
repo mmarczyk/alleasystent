@@ -58,6 +58,21 @@ const AppUpdater = (() => {
   return { check, reload, showBanner: _showBanner };
 })();
 
+// ── Version info ──────────────────────────────────
+let _backendVersion = null;
+
+function _shortVersion(v) {
+  return v && v.length > 7 ? v.slice(0, 7) : (v || 'dev');
+}
+
+function updateVersionInfo() {
+  const el = document.getElementById('version-info');
+  if (!el) return;
+  const fe = _shortVersion(window.__FRONTEND_VERSION__);
+  const be = _backendVersion ? _shortVersion(_backendVersion) : '…';
+  el.textContent = `Frontend: ${fe} · Backend: ${be}`;
+}
+
 // ── Auth check ────────────────────────────────────
 // ── Container wake-up ────────────────────────────
 // Fire a lightweight /health ping that starts the container without blocking
@@ -65,7 +80,16 @@ const AppUpdater = (() => {
 // time the user's first real API request lands.
 function wakeContainer() {
   fetch(Settings.api('/health'), { credentials: 'include' })
-    .then(r => AppUpdater.check(r.headers))
+    .then(r => {
+      AppUpdater.check(r.headers);
+      return r.json().catch(() => null);
+    })
+    .then(data => {
+      if (data?.git_sha) {
+        _backendVersion = data.git_sha;
+        updateVersionInfo();
+      }
+    })
     .catch(() => {});
 }
 
@@ -750,6 +774,7 @@ const UI = (() => {
     document.getElementById('settings-overlay').classList.remove('hidden');
     document.getElementById('settings-panel').classList.remove('hidden');
     document.getElementById('set-backend-url').value = Settings.get('backendUrl');
+    updateVersionInfo();
   }
 
   function closeSettings() {
@@ -1070,6 +1095,7 @@ const Chat = (() => {
 window.addEventListener('DOMContentLoaded', async () => {
   Settings.load();
   Store.load();
+  updateVersionInfo();
 
   // ── Allegro auth URL cache ────────────────────────────────────────────────
   // Cache the OAuth URL in localStorage (4-minute TTL) so the Login button
