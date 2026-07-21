@@ -1155,6 +1155,9 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').then(reg => {
+      // Some browsers (Safari especially) are lazy about spontaneously
+      // re-checking sw.js for changes — force a check on every page load.
+      reg.update().catch(() => {});
       // When a new SW is found, show update banner once it finishes installing
       reg.addEventListener('updatefound', () => {
         reg.installing?.addEventListener('statechange', e => {

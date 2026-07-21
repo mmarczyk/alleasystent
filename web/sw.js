@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v37';
+const CACHE = 'alleasystent-v38';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
@@ -18,9 +18,15 @@ self.addEventListener('message', e => {
   if (e.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
-// Pre-cache the entire shell on install so the app is instantly available
+// Pre-cache the entire shell on install so the app is instantly available.
+// skipWaiting() activates a new SW as soon as it's installed instead of
+// sitting in "waiting" until every open tab closes — Safari in particular
+// can go a very long time (sometimes indefinitely across tabs/windows)
+// without ever surfacing the "installed" update-banner event otherwise.
 self.addEventListener('install', e =>
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)))
+  e.waitUntil(
+    caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())
+  )
 );
 
 // Drop old caches and take control of all clients immediately
