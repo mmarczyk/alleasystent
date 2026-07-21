@@ -16,7 +16,14 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    NotFoundError,
+    RateLimitError,
+)
 
 from agents.tool_gap_analyzer import analyze_for_tool_gap
 from config.settings import get_settings
@@ -28,8 +35,13 @@ MAX_ITERATIONS = 10
 # After exhausting all models in the pool, wait this many seconds before trying again.
 _BACKOFF_DELAYS = (2, 4, 8)
 
-# Exceptions that are worth rotating/retrying (transient infrastructure errors).
-_RETRYABLE = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
+# Exceptions that are worth rotating/retrying: transient infrastructure errors
+# (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
+# plus NotFoundError — a model can be pulled from the API early/without notice
+# (it happened to gemini-2.5-flash and gemini-2.5-flash-lite in 2026-07, well
+# ahead of their announced shutdown date), and a dead model in the pool must
+# not crash the whole call — just skip it and try the next one.
+_RETRYABLE = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError)
 
 
 async def _call_with_retry(

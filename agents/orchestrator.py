@@ -21,7 +21,14 @@ Routing model (2D):
 import logging
 from typing import Any
 
-from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+from openai import (
+    AsyncOpenAI,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    NotFoundError,
+    RateLimitError,
+)
 from agents.base_agent import _call_with_retry
 
 from agents.allegro.allegro_agent import AllegroAgent
@@ -218,7 +225,7 @@ class Orchestrator:
                 session.to_anthropic_messages(),
                 last_source=session.metadata.get("last_data_source"),
             )
-        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
+        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during classification: %s", exc)
             response = AgentResponse(
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
@@ -239,7 +246,7 @@ class Orchestrator:
             response = await self._route(
                 data_source, output_format, message, session.to_anthropic_messages(), user_id
             )
-        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
+        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
             response = AgentResponse(
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
@@ -335,7 +342,7 @@ class Orchestrator:
             logger.warning("LLM classifier fallback parse: src=%s fmt=%s from %r", src, fmt, raw)
             return src, fmt
 
-        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError):
+        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError):
             raise
         except Exception as exc:
             logger.error("Classification LLM failed: %s", exc)
