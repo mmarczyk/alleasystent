@@ -263,6 +263,8 @@ class AllegroAgent(BaseAgent):
         "PROCESSING":         "W realizacji",
         "READY_FOR_SHIPMENT": "Gotowe do wysyłki",
         "SENT":               "Wysłane",
+        "IN_TRANSIT":         "W transporcie",
+        "READY_FOR_PICKUP":   "Gotowe do odbioru",
         "PICKED_UP":          "Odebrane",
         "CANCELLED":          "Anulowane",
         "SUSPENDED":          "Wstrzymane",
