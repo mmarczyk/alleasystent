@@ -66,6 +66,7 @@ html, body {
 
 .settings-body { flex: 1; overflow-y: auto; padding: 1.25rem; display: flex; flex-direction: column; gap: .75rem; }
 .settings-footer { padding: 1rem 1.25rem; border-top: 1px solid var(--border); text-align: center; }
+.version-info { font-size: .78rem; color: var(--text); opacity: .85; margin-top: .5rem; font-family: 'SFMono-Regular', Consolas, monospace; }
 .settings-divider { border: none; border-top: 1px solid var(--border); margin: .5rem 0; }
 
 /* ── FORMS ───────────────────────────────────────── */
