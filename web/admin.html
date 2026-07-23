@@ -74,26 +74,30 @@
     .stat-lbl { font-size: .78rem; color: var(--muted); margin-top: .2rem; }
 
     /* ── INTENT BARS ── */
-    .intent-table { width: 100%; border-collapse: collapse; }
-    .intent-table td { padding: .45rem .5rem; vertical-align: middle; }
-    .intent-table td:last-child { width: 50px; text-align: right; font-size: .82rem; color: var(--muted); }
-    .intent-name { font-size: .88rem; white-space: nowrap; width: 160px; }
-    .intent-bar-wrap { padding-left: .5rem; }
+    .intent-list { display: flex; flex-direction: column; gap: .7rem; }
+    .intent-row + .intent-row { padding-top: .7rem; border-top: 1px solid var(--border); }
+    .intent-top {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: .5rem; margin-bottom: .35rem;
+    }
+    .intent-name {
+      font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .intent-stats { font-size: .78rem; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
     .intent-bar-bg { background: var(--bg3); border-radius: 4px; height: 8px; overflow: hidden; }
     .intent-bar-fill { height: 100%; border-radius: 4px; background: var(--primary); transition: width .4s; }
-    .intent-count { font-size: .82rem; color: var(--muted); width: 50px; text-align: right; }
 
     /* ── RECENT QUERIES ── */
     .query-list { display: flex; flex-direction: column; gap: .5rem; }
     .query-item {
-      display: flex; align-items: flex-start; gap: .75rem;
+      display: flex; flex-direction: column; gap: .35rem;
       padding: .6rem .75rem; background: var(--bg2);
       border: 1px solid var(--border); border-radius: 8px;
     }
+    .query-head { display: flex; align-items: center; gap: .5rem; }
     .query-badge {
       flex-shrink: 0; font-size: .7rem; padding: .15rem .5rem;
       border-radius: 20px; font-weight: 600; white-space: nowrap;
-      margin-top: .1rem;
     }
     .badge-orders    { background: rgba(99,102,241,.25); color: #a5b4fc; }
     .badge-offers    { background: rgba(16,185,129,.2);  color: #6ee7b7; }
@@ -101,8 +105,8 @@
     .badge-account   { background: rgba(239,68,68,.2);   color: #fca5a5; }
     .badge-general   { background: rgba(99,102,241,.15); color: #818cf8; }
     .badge-chitchat  { background: var(--bg3); color: var(--muted); }
-    .query-text { font-size: .88rem; color: var(--text); flex: 1; }
-    .query-ts { font-size: .72rem; color: var(--muted); white-space: nowrap; }
+    .query-text { font-size: .88rem; color: var(--text); }
+    .query-ts { font-size: .72rem; color: var(--muted); white-space: nowrap; margin-left: auto; }
 
     /* ── GAP CARDS ── */
     .gap-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .75rem; }
@@ -173,7 +177,6 @@
 
     @media (max-width: 600px) {
       .stat-row { grid-template-columns: 1fr 1fr; }
-      .intent-name { width: 110px; }
     }
   </style>
 </head>
@@ -318,20 +321,19 @@
     const el = document.getElementById('panel-intents');
     if (!intents.length) { el.innerHTML = '<div class="empty">Brak danych.</div>'; return; }
     const max = intents[0].count;
-    el.innerHTML = '<table class="intent-table">' +
+    el.innerHTML = '<div class="intent-list">' +
       intents.map(i => `
-        <tr>
-          <td class="intent-name">${esc(i.label)}</td>
-          <td class="intent-bar-wrap">
-            <div class="intent-bar-bg">
-              <div class="intent-bar-fill" style="width:${Math.round(i.count / max * 100)}%"></div>
-            </div>
-          </td>
-          <td class="intent-count">${i.count}</td>
-          <td style="width:40px;font-size:.78rem;color:var(--muted)">${i.pct}%</td>
-        </tr>
+        <div class="intent-row">
+          <div class="intent-top">
+            <span class="intent-name">${esc(i.label)}</span>
+            <span class="intent-stats">${i.count} · ${i.pct}%</span>
+          </div>
+          <div class="intent-bar-bg">
+            <div class="intent-bar-fill" style="width:${Math.round(i.count / max * 100)}%"></div>
+          </div>
+        </div>
       `).join('') +
-      '</table>';
+      '</div>';
   }
 
   function renderRecent(recent) {
@@ -341,9 +343,11 @@
       recent.map(q => {
         const cls = BADGE_CLASS[q.intent] || 'badge-chitchat';
         return `<div class="query-item">
-          <span class="query-badge ${cls}">${esc(q.label || q.intent)}</span>
+          <div class="query-head">
+            <span class="query-badge ${cls}">${esc(q.label || q.intent)}</span>
+            <span class="query-ts">${fmtTs(q.ts)}</span>
+          </div>
           <span class="query-text">${esc(q.text)}</span>
-          <span class="query-ts">${fmtTs(q.ts)}</span>
         </div>`;
       }).join('') +
       '</div>';
