@@ -258,8 +258,11 @@ select option { background: var(--bg2); }
   padding: .3rem .75rem; background: var(--bg3); border-radius: 0 4px 4px 0;
   color: var(--muted);
 }
-.msg-bubble table { width: 100%; border-collapse: collapse; margin: .5rem 0; font-size: .88rem; }
-.msg-bubble th,.msg-bubble td { border: 1px solid var(--border); padding: .4rem .65rem; text-align: left; }
+.msg-bubble table {
+  display: block; width: 100%; border-collapse: collapse; margin: .5rem 0; font-size: .88rem;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+}
+.msg-bubble th,.msg-bubble td { border: 1px solid var(--border); padding: .4rem .65rem; text-align: left; white-space: nowrap; }
 .msg-bubble th { background: var(--bg3); color: var(--accent); font-weight: 600; }
 .msg-bubble tr:nth-child(even) td { background: rgba(255,255,255,.03); }
 .msg-bubble pre {
