@@ -99,7 +99,7 @@ async def _poll_all_users() -> None:
 
 async def _poll_user(r, user_id: str) -> None:
     from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
-    from services.push_service import send_push, store_pending_chat
+    from services.push_service import send_push, add_notification
 
     # Skip if user has no Allegro auth tokens
     if not await r.exists(f"allegro:tokens:{user_id}"):
@@ -146,7 +146,7 @@ async def _poll_user(r, user_id: str) -> None:
     title = "Nowe zamówienie na Allegro" if count == 1 else f"{count} nowych zamówień na Allegro"
     body  = "Zamówienie czeka na realizację." if count == 1 else f"{count} zamówień czeka na realizację."
 
-    # store_pending_chat ensures the message appears in chat when iOS app reopens
-    chat_text = f"🛒 {title}\n{body}"
-    await store_pending_chat(user_id, chat_text)
-    await send_push(user_id=user_id, title=title, body=body, url="/")
+    # Goes to the in-app Notifications inbox (bell icon), not the chat — the OS-level
+    # push below is what actually alerts the user (browser + iOS PWA).
+    await add_notification(user_id, title=title, body=body, url="/?open=notifications")
+    await send_push(user_id=user_id, title=title, body=body, url="/?open=notifications")

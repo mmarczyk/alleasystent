@@ -403,6 +403,30 @@ select option { background: var(--bg2); }
   padding: .35rem .75rem; font-size: .82rem; font-weight: 600; margin-top: .5rem;
 }
 
+.notif-badge {
+  position: absolute; top: -2px; right: -2px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--danger); color: #fff;
+  border-radius: 999px; font-size: .65rem; font-weight: 700;
+  line-height: 1;
+}
+.sidebar-btn .notif-badge { top: .3rem; right: .5rem; }
+
+.notif-item {
+  border-bottom: 1px solid var(--border);
+  padding: .75rem 0;
+}
+.notif-item:last-child { border-bottom: none; }
+.notif-item.unread .notif-title::before {
+  content: ''; display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--primary); margin-right: .4rem;
+}
+.notif-title { font-weight: 600; font-size: .92rem; }
+.notif-body { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
+.notif-time { font-size: .75rem; color: var(--muted); opacity: .7; margin-top: .3rem; }
+.notif-empty { text-align: center; padding: 2rem 0; }
+
 .btn-invoice-monitoring {
   display: inline-flex; align-items: center; gap: .4rem;
   background: var(--success); color: #fff;

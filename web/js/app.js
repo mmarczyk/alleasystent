@@ -455,9 +455,9 @@ const WebPush = (() => {
     }
   }
 
-  // chatText is the full markdown chat message — backend stores it in Redis so
-  // other devices (e.g. iOS PWA) can retrieve it via /push/pending on startup.
-  async function sendNotification(title, body, chatText, url) {
+  // persist=true also stores this as an entry in the Notifications inbox (bell
+  // icon panel) server-side, instead of injecting anything into the chat.
+  async function sendNotification(title, body, persist, url) {
     const cleanBody = String(body).replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
 
     // Direct Notification — instant, for the current device (desktop/Android tab)
@@ -475,7 +475,7 @@ const WebPush = (() => {
     // The SW shows a notification with the same tag, replacing the direct one on this device
     if (localStorage.getItem(SUB_KEY)) {
       const payload = { title, body: cleanBody, url: url ?? '/' };
-      if (chatText) payload.chatMessage = chatText;
+      if (persist) payload.notify = true;
       fetch(Settings.api('/push/notify'), {
         method: 'POST',
         credentials: 'include',
@@ -591,10 +591,8 @@ const OrderMonitor = (() => {
         const msg = `Masz ${count} nowe ${label} do realizacji!`;
         console.log('[OrderMonitor] NEW ORDERS DETECTED:', count, data.new_orders);
         UI.toast(`🛒 ${msg}`, 10000);
-        // Await so the chat text is ready (and localStorage written) before the push fires.
-        // Backend stores the text in Redis so other devices receive it on startup.
-        const chatText = await _injectChatMessage(data.new_orders);
-        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg, chatText);
+        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg, true, '/?open=notifications');
+        Notifications.refresh();
       } else {
         console.log('[OrderMonitor] no new orders');
       }
@@ -620,47 +618,6 @@ const OrderMonitor = (() => {
     _check();
     _timer = setInterval(_check, 5 * 60 * 1000);
     console.log('[OrderMonitor] polling started');
-  }
-
-  async function _injectChatMessage(orders) {
-    try {
-      if (!Store.active()) Chat.newConversation();
-      const targetConvId = Store.active().id;
-
-      const details = await Promise.all(
-        orders.map(o => o.order_id
-          ? fetch(Settings.api(`/allegro/orders/${encodeURIComponent(o.order_id)}`), { credentials: 'include' })
-              .then(r => r.ok ? r.json() : null)
-              .catch(() => null)
-          : Promise.resolve(null)
-        )
-      );
-
-      const header = orders.length === 1
-        ? '🛒 **Nowe zamówienie do realizacji**'
-        : `🛒 **${orders.length} nowe zamówienia do realizacji**`;
-
-      const blocks = orders.map((o, i) => {
-        const d = details[i];
-        if (!d) return `**${String(o.order_id || '').slice(0, 8)}…** — brak szczegółów`;
-        const total = `${Number(d.total_price).toFixed(2)} zł`;
-        const itemLines = (d.items || []).map(it => `  • ${it.name} ×${it.quantity}`).join('\n');
-        return `👤 **${d.buyer_login}** · ${total}\n📦 ${d.delivery_method}\n${itemLines}`;
-      }).join('\n\n---\n\n');
-
-      const text = `${header}\n\n${blocks}`;
-
-      const conv = Store.all().find(c => c.id === targetConvId);
-      if (conv) {
-        conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
-        localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
-        setTimeout(() => Chat.loadConversation(targetConvId), 0);
-      }
-      return text;  // returned so caller can pass it to WebPush.sendNotification
-    } catch (e) {
-      console.error('[OrderMonitor] chat inject error:', e);
-      return null;
-    }
   }
 
   return { isEnabled, enable, disable, init };
@@ -717,30 +674,9 @@ const InvoiceMonitor = (() => {
       const label = count === 1 ? 'zamówienie wymaga' : count < 5 ? 'zamówienia wymagają' : 'zamówień wymaga';
       const msg = `${count} ${label} wystawienia faktury VAT.`;
       UI.toast(`🧾 ${msg}`, 10000);
-      const chatText = _injectChatMessage(newOnes);
-      WebPush.sendNotification('AllEasystent — Faktura VAT!', msg, chatText);
+      WebPush.sendNotification('AllEasystent — Faktura VAT!', msg, true, '/?open=notifications');
+      Notifications.refresh();
     } catch (e) {}
-  }
-
-  function _injectChatMessage(orders) {
-    try {
-      if (!Store.active()) Chat.newConversation();
-      const targetConvId = Store.active().id;
-      const lines = orders.map(o => {
-        const buyer = o.buyer || '—';
-        const amount = o.total != null ? ` · ${Number(o.total).toFixed(2)} zł` : '';
-        return `- **${String(o.order_id).slice(0, 8)}…** · ${buyer}${amount}`;
-      }).join('\n');
-      const noun = orders.length === 1 ? 'zamówienie wymagające' : `${orders.length} zamówień wymagających`;
-      const text = `🧾 **Monitoring faktur** — wykryto ${noun} faktury VAT:\n\n${lines}\n\nPamiętaj o wystawieniu faktury dla każdego z nich.`;
-      const conv = Store.all().find(c => c.id === targetConvId);
-      if (conv) {
-        conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
-        localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
-        setTimeout(() => Chat.loadConversation(targetConvId), 0);
-      }
-      return text;
-    } catch { return null; }
   }
 
   function _startPolling() {
@@ -758,6 +694,82 @@ const InvoiceMonitor = (() => {
   }
 
   return { isEnabled, enable, disable, init };
+})();
+
+// ── Notifications (bell icon panel) ──────────────
+const Notifications = (() => {
+  let _items = [];
+
+  function _esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function _timeAgo(iso) {
+    const min = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+    if (min < 1) return 'przed chwilą';
+    if (min < 60) return `${min} min temu`;
+    const h = Math.floor(min / 60);
+    if (h < 24) return `${h} godz. temu`;
+    return `${Math.floor(h / 24)} dni temu`;
+  }
+
+  function _renderBadge(count) {
+    document.querySelectorAll('.notif-badge').forEach(badge => {
+      if (count > 0) {
+        badge.textContent = count > 99 ? '99+' : String(count);
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+    });
+  }
+
+  function _render() {
+    const list = document.getElementById('notifications-list');
+    if (!list) return;
+    if (_items.length === 0) {
+      list.innerHTML = '<div class="notif-empty muted">Brak powiadomień.</div>';
+      return;
+    }
+    list.innerHTML = _items.map(n => `
+      <div class="notif-item${n.read ? '' : ' unread'}">
+        <div class="notif-title">${_esc(n.title)}</div>
+        <div class="notif-body">${_esc(n.body)}</div>
+        <div class="notif-time">${_timeAgo(n.created_at)}</div>
+      </div>
+    `).join('');
+  }
+
+  async function refresh() {
+    try {
+      const res = await fetch(Settings.api('/notifications'), { credentials: 'include', headers: Auth.headers() });
+      if (!res.ok) return;
+      const data = await res.json();
+      _items = data.items || [];
+      _renderBadge(data.unread_count || 0);
+      _render();
+    } catch (e) { console.error('[Notifications] refresh error:', e); }
+  }
+
+  async function open() {
+    document.getElementById('notifications-overlay').classList.remove('hidden');
+    document.getElementById('notifications-panel').classList.remove('hidden');
+    await refresh();
+    if (_items.some(n => !n.read)) {
+      fetch(Settings.api('/notifications/mark-read'), {
+        method: 'POST', credentials: 'include', headers: Auth.headers(),
+      }).then(() => _renderBadge(0)).catch(() => {});
+    }
+  }
+
+  function close() {
+    document.getElementById('notifications-overlay').classList.add('hidden');
+    document.getElementById('notifications-panel').classList.add('hidden');
+  }
+
+  function init() { refresh(); }
+
+  return { open, close, refresh, init };
 })();
 
 // ── UI helpers ───────────────────────────────────
@@ -1311,4 +1323,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Init monitors AFTER full UI setup so chat injection finds a ready DOM
   OrderMonitor.init();
   InvoiceMonitor.init();
+
+  Notifications.init();
+  // Tapping a system push notification opens straight into the Notifications panel
+  if (new URLSearchParams(location.search).get('open') === 'notifications') {
+    Notifications.open();
+    history.replaceState(null, '', location.pathname);
+  }
 });

@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-"""Web Push notification service (VAPID).
+"""Web Push notification service (VAPID) and in-app Notifications inbox.
 
 Subscriptions are stored in Redis: push:sub:{user_id}:{md5(endpoint)}
 Each subscription is the full JSON object from the browser's PushSubscription.toJSON().
+
+In-app notifications (bell icon panel) are stored in Redis: notif:list:{user_id}
+— a capped list of {id, title, body, url, created_at, read} entries, newest first.
 """
 
 import asyncio
 import hashlib
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 _VALID_SCHEMES = ('redis://', 'rediss://', 'unix://')
+_NOTIF_TTL = 60 * 60 * 24 * 30  # 30 days
+_NOTIF_MAX = 50  # keep at most this many entries per user
 
 
 def _valid_redis_url(url: str | None) -> bool:
@@ -68,6 +75,77 @@ async def pop_pending_chat(user_id: str) -> str | None:
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
         return await r.lpop(key)
+    finally:
+        await r.aclose()
+
+
+async def add_notification(user_id: str, title: str, body: str, url: str = "/") -> dict | None:
+    """Append an entry to the user's in-app Notifications list (bell icon panel).
+
+    Stored as a capped Redis list (newest first) so the frontend can render a
+    persistent inbox instead of the automatic monitors writing into the chat.
+    """
+    from config.settings import get_settings
+    settings = get_settings()
+    if not _valid_redis_url(settings.redis_url):
+        return None
+    import redis.asyncio as aioredis
+    entry = {
+        "id": uuid.uuid4().hex,
+        "title": title,
+        "body": body,
+        "url": url,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "read": False,
+    }
+    key = f"notif:list:{user_id}"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        await r.lpush(key, json.dumps(entry))
+        await r.ltrim(key, 0, _NOTIF_MAX - 1)
+        await r.expire(key, _NOTIF_TTL)
+    finally:
+        await r.aclose()
+    return entry
+
+
+async def list_notifications(user_id: str) -> list[dict]:
+    """Return the user's notifications, newest first."""
+    from config.settings import get_settings
+    settings = get_settings()
+    if not _valid_redis_url(settings.redis_url):
+        return []
+    import redis.asyncio as aioredis
+    key = f"notif:list:{user_id}"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        raw = await r.lrange(key, 0, -1)
+        return [json.loads(v) for v in raw]
+    finally:
+        await r.aclose()
+
+
+async def mark_notifications_read(user_id: str) -> None:
+    """Mark every stored notification for this user as read."""
+    from config.settings import get_settings
+    settings = get_settings()
+    if not _valid_redis_url(settings.redis_url):
+        return
+    import redis.asyncio as aioredis
+    key = f"notif:list:{user_id}"
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        raw = await r.lrange(key, 0, -1)
+        pipe = r.pipeline()
+        dirty = False
+        for idx, v in enumerate(raw):
+            entry = json.loads(v)
+            if not entry.get("read"):
+                entry["read"] = True
+                pipe.lset(key, idx, json.dumps(entry))
+                dirty = True
+        if dirty:
+            await pipe.execute()
     finally:
         await r.aclose()
 

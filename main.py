@@ -740,23 +740,20 @@ async def push_notify(request: Request):
     The backend fans out the push to every subscribed device for this user,
     so the notification reaches iOS PWA, Android, and other desktop tabs.
 
-    Optional body field `chatMessage`: if present, the formatted chat text is stored
-    in Redis so that any device opening the app (including ones not running polling)
-    can retrieve and display it via GET /push/pending.
+    Optional body field `notify`: if truthy, the same title/body/url is also
+    stored in the user's Notifications inbox (GET /notifications) instead of
+    being injected into the chat.
     """
     from services.auth_service import get_current_user
-    from services.push_service import send_push, store_pending_chat
+    from services.push_service import send_push, add_notification
     user = await get_current_user(request)
     body = await request.json()
-    chat_message = body.get("chatMessage")
-    if chat_message:
-        await store_pending_chat(user["sub"], chat_message)
-    await send_push(
-        user_id=user["sub"],
-        title=body.get("title", "AllEasystent"),
-        body=body.get("body", ""),
-        url=body.get("url", "/"),
-    )
+    title = body.get("title", "AllEasystent")
+    notify_body = body.get("body", "")
+    url = body.get("url", "/")
+    if body.get("notify"):
+        await add_notification(user["sub"], title=title, body=notify_body, url=url)
+    await send_push(user_id=user["sub"], title=title, body=notify_body, url=url)
     return {"status": "sent"}
 
 
@@ -773,6 +770,29 @@ async def push_pending(request: Request):
     user = await get_current_user(request)
     text = await pop_pending_chat(user["sub"])
     return {"chatMessage": text}
+
+
+# ── Notifications ────────────────────────────────────────────────────────────
+
+@app.get("/notifications", tags=["Notifications"])
+async def notifications_list(request: Request):
+    """List the current user's in-app notifications (bell icon panel), newest first."""
+    from services.auth_service import get_current_user
+    from services.push_service import list_notifications
+    user = await get_current_user(request)
+    items = await list_notifications(user["sub"])
+    unread = sum(1 for i in items if not i.get("read"))
+    return {"items": items, "unread_count": unread}
+
+
+@app.post("/notifications/mark-read", tags=["Notifications"])
+async def notifications_mark_read(request: Request):
+    """Mark all of the current user's notifications as read."""
+    from services.auth_service import get_current_user
+    from services.push_service import mark_notifications_read
+    user = await get_current_user(request)
+    await mark_notifications_read(user["sub"])
+    return {"status": "ok"}
 
 
 # ── Static UI ─────────────────────────────────────────────────────────────────
