@@ -64,9 +64,12 @@ class AllegroAgent(BaseAgent):
         "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order (no issuance verb) → get_order_invoice_data\n"
         "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'brakujące faktury' "
         "(read-only list, nothing created) → get_orders_pending_invoice (includes address automatically)\n"
-        "• ISSUE/CREATE the invoice(s) — 'wystaw fakturę/faktury', 'wystaw brakujące faktury', "
-        "'utwórz fakturę dla zamówienia X' → issue_pending_invoices. This is a REAL action that creates "
-        "invoices in inFakt — call it directly and report the result, do not just describe the pending list.\n"
+        "• ISSUE/CREATE the invoice(s) — ONLY when the user uses an explicit issuance verb "
+        "('wystaw fakturę/faktury', 'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X') "
+        "— call issue_pending_invoices directly and report the result. "
+        "A question about WHETHER invoices are pending ('czy mam faktury do wystawienia?', "
+        "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
+        "never issue_pending_invoices for a yes/no question.\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit → get_sales_summary. "
@@ -89,6 +92,20 @@ class AllegroAgent(BaseAgent):
         super().__init__()
         self.model_override = self._settings.gemini_model_fast
         self._allegro = AllegroService.get_instance(user_id)
+        if not self._settings.enable_invoice_issuance:
+            # issue_pending_invoices is also removed from _get_tools() — this
+            # keeps the prompt from pointing at a tool the model can't call.
+            self.system_prompt = self.system_prompt.replace(
+                "• ISSUE/CREATE the invoice(s) — ONLY when the user uses an explicit issuance verb "
+                "('wystaw fakturę/faktury', 'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X') "
+                "— call issue_pending_invoices directly and report the result. "
+                "A question about WHETHER invoices are pending ('czy mam faktury do wystawienia?', "
+                "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
+                "never issue_pending_invoices for a yes/no question.\n",
+                "• Issuing/creating invoices automatically is currently DISABLED. If the user asks to "
+                "issue/create an invoice, tell them this feature is temporarily turned off and they should "
+                "issue it manually in inFakt — optionally show the pending list via get_orders_pending_invoice.\n",
+            )
 
     async def run(
         self,
@@ -198,7 +215,13 @@ class AllegroAgent(BaseAgent):
         return AgentResponse(text=text, agent_type=self.agent_name)
 
     def _get_tools(self) -> list[dict[str, Any]]:
-        return ALLEGRO_TOOLS
+        if self._settings.enable_invoice_issuance:
+            return ALLEGRO_TOOLS
+        # Kill switch: the model can misfire on ambiguous phrasing and this
+        # tool creates real invoices in inFakt — omit it from the tool list
+        # entirely so it's physically impossible to call, not just discouraged
+        # in the prompt (prompt-level guidance already proved insufficient).
+        return [t for t in ALLEGRO_TOOLS if t["function"]["name"] != "issue_pending_invoices"]
 
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:

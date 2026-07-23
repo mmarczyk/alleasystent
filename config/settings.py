@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     # GCP Secret Manager in production, same pattern as allegro_client_secret.
     infakt_api_key: str = ""
     infakt_api_url: str = "https://api.infakt.pl/api/v3"
+    # Kill switch for issue_pending_invoices — off by default. The classifier
+    # can misfire on ambiguous phrasing ("czy mam faktury do wystawienia?" is
+    # a yes/no question, not a command) and this tool creates real, numbered
+    # invoices in inFakt, so it must be explicitly opted into per deployment.
+    enable_invoice_issuance: bool = False
 
     # ── Split deployment ──────────────────────────────────────────────────────
     # Public URL of the GitHub Pages frontend, e.g. https://user.github.io/alleasystent
