@@ -623,6 +623,38 @@ async def allegro_order_events(request: Request, since: str | None = None):
 
 
 
+@app.get("/allegro/monitor/status", tags=["Allegro"])
+async def allegro_monitor_status(request: Request):
+    """Whether automatic order checking is currently enabled for the current user."""
+    from services.auth_service import get_current_user
+    from services.order_monitor import is_monitor_enabled
+
+    user = await get_current_user(request)
+    return {"enabled": await is_monitor_enabled(user["sub"])}
+
+
+@app.post("/allegro/monitor/enable", tags=["Allegro"])
+async def allegro_monitor_enable(request: Request):
+    """Turn on automatic background order checking for the current user."""
+    from services.auth_service import get_current_user
+    from services.order_monitor import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled(user["sub"], True)
+    return {"status": "enabled"}
+
+
+@app.post("/allegro/monitor/disable", tags=["Allegro"])
+async def allegro_monitor_disable(request: Request):
+    """Turn off automatic background order checking for the current user."""
+    from services.auth_service import get_current_user
+    from services.order_monitor import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled(user["sub"], False)
+    return {"status": "disabled"}
+
+
 @app.get("/allegro/pending-invoices", tags=["Allegro"])
 async def allegro_pending_invoices(request: Request):
     """Return paid orders from the current month that require a VAT invoice but haven't received one."""

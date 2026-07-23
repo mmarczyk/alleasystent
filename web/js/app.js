@@ -527,6 +527,9 @@ const OrderMonitor = (() => {
     console.log('[OrderMonitor] enable() called');
     await WebPush.subscribe();
     localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/monitor/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
     await _saveBaseline();
     if (_timer) clearInterval(_timer);
     _timer = setInterval(_check, 5 * 60 * 1000);
@@ -561,6 +564,9 @@ const OrderMonitor = (() => {
     console.log('[OrderMonitor] disabled');
     localStorage.removeItem(ENABLED_KEY);
     if (_timer) { clearInterval(_timer); _timer = null; }
+    fetch(Settings.api('/allegro/monitor/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
   }
 
   async function _check() {

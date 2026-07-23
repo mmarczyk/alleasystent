@@ -18,6 +18,41 @@ _POLL_INTERVAL = 90   # seconds between checks per user
 _STARTUP_DELAY  = 25  # wait for app to fully start before first poll
 _STATE_KEY      = "allegro:monitor:last_event:{user_id}"
 _STATE_TTL      = 86400 * 30  # 30 days
+_ENABLED_KEY    = "allegro:monitor:enabled:{user_id}"
+
+
+async def is_monitor_enabled(user_id: str) -> bool:
+    """Whether automatic order checking is turned on for this user."""
+    from config.settings import get_settings
+    import redis.asyncio as aioredis
+
+    redis_url = get_settings().redis_url
+    if not redis_url or not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
+        return False
+    r = aioredis.from_url(redis_url, decode_responses=True)
+    try:
+        return bool(await r.exists(_ENABLED_KEY.format(user_id=user_id)))
+    finally:
+        await r.aclose()
+
+
+async def set_monitor_enabled(user_id: str, enabled: bool) -> None:
+    """Turn automatic order checking on/off for this user."""
+    from config.settings import get_settings
+    import redis.asyncio as aioredis
+
+    redis_url = get_settings().redis_url
+    if not redis_url or not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
+        return
+    r = aioredis.from_url(redis_url, decode_responses=True)
+    key = _ENABLED_KEY.format(user_id=user_id)
+    try:
+        if enabled:
+            await r.set(key, "1")
+        else:
+            await r.delete(key)
+    finally:
+        await r.aclose()
 
 
 async def run_order_monitor() -> None:
@@ -49,9 +84,9 @@ async def _poll_all_users() -> None:
         return
     r = aioredis.from_url(redis_url, decode_responses=True)
     try:
-        # Collect user IDs that have at least one push subscription
-        sub_keys = await r.keys("push:sub:*")
-        user_ids = {k.split(":")[2] for k in sub_keys if k.count(":") >= 3}
+        # Collect user IDs that have explicitly turned on automatic order checking
+        enabled_keys = await r.keys("allegro:monitor:enabled:*")
+        user_ids = {k.split(":")[3] for k in enabled_keys if k.count(":") >= 3}
 
         for user_id in user_ids:
             try:

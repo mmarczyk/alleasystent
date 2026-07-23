@@ -420,9 +420,10 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "suggest_order_monitoring",
             "description": (
                 "Present the user with a button to enable automatic background order monitoring. "
-                "Call this AFTER get_orders or get_orders_delivery when the user is asking about "
-                "new/pending orders or wants to be notified about incoming orders. "
-                "Do NOT call multiple times in one conversation — only the first time orders are shown."
+                "get_new_orders already appends this automatically, so do NOT call this tool right "
+                "after get_new_orders. Only use this when the user brings up monitoring/notifications "
+                "on its own, with no get_new_orders call in the same turn (e.g. 'chcę dostawać "
+                "powiadomienia o zamówieniach')."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -446,7 +447,9 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "disable_order_monitoring",
             "description": (
                 "Show a button to disable automatic order monitoring in the browser. "
-                "Call when the user asks to turn off, stop, or disable order monitoring/notifications."
+                "get_new_orders already offers this button when monitoring is on, so only call this "
+                "tool when the user asks to turn off/stop/disable order monitoring outside of an "
+                "order query (no get_new_orders call in the same turn)."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
