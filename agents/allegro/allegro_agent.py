@@ -77,13 +77,15 @@ class AllegroAgent(BaseAgent):
         "NEVER use get_billing_summary for a specific order — it covers ALL orders in date range. "
         "MONITORING — CRITICAL: You CANNOT monitor orders or invoices yourself. You have NO ability "
         "to run background tasks, check anything automatically, or send proactive messages. "
-        "When the user asks to enable monitoring, be notified, or wants automatic order/invoice alerts, "
-        "you MUST call suggest_order_monitoring or suggest_invoice_monitoring — this shows a clickable "
-        "button in the UI that the user must press to activate browser-side monitoring. "
+        "get_new_orders ALREADY appends the current automatic-checking status and an enable/disable "
+        "button to its own result — do NOT also call suggest_order_monitoring or disable_order_monitoring "
+        "right after get_new_orders, that would show a duplicate button. Only call suggest_order_monitoring "
+        "/ disable_order_monitoring when the user brings up monitoring/notifications OUTSIDE of an "
+        "order query (e.g. general 'wyłącz monitoring', 'chcę powiadomienia o zamówieniach' with no "
+        "get_new_orders call in this turn), or for INVOICE monitoring (suggest_invoice_monitoring / "
+        "disable_invoice_monitoring), which has no equivalent auto-status block. "
         "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
-        "as a standalone promise — you cannot do this. Always call the tool and tell the user to click the button. "
-        "When the user asks to DISABLE / turn off / stop monitoring or notifications, "
-        "call disable_order_monitoring or disable_invoice_monitoring — NEVER explain that you cannot do it. "
+        "as a standalone promise — you cannot do this. Always call a tool and let it render the button. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
         "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way."
     )
@@ -346,6 +348,30 @@ class AllegroAgent(BaseAgent):
                 return template.format(code=code)
         return None
 
+    async def _monitoring_status_block(self) -> str:
+        """Deterministic (non-LLM) status + action button for automatic order checking.
+
+        Always reflects the real Redis flag, not the model's guess — the invoice-issuance
+        bug (misfiring on a yes/no question) showed prompt-only judgement isn't reliable
+        for this kind of state, so it's computed here instead of left to the LLM.
+        """
+        from services.order_monitor import is_monitor_enabled
+
+        if await is_monitor_enabled(self._allegro._user_id):
+            return (
+                "🔔 Automatyczne sprawdzanie nowych zamówień jest włączone — dam Ci znać, "
+                "gdy pojawi się coś nowego.\n\n"
+                '<button class="btn-monitoring" style="background:#6b7280" '
+                'onclick="OrderMonitor.disable();this.outerHTML=\'<span>✓ Monitoring zamówień wyłączony</span>\'">'
+                '🔕 Wyłącz automatyczne sprawdzanie</button>'
+            )
+        return (
+            "💡 Mogę automatycznie sprawdzać nowe zamówienia i wysyłać Ci powiadomienia, "
+            "nawet gdy ta karta jest w tle.\n\n"
+            '<button class="btn-monitoring" onclick="OrderMonitor.enable()">'
+            '🔔 Włącz automatyczne sprawdzanie</button>'
+        )
+
     @classmethod
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
         """Render a single order as a markdown bullet-point block."""
@@ -422,9 +448,8 @@ class AllegroAgent(BaseAgent):
                 buyer_login=tool_input.get("buyer_login"),
                 limit=min(int(tool_input.get("limit", 100)), 100),
             )
-            if not orders:
-                return "Brak nowych zamówień."
-            return "\n\n".join(self._order_block(o) for o in orders)
+            body = "Brak nowych zamówień." if not orders else "\n\n".join(self._order_block(o) for o in orders)
+            return body + "\n\n" + await self._monitoring_status_block()
 
         if tool_name == "get_orders":
             bought_after = tool_input.get("bought_after_local")

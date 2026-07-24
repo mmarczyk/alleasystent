@@ -93,6 +93,18 @@
   </div>
 </aside>
 
+<!-- ── NOTIFICATIONS PANEL ───────────────────────── -->
+<div id="notifications-overlay" class="overlay hidden" onclick="Notifications.close()"></div>
+<aside id="notifications-panel" class="settings-panel hidden">
+  <div class="settings-header">
+    <h2>Powiadomienia</h2>
+    <button class="btn-icon" onclick="Notifications.close()">✕</button>
+  </div>
+  <div class="settings-body" id="notifications-list">
+    <!-- notification entries injected by JS -->
+  </div>
+</aside>
+
 <!-- ── APP ───────────────────────────────────────── -->
 <div class="app" id="app" style="display:none">
 
@@ -116,6 +128,10 @@
       <a href="admin.html" class="sidebar-btn" style="display:flex;text-decoration:none;color:inherit;">
         <span>📊</span> Analityka
       </a>
+      <button class="sidebar-btn" onclick="Notifications.open()" style="position:relative;">
+        <span>🔔</span> Powiadomienia
+        <span class="notif-badge hidden"></span>
+      </button>
       <button class="sidebar-btn" onclick="UI.openSettings()">
         <span>⚙</span> Ustawienia
       </button>
@@ -132,6 +148,9 @@
         <span class="logo-icon">🛒</span>
         <span id="topbar-title">AllEasystent</span>
       </div>
+      <button class="btn-icon" style="position:relative" onclick="Notifications.open()" aria-label="Powiadomienia">
+        🔔<span class="notif-badge hidden"></span>
+      </button>
       <button class="btn-icon" onclick="UI.openSettings()" aria-label="Ustawienia">⚙</button>
     </header>
 
