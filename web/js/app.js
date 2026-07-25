@@ -883,15 +883,22 @@ const Chat = (() => {
       inner.innerHTML = inner.innerHTML.replace('[INVOICE_MONITORING_BTN]',
         '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>');
     }
-    // Replace enable-buttons with active badge if monitoring is already on
+    // Replace enable-buttons with active badge if monitoring is already on.
+    // Only touches actual "enable" buttons — get_new_orders' status block already
+    // renders a "disable" button of its own when monitoring is on, and that one
+    // must stay a clickable button, not get flattened into a static badge.
     if (OrderMonitor.isEnabled()) {
       inner.querySelectorAll('.btn-monitoring').forEach(btn => {
-        btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring zamówień aktywny</span>';
+        if (btn.getAttribute('onclick')?.includes('OrderMonitor.enable')) {
+          btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring zamówień aktywny</span>';
+        }
       });
     }
     if (InvoiceMonitor.isEnabled()) {
       inner.querySelectorAll('.btn-invoice-monitoring').forEach(btn => {
-        btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
+        if (btn.getAttribute('onclick')?.includes('InvoiceMonitor.enable')) {
+          btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
+        }
       });
     }
   }
@@ -923,9 +930,20 @@ const Chat = (() => {
     return `📊 Tabela — ${dataRows} ${noun}. Kliknij „Pełny widok”, aby zobaczyć szczegóły.`;
   }
 
+  // Action buttons (monitoring toggle etc.) are always appended at the very end of
+  // bot content — pull them out so they never get sliced apart by preview truncation.
+  function _extractTrailingHtml(content) {
+    const m = content.match(/<button[\s\S]*$/);
+    if (!m) return { text: content, html: null };
+    return { text: content.slice(0, m.index).trimEnd(), html: m[0] };
+  }
+
   function buildBubble(role, content, ts, index, format) {
     const isUser = role === 'user';
-    const isLong = !isUser && content.length > 500;
+    const { text: bodyText, html: trailingHtml } = isUser
+      ? { text: content, html: null }
+      : _extractTrailingHtml(content);
+    const isLong = !isUser && bodyText.length > 500;
     const div = document.createElement('div');
     div.className = `msg msg-${isUser ? 'user' : 'bot'}`;
     div.dataset.index = index ?? '';
@@ -934,17 +952,18 @@ const Chat = (() => {
     const time = ts ? new Date(ts).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '';
 
     // Register long bot responses so "Pełny widok" button can re-open the doc viewer
+    // (full content, including any trailing button, so the doc viewer still shows it)
     const docKey = isLong ? DocViewer.register(content, format) : null;
 
     // Long responses: show a compact preview in the bubble — full content is in the doc viewer
     let bubbleHtml;
     if (isLong) {
-      const tablePreview = _tablePreview(content);
+      const tablePreview = _tablePreview(bodyText);
       let previewShort;
       if (tablePreview !== null) {
         previewShort = escHtml(tablePreview);
       } else {
-        const preview = content.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
+        const preview = bodyText.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
         previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
       }
       bubbleHtml = `<p style="color:var(--text-muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>` +
@@ -952,8 +971,10 @@ const Chat = (() => {
         `style="display:inline-block;font-size:.85rem;font-weight:600;color:var(--accent);text-decoration:none">` +
         `📄 Zobacz pełną odpowiedź →</a>`;
     } else {
-      bubbleHtml = isUser ? escHtml(content).replace(/\n/g, '<br>') : renderMarkdown(content);
+      bubbleHtml = isUser ? escHtml(content).replace(/\n/g, '<br>') : renderMarkdown(bodyText);
     }
+    // Buttons render for real (clickable), always outside the truncated preview
+    if (trailingHtml) bubbleHtml += renderMarkdown(trailingHtml);
 
     div.innerHTML = `
       <div class="msg-avatar">${avatar}</div>
