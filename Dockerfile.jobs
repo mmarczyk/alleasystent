@@ -1,0 +1,38 @@
+# ── Slim image for scheduled background jobs (Cloud Run Jobs) ────────────────
+# Separate from the main Dockerfile: no fastapi/uvicorn, no RAG deps
+# (chromadb/sentence-transformers/torch, ~1.5GB+), no baked-in embedding
+# model. Order monitor today; a home for other periodic jobs as they're added
+# to jobs/ — all of them share this same slim runtime.
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-jobs.txt .
+RUN pip install --upgrade pip && \
+    pip install --prefix=/install --no-cache-dir -r requirements-jobs.txt
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+
+# Application source — jobs/ scripts plus the services/config/models packages
+# they import. Copying the whole repo is simplest and the source itself is a
+# few MB; the size win over the main image comes entirely from the pip/model
+# layers above, which this image never installs.
+COPY . .
+
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+CMD ["python", "-m", "jobs.order_monitor_job"]

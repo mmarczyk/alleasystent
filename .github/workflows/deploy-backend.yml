@@ -6,6 +6,10 @@ on:
     paths-ignore:
       - 'web/**'
       - '.github/workflows/deploy-chat.yml'
+      - 'Dockerfile.jobs'
+      - 'requirements-jobs.txt'
+      - 'jobs/**'
+      - '.github/workflows/deploy-jobs.yml'
   workflow_dispatch:
 
 permissions:

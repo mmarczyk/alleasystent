@@ -25,6 +25,7 @@ gcloud services enable \
   firestore.googleapis.com \
   pubsub.googleapis.com \
   secretmanager.googleapis.com \
+  cloudscheduler.googleapis.com \
   --project="$PROJECT_ID"
 
 # ── Artifact Registry ─────────────────────────────────────────────────────────
@@ -49,7 +50,8 @@ for ROLE in \
   roles/pubsub.publisher \
   roles/pubsub.subscriber \
   roles/secretmanager.secretAccessor \
-  roles/aiplatform.user; do
+  roles/aiplatform.user \
+  roles/run.invoker; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:$SA_EMAIL" \
     --role="$ROLE" --quiet
@@ -89,10 +91,34 @@ for SECRET in \
     --project="$PROJECT_ID" 2>/dev/null || echo "  $SECRET already exists"
 done
 
+# ── Cloud Scheduler: trigger the order-monitor Cloud Run Job ──────────────────
+# Run this AFTER deploy-jobs.yml has run at least once (push to main touching
+# jobs/**), since gcloud run jobs describe needs the job to already exist.
+JOB_NAME="alleasystent-order-monitor"
+if gcloud run jobs describe "$JOB_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "▶ Creating Cloud Scheduler trigger for $JOB_NAME (every 2 minutes)..."
+  JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
+  gcloud scheduler jobs create http "${JOB_NAME}-trigger" \
+    --location="$REGION" \
+    --schedule="*/2 * * * *" \
+    --uri="$JOB_URI" \
+    --http-method=POST \
+    --oauth-service-account-email="$SA_EMAIL" \
+    --project="$PROJECT_ID" || echo "  (already exists — edit schedule with 'gcloud scheduler jobs update http')"
+else
+  echo "▶ Skipping Cloud Scheduler trigger — $JOB_NAME doesn't exist yet."
+  echo "  Push to main (or run 'gh workflow run deploy-jobs.yml') to create it, then re-run this script."
+fi
+
 echo ""
 echo "✅ GCP setup complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Add secret values:  gcloud secrets versions add anthropic-api-key --data-file=-"
-echo "  2. Build & deploy:     gcloud builds submit --config=cloudbuild.yaml"
+echo "  1. Add secret values:  gcloud secrets versions add allegro-client-id --data-file=-  (etc.)"
+echo "  2. Build & deploy:     push to main (deploy-backend.yml / deploy-jobs.yml via GitHub Actions)"
 echo "  3. Set FB webhook URL: https://YOUR_CLOUD_RUN_URL/webhook/facebook"
+echo "  4. Re-run this script once the order-monitor job exists, to create its Scheduler trigger"
+echo "  5. VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY / VAPID_EMAIL: copy whatever the main"
+echo "     'alleasystent' Cloud Run service currently uses onto the order-monitor Job too"
+echo "     (gcloud run jobs update $JOB_NAME --update-env-vars=... or --update-secrets=...)"
+echo "     — without them the job detects new orders but send_push() silently skips."
