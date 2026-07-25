@@ -15,12 +15,52 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from agents.allegro.allegro_tools import ALLEGRO_TOOLS
+from agents.allegro.allegro_tools import ALLEGRO_TOOLS, resolve_output_format
 from agents.base_agent import BaseAgent
 from models.conversation import AgentResponse
 from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
 
 logger = logging.getLogger(__name__)
+
+# Injected as a user-turn message right before the final "interpret" call, once
+# the output format is known from which tool(s) were just called (see
+# agents/allegro/allegro_tools.py TOOL_OUTPUT_FORMAT). "chat" and "action" need
+# no extra steering — the model already answers naturally / includes the tool's
+# button HTML verbatim per the system prompt.
+_OUTPUT_FORMAT_INSTRUCTIONS: dict[str, str] = {
+    "table": (
+        "[FORMAT ODPOWIEDZI: TABELA]\n"
+        "Zbuduj tabelę markdown WYŁĄCZNIE z danych zwróconych przez narzędzie powyżej. "
+        "Pierwsza linia — nagłówek: | kolumna1 | kolumna2 | ... . Bez wstępu ani potwierdzenia "
+        "przed tabelą. Maksymalnie 1-2 zdania podsumowania PO tabeli.\n"
+        "Jeśli narzędzie nie zwróciło żadnych wyników — NIE twórz tabeli (pustej ani "
+        "przykładowej), odpowiedz jednym krótkim zdaniem."
+    ),
+    "dashboard": (
+        "[FORMAT ODPOWIEDZI: DASHBOARD]\n"
+        "Zbuduj wielosekcyjny raport z danych zwróconych przez narzędzie powyżej: każda sekcja "
+        "z nagłówkiem ##, kluczowe liczby pogrubione (**x**), porównania/trendy gdzie to możliwe. "
+        "Zacznij od razu od pierwszego nagłówka ## — bez wstępu.\n"
+        "Jeśli dane zawierają liczby nadające się do porównania (np. przychód wg produktu, "
+        "rozkład stanów magazynowych, koszty vs zysk, top produkty) — dołącz po odpowiedniej "
+        "sekcji jeden blok kodu oznaczony jako 'chart' z wykresem w formacie JSON:\n"
+        "```chart\n"
+        '{"type":"bar","title":"Tytuł wykresu","labels":["Etykieta 1","Etykieta 2"],'
+        '"series":[{"name":"Nazwa serii","data":[100,200]}]}\n'
+        "```\n"
+        "   - type: \"bar\" | \"line\" | \"pie\" | \"doughnut\"\n"
+        "   - labels: kategorie/dni/produkty; series: jedna lub więcej serii liczbowych tej "
+        "samej długości co labels\n"
+        "   - Użyj WYŁĄCZNIE prawdziwych liczb z danych powyżej — nigdy nie zmyślaj; pomiń "
+        "blok chart, jeśli danych jest za mało na sensowny wykres."
+    ),
+    "document": (
+        "[FORMAT ODPOWIEDZI: DOKUMENT]\n"
+        "Sformatuj odpowiedź jako pełny, gotowy do użycia dokument. Pierwsza linia — nagłówek: "
+        "# Tytuł dokumentu. Bez wstępu ani potwierdzenia. Kompletna treść, z podpisem/stopką "
+        "jeśli pasuje."
+    ),
+}
 
 
 class AllegroAgent(BaseAgent):
@@ -143,6 +183,7 @@ class AllegroAgent(BaseAgent):
         # it has enough data (no new tool calls after a round).
         MAX_TOOL_ROUNDS = 3
         tool_rounds = 0
+        called_tools: list[str] = []
 
         while tool_rounds < MAX_TOOL_ROUNDS:
             resp = await _call_with_retry(
@@ -159,7 +200,7 @@ class AllegroAgent(BaseAgent):
             if not msg.tool_calls:
                 # model ignored tool_choice — interpret whatever it said
                 logger.warning("AllegroAgent: model skipped tool_choice=required (round %d)", tool_rounds + 1)
-                return AgentResponse(text=msg.content or "", agent_type=self.agent_name)
+                return AgentResponse(text=msg.content or "", agent_type=self.agent_name, metadata={"output_format": "chat"})
 
             messages.append({
                 "role": "assistant",
@@ -169,6 +210,7 @@ class AllegroAgent(BaseAgent):
 
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
+                called_tools.append(tool_name)
                 try:
                     tool_input = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
@@ -194,6 +236,14 @@ class AllegroAgent(BaseAgent):
             # and we detect the model wants to chain (handled by the loop limit).
             break
 
+        # ── Step 1b: resolve output format from the tool(s) just called ───────
+        # Deterministic — decided by WHICH TOOL ran, not guessed from the
+        # user's wording (see TOOL_OUTPUT_FORMAT in allegro_tools.py for why).
+        output_format = resolve_output_format(called_tools)
+        format_instruction = _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
+        if format_instruction:
+            messages.append({"role": "user", "content": format_instruction})
+
         # ── Step 2: interpret — NO tools ─────────────────────────────────────
         # The LLM now sees the real API results and formats the answer.
         # Without tools it literally cannot hallucinate store data.
@@ -206,7 +256,7 @@ class AllegroAgent(BaseAgent):
             # no `tools` parameter — model can only read and format
         )
         final_text = interp_resp.choices[0].message.content or ""
-        return AgentResponse(text=final_text, agent_type=self.agent_name)
+        return AgentResponse(text=final_text, agent_type=self.agent_name, metadata={"output_format": output_format})
 
     def _request_auth(self) -> AgentResponse:
         text = (
@@ -214,7 +264,7 @@ class AllegroAgent(BaseAgent):
             "[➡ Zaloguj się przez Allegro](/allegro/login)\n\n"
             "Po zalogowaniu wróć tutaj i zadaj swoje pytanie ponownie."
         )
-        return AgentResponse(text=text, agent_type=self.agent_name)
+        return AgentResponse(text=text, agent_type=self.agent_name, metadata={"output_format": "chat"})
 
     def _get_tools(self) -> list[dict[str, Any]]:
         if self._settings.enable_invoice_issuance:

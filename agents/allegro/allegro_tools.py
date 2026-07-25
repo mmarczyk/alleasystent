@@ -519,3 +519,61 @@ ALLEGRO_TOOLS: list[dict] = [
         },
     },
 ]
+
+
+# ── Output-format routing ────────────────────────────────────────────────────
+# Each tool's result shape is known in advance, so the reply's presentation is
+# decided by WHICH TOOL WAS CALLED — not guessed from the user's wording before
+# any tool ran. The old approach classified "chat/table/document/dashboard" from
+# free text up front, which was unreliable: a yes/no question naming a plural
+# entity ("czy mam nowe wiadomości?") could get misclassified as "table" and
+# produce an empty table for what should've been a one-sentence answer.
+#
+# This mapping is the source of truth for that decision — see AllegroAgent.run(),
+# which resolves it from the tool(s) it actually called and asks the model to
+# format the final answer accordingly.
+TOOL_OUTPUT_FORMAT: dict[str, str] = {
+    # Zamówienia
+    "get_new_orders": "chat",
+    "get_orders": "table",
+    "get_order_details": "chat",
+    "get_orders_delivery": "table",
+    # Oferty
+    "get_active_offers": "table",
+    "get_offers_summary": "dashboard",
+    "query_offers_by_stock": "table",
+    "query_offers_by_price": "table",
+    "get_offer_details": "chat",
+    "update_offer_price": "action",
+    "update_offer_stock": "action",
+    # Wiadomości
+    "get_message_threads": "table",
+    "send_message_to_buyer": "action",
+    # Konto / rozliczenia / sprzedaż
+    "get_account_info": "chat",
+    "get_billing_summary": "table",
+    "get_sales_summary": "dashboard",
+    # Faktury
+    "get_orders_pending_invoice": "chat",
+    "get_order_invoice_data": "chat",
+    "issue_pending_invoices": "action",
+    # Monitoring (przyciski w UI)
+    "suggest_order_monitoring": "action",
+    "suggest_invoice_monitoring": "action",
+    "disable_order_monitoring": "action",
+    "disable_invoice_monitoring": "action",
+}
+
+# When several tools are called in the same turn, the most "structured" format
+# wins — a UI-action button (e.g. a monitoring toggle riding along with
+# get_orders_pending_invoice) never downgrades a real data reply.
+_FORMAT_PRIORITY = ["dashboard", "document", "table", "chat", "action"]
+
+
+def resolve_output_format(tool_names: list[str]) -> str:
+    """Resolve the reply's output format from the tool(s) called in one turn."""
+    formats = {TOOL_OUTPUT_FORMAT.get(name, "chat") for name in tool_names}
+    for fmt in _FORMAT_PRIORITY:
+        if fmt in formats:
+            return fmt
+    return "chat"

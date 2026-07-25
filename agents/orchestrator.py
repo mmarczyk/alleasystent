@@ -6,20 +6,25 @@ Orchestrator Agent — the central brain of the system.
 Responsibilities:
   1. Receive normalized IncomingMessage from any communication channel.
   2. Load/save conversation history from Firestore.
-  3. Classify the query on two dimensions: data source + output format.
-  4. Route to the appropriate specialized agent with the right output mode.
+  3. Classify the query on ONE dimension: which data source is needed.
+  4. Route to the appropriate specialized agent.
   5. Return the AgentResponse.
 
-Routing model (2D):
-  Dimension 1 — DATA SOURCE: what data is needed to answer?
+Routing model:
+  DATA SOURCE — what data is needed to answer?
     allegro_orders | allegro_offers | allegro_messaging | allegro_account | rag | none
 
-  Dimension 2 — OUTPUT FORMAT: how should the answer look?
-    chat | table | document | dashboard
+  OUTPUT FORMAT — chat | table | document | dashboard | action — is NOT classified
+  here anymore. It used to be guessed from the user's wording before any tool ran,
+  which was unreliable (e.g. a yes/no question naming a plural entity — "czy mam
+  nowe wiadomości?" — could get misclassified as "table", producing an empty table
+  for a one-sentence answer). Each agent now derives the format itself from WHICH
+  TOOL it actually called (see agents/allegro/allegro_tools.py TOOL_OUTPUT_FORMAT)
+  and reports it back via AgentResponse.metadata["output_format"] — the orchestrator
+  just forwards that into the "<source>:<format>" tag the frontend reads.
 """
 
 import logging
-from typing import Any
 
 from openai import (
     AsyncOpenAI,
@@ -40,18 +45,18 @@ from services.gcp_service import FirestoreService
 
 logger = logging.getLogger(__name__)
 
-# ── Context-aware 2D classifier prompt ────────────────────────────────────────
-# Single LLM call with full conversation history → returns "source|format".
+# ── Context-aware data-source classifier prompt ────────────────────────────────
+# Single LLM call with full conversation history → returns the data source label.
 # This is the primary classifier; keywords are used only as a cheap fast-path
 # for long, self-contained queries where context is irrelevant.
 
 _CLASSIFY_SYSTEM = """
 Jesteś klasyfikatorem routingu dla asystenta AI właścicieli sklepów Allegro.
 
-Sklasyfikuj wiadomość użytkownika NA PODSTAWIE PEŁNEJ HISTORII ROZMOWY na dwóch wymiarach.
-Odpowiedz TYLKO dwoma etykietami oddzielonymi "|" — nic więcej.
+Sklasyfikuj wiadomość użytkownika NA PODSTAWIE PEŁNEJ HISTORII ROZMOWY.
+Odpowiedz TYLKO jedną etykietą — nic więcej.
 
-WYMIAR 1 — ŹRÓDŁO DANYCH (co pobrać żeby odpowiedzieć):
+ŹRÓDŁO DANYCH (co pobrać żeby odpowiedzieć):
   allegro_orders    — dane zamówień: statusy, wysyłka, śledzenie, zwroty, faktury
   allegro_offers    — oferty: ceny, stany magazynowe, produkty, dostawcy
   allegro_messaging — wiadomości od kupujących: czytanie, odpowiadanie
@@ -59,91 +64,19 @@ WYMIAR 1 — ŹRÓDŁO DANYCH (co pobrać żeby odpowiedzieć):
   rag               — statyczna baza wiedzy sklepu: polityki, FAQ (nie żywe dane)
   none              — nie trzeba danych: pozdrowienia, rozmowa, pytania o asystenta
 
-WYMIAR 2 — FORMAT ODPOWIEDZI (jak ma wyglądać wynik):
-  chat      — krótka konwersacyjna odpowiedź (jedno pytanie, jedna liczba, pogawędka)
-  table     — tabela markdown z wierszami i kolumnami
-  document  — pełny sformatowany dokument (mail, raport, list, szablon, OPIS produktu/oferty)
-  dashboard — analiza z metrykami i porównaniami, w tym wykresy (sprzedaż, trendy, statystyki)
-
 KLUCZOWE ZASADY:
 - Uwzględnij CAŁĄ historię rozmowy, szczególnie gdy bieżąca wiadomość jest krótka
 - Krótkie follow-upy ("A teraz", "Spróbuj ponownie", "Ok", "Zrób to", "I co?", "Dobra")
   dziedziczą kontekst z poprzednich wiadomości — nie traktuj ich jako nowych tematów
-- Jeśli user kontynuuje temat z historii, użyj tego samego źródła i formatu
+- Jeśli user kontynuuje temat z historii, użyj tego samego źródła
 - Gdy user poprawia lub doprecyzowuje — to nadal ten sam kontekst
-- Prośba o LISTĘ wielu elementów, gdzie user oczekuje przejrzenia wielu rekordów naraz
-  (zamówienia, oferty, wiadomości, rozliczenia) → table, nawet jeśli user nie użył słowa
-  "tabela" (np. "pokaż moje nowe zamówienia" → table)
-- Prośba o OPIS, treść do wysłania/wklejenia gdzie indziej (opis produktu, mail, raport,
-  ogłoszenie) → document
-- Prośba o ANALIZĘ, porównanie, trend, wykres, "jak idzie sprzedaż" → dashboard
-- Pytanie TAK/NIE lub o pojedynczy fakt/liczbę → chat, NIGDY table, nawet jeśli dotyczy
-  zamówień/wiadomości/ofert (np. "czy mam nowe wiadomości?", "ile mam nowych zamówień?",
-  "czy są jakieś zwroty?", "czy ktoś do mnie napisał?") — user oczekuje krótkiej
-  odpowiedzi, nie listy do przeglądania
 
-Format odpowiedzi: source|format
-Przykłady: allegro_offers|document   allegro_orders|table   none|chat
+Odpowiedź: jedna etykieta źródła danych.
+Przykłady: allegro_offers   allegro_orders   none
 """.strip()
 
-# ── Output-format prefixes injected before the user's query ───────────────────
-
-_FORMAT_PREFIXES: dict[str, str] = {
-    "document": (
-        "[TRYB DOKUMENTU — ZASADY BEZWZGLĘDNE]\n"
-        "1. NIE pisz żadnych wstępów ani potwierdzeń — ŻADNEGO 'Jasne', 'Rozumiem', 'Oczywiście', "
-        "'Przygotuję', 'Oto' ani żadnej innej preambuły. Zacznij NATYCHMIAST od dokumentu.\n"
-        "2. Pierwsza linia odpowiedzi MUSI być nagłówkiem markdown: # Tytuł dokumentu\n"
-        "3. Użyj narzędzi, aby pobrać aktualne dane ze sklepu PRZED napisaniem treści. "
-        "Dane muszą być prawdziwe — nie wymyślaj produktów, cen ani stanów.\n"
-        "4. Dokument musi być kompletny i profesjonalny: data, pełna treść, "
-        "tabele z danymi jeśli potrzebne, podpis/stopka.\n"
-        "5. Minimum 300 słów — dokument musi nadawać się do natychmiastowego użycia.\n\n"
-        "Polecenie użytkownika: "
-    ),
-    "table": (
-        "[TRYB TABELI — ZASADY BEZWZGLĘDNE]\n"
-        "KROK 1 — DANE PIERWSZE: wywołaj odpowiednie narzędzie(a) i poczekaj na wynik.\n"
-        "         BEZ WYWOŁANIA NARZĘDZIA = BEZ TABELI. Nigdy nie generuj danych z pamięci.\n"
-        "KROK 1b — BRAK WYNIKÓW: jeśli narzędzie zwróciło 0 rekordów, NIE twórz tabeli "
-        "(pustej ani z przykładowymi danymi) — odpowiedz jednym krótkim zdaniem, np. "
-        "'Nie masz obecnie żadnych nowych wiadomości.'\n"
-        "KROK 2 — TABELA: zbuduj tabelę markdown WYŁĄCZNIE z danych zwróconych przez narzędzie.\n"
-        "         Pierwsza linia: nagłówek | kolumna1 | kolumna2 | ...\n"
-        "         NIE pisz żadnego wstępu, potwierdzenia ani preambuły przed tabelą.\n"
-        "KROK 3 — maksymalnie 1-2 zdania podsumowania po tabeli.\n"
-        "UWAGA: ID ofert Allegro to 11-cyfrowe liczby (np. 12345678901), NIE UUID.\n"
-        "Jeśli w odpowiedzi pojawiają się UUID — to halucynacja. Wywołaj narzędzie.\n\n"
-        "Zapytanie: "
-    ),
-    "dashboard": (
-        "[TRYB DASHBOARD — ZASADY]\n"
-        "1. Zacznij od ## nagłówka sekcji — NIE od wstępu.\n"
-        "2. Przygotuj wielosekcyjny raport zarządczy: każda sekcja z nagłówkiem ##, "
-        "kluczowe liczby pogrubione (**x**), porównania i trendy gdzie możliwe.\n"
-        "3. Pobierz WSZYSTKIE potrzebne dane narzędziami.\n"
-        "4. Jeśli dane zawierają liczby nadające się do porównania (np. przychód wg produktu, "
-        "liczba/wartość zamówień wg dnia lub statusu, koszty vs zysk, top produkty) — dołącz "
-        "PO odpowiedniej sekcji jeden blok kodu oznaczony jako 'chart' z wykresem w formacie JSON:\n"
-        "```chart\n"
-        '{"type":"bar","title":"Tytuł wykresu","labels":["Etykieta 1","Etykieta 2"],'
-        '"series":[{"name":"Nazwa serii","data":[100,200]}]}\n'
-        "```\n"
-        "   - type: \"bar\" | \"line\" | \"pie\" | \"doughnut\" — dobierz do danych "
-        "(trend w czasie → line, porównanie kategorii → bar, udział w całości → pie/doughnut)\n"
-        "   - labels: kategorie, dni lub nazwy produktów (oś X albo segmenty)\n"
-        "   - series: jedna lub więcej serii liczbowych, każda o tej samej długości co labels\n"
-        "   - Użyj WYŁĄCZNIE prawdziwych liczb zwróconych przez narzędzia — nigdy nie zmyślaj "
-        "danych do wykresu; jeśli danych jest za mało na sensowny wykres, pomiń blok chart\n"
-        "   - Możesz dodać więcej niż jeden blok ```chart, jeśli sensowne są różne wykresy\n\n"
-        "Zapytanie: "
-    ),
-}
-
-# ── Keyword maps ───────────────────────────────────────────────────────────────
-
-# Ordered list — first match wins.
-# Each entry: (keyword_list, label)
+# ── Keyword map ─────────────────────────────────────────────────────────────────
+# Ordered list — first match wins. Each entry: (keyword_list, label)
 
 _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
     # Store policies / FAQs — check BEFORE orders so "polityka zwrotów" → rag not orders
@@ -176,45 +109,14 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
      "none"),
 ]
 
-_FORMAT_KEYWORDS: list[tuple[list[str], str]] = [
-    # Document — email, report, letter, template, product/offer description
-    (["wygeneruj", "generuj ", "napisz mail", "napisz email", "email do ",
-      "mail do ", "stwórz raport", "utwórz raport", "przygotuj raport",
-      "przygotuj dokument", "stwórz dokument", "napisz list", "szablon maila",
-      "szablon email", "napisz pismo", "przygotuj pismo",
-      "przygotuj maila", "przygotuj mail", "przygotuj email",
-      "przygotuj wiadomość", "napisz wiadomość", "utwórz maila",
-      "utwórz mail", "utwórz email", "utwórz wiadomość",
-      "przygotuj ofertę", "napisz ofertę", "przygotuj list",
-      "wyślij maila", "wyślij mail", "wyślij email",
-      "napisz opis", "przygotuj opis", "stwórz opis", "utwórz opis",
-      "wygeneruj opis", "opisz produkt", "opisz ofertę", "opis produktu",
-      "opis oferty", "napisz ogłoszenie", "przygotuj ogłoszenie"],
-     "document"),
-    # Dashboard — multi-metric summary / analysis / charts
-    (["dashboard", "panel sterowania", "podsumowanie całościowe", "przegląd całościowy",
-      "raport zarządczy", "zestawienie zbiorcze", "analiza sprzedaży", "analizę sprzedaży",
-      "podsumowanie sprzedaży", "wyniki sprzedaży", "trend sprzedaży", "trendy sprzedaży",
-      "jak idzie sprzedaż", "jak sprzedaje", "wykres", "chart", "porównaj sprzedaż"],
-     "dashboard"),
-    # Table — structured data, or a request to list multiple records
-    (["w tabeli", "jako tabela", "tabelę", "tabelarycznie", "zestawienie w tabeli",
-      "pokaż tabelę", "csv", "w formie tabeli",
-      "nowe zamówieni", "moje zamówieni", "pokaż zamówieni", "lista zamówień",
-      "wszystkie zamówieni", "moje oferty", "aktywne oferty", "pokaż oferty",
-      "lista ofert", "nieprzeczytane wiadomości", "ostatnie rozliczeni",
-      "rozliczenia allegro"],
-     "table"),
-]
-
 
 class Orchestrator:
     """
     Routes incoming messages to the correct specialized agent.
 
-    Classification is 2D:
-      - data_source: which Allegro sub-system (or rag/none) to query
-      - output_format: chat | table | document | dashboard
+    Classification is 1D: data_source — which Allegro sub-system (or rag/none)
+    to query. The reply's presentation (chat/table/document/dashboard/action) is
+    decided downstream by the agent, from which tool it actually called.
 
     Agent pool:
       - AllegroAgent: all Allegro marketplace operations
@@ -254,9 +156,9 @@ class Orchestrator:
             sender_id=message.sender_id,
         )
 
-        # Classify on both dimensions
+        # Classify the data source
         try:
-            data_source, output_format = await self._classify(
+            data_source = await self._classify(
                 message.text,
                 session.to_anthropic_messages(),
                 last_source=session.metadata.get("last_data_source"),
@@ -272,16 +174,11 @@ class Orchestrator:
             await self._firestore.save_session(session)
             return response
 
-        logger.info(
-            "Routing: source=%s format=%s | %.60s…",
-            data_source, output_format, message.text,
-        )
+        logger.info("Routing: source=%s | %.60s…", data_source, message.text)
 
-        # Route to the right agent + format mode
+        # Route to the right agent
         try:
-            response = await self._route(
-                data_source, output_format, message, session.to_anthropic_messages(), user_id
-            )
+            response = await self._route(data_source, message, session.to_anthropic_messages(), user_id)
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
             response = AgentResponse(
@@ -292,7 +189,6 @@ class Orchestrator:
         # Remember what this turn was about so a keyword-less follow-up
         # ("sprawdź jeszcze raz") can anchor to it instead of defaulting to none.
         session.metadata["last_data_source"] = data_source
-        session.metadata["last_output_format"] = output_format
 
         # Persist conversation
         session.add_message(MessageRole.USER, message.text)
@@ -307,20 +203,12 @@ class Orchestrator:
         "allegro_orders", "allegro_offers", "allegro_messaging",
         "allegro_account", "rag", "none",
     ])
-    _KNOWN_FORMATS = frozenset(["chat", "table", "document", "dashboard"])
 
     def _keyword_source(self, query: str) -> str | None:
         q = query.lower()
         for keywords, source in _SOURCE_KEYWORDS:
             if any(kw in q for kw in keywords):
                 return source
-        return None
-
-    def _keyword_format(self, query: str) -> str | None:
-        q = query.lower()
-        for keywords, fmt in _FORMAT_KEYWORDS:
-            if any(kw in q for kw in keywords):
-                return fmt
         return None
 
     def _is_self_contained(self, query: str) -> bool:
@@ -332,8 +220,8 @@ class Orchestrator:
         query: str,
         history: list[dict[str, str]],
         known_sources: list[str],
-    ) -> tuple[str, str]:
-        """Single LLM call — full history context → returns (source, format)."""
+    ) -> str:
+        """Single LLM call — full history context → returns the data source label."""
         # Build a conversation-style prompt so the LLM sees the full flow
         history_snippet = history[-8:] if len(history) > 8 else history
         messages = [{"role": "system", "content": _CLASSIFY_SYSTEM}]
@@ -351,52 +239,43 @@ class Orchestrator:
                 self._settings.model_fast_pool(),
                 "orchestrator/classify",
                 # Thinking-capable models (gemini-3.5-flash, 2.5-flash) spend part of
-                # max_tokens on invisible reasoning before the visible "source|format"
-                # answer — 30 tokens left no room for it, so the visible output was
-                # sometimes empty/truncated. reasoning_effort="none" skips that for
-                # this simple, deterministic task; max_tokens raised as a safety margin.
-                max_tokens=200,
+                # max_tokens on invisible reasoning before the visible answer — 30
+                # tokens left no room for it, so the visible output was sometimes
+                # empty/truncated. reasoning_effort="none" skips that for this
+                # simple, deterministic task; max_tokens raised as a safety margin.
+                max_tokens=100,
                 reasoning_effort="none",
                 messages=messages,
             )
             raw = (resp.choices[0].message.content or "").strip().lower()
             logger.info("LLM classifier raw: %r (query=%.50r)", raw, query)
 
-            # Parse "source|format"
-            parts = raw.replace(" ", "").split("|")
-            if len(parts) == 2:
-                src, fmt = parts[0].strip(), parts[1].strip()
-                # Validate — fuzzy match for robustness
-                matched_src = next((s for s in all_sources if s in src or src in s), None)
-                matched_fmt = next((f for f in self._KNOWN_FORMATS if f in fmt or fmt in f), None)
-                if matched_src and matched_fmt:
-                    return matched_src, matched_fmt
+            matched = next((s for s in all_sources if s in raw), None)
+            if matched:
+                return matched
 
-            # Fallback: try substring match on the whole output
-            src = next((s for s in all_sources if s in raw), "none")
-            fmt = next((f for f in self._KNOWN_FORMATS if f in raw), "chat")
-            logger.warning("LLM classifier fallback parse: src=%s fmt=%s from %r", src, fmt, raw)
-            return src, fmt
+            logger.warning("LLM classifier fallback to 'none' from %r", raw)
+            return "none"
 
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError):
             raise
         except Exception as exc:
             logger.error("Classification LLM failed: %s", exc)
-            return "none", "chat"
+            return "none"
 
     async def _classify(
         self,
         query: str,
         history: list[dict[str, str]],
         last_source: str | None = None,
-    ) -> tuple[str, str]:
-        """Classify query into (data_source, output_format) using full conversation context.
+    ) -> str:
+        """Classify query into a data_source using full conversation context.
 
         Strategy:
-          1. Always compute a keyword-based source/format guess. Domain nouns like
+          1. Always compute a keyword-based source guess. Domain nouns like
              "faktur" or "zamówien" are unambiguous regardless of sentence length.
-          2. If the query is long/self-contained AND both dimensions match keywords,
-             skip the LLM entirely (cheap fast-path).
+          2. If the query is long/self-contained AND matches keywords, skip the
+             LLM entirely (cheap fast-path).
           3. Otherwise call the LLM — but never let it silently override an
              unambiguous keyword match. The classifier occasionally defaults an
              obvious topic to "none" (flaky output, timeout, parse edge case),
@@ -409,13 +288,12 @@ class Orchestrator:
         """
         known_sources = list(self._KNOWN_SOURCES)
         kw_source = self._keyword_source(query)
-        kw_format = self._keyword_format(query)
 
-        if self._is_self_contained(query) and kw_source is not None and kw_format is not None:
-            logger.info("Keyword fast-path: src=%s fmt=%s | %.60s", kw_source, kw_format, query)
-            return kw_source, kw_format
+        if self._is_self_contained(query) and kw_source is not None:
+            logger.info("Keyword fast-path: src=%s | %.60s", kw_source, query)
+            return kw_source
 
-        source, fmt = await self._classify_with_llm(query, history, known_sources)
+        source = await self._classify_with_llm(query, history, known_sources)
 
         if kw_source is not None and source != kw_source:
             logger.warning(
@@ -423,8 +301,6 @@ class Orchestrator:
                 source, kw_source, query,
             )
             source = kw_source
-        if kw_format is not None and fmt != kw_format:
-            fmt = kw_format
 
         if (
             source == "none"
@@ -439,48 +315,40 @@ class Orchestrator:
             )
             source = last_source
 
-        logger.info("LLM routing: src=%s fmt=%s | %.60s", source, fmt, query)
-        return source, fmt
+        logger.info("LLM routing: src=%s | %.60s", source, query)
+        return source
 
     # ── Routing ────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _apply_format_prefix(query: str, output_format: str) -> str:
-        """Prepend format instructions to the user query when not in chat mode."""
-        prefix = _FORMAT_PREFIXES.get(output_format, "")
-        return prefix + query if prefix else query
 
     async def _route(
         self,
         data_source: str,
-        output_format: str,
         message: IncomingMessage,
         history: list[dict[str, str]],
         user_id: str | None = None,
     ) -> AgentResponse:
-        """Dispatch to the right agent based on data source + output format."""
+        """Dispatch to the right agent based on data source. Each agent decides its
+        own output format (see AgentResponse.metadata["output_format"]) from
+        whichever tool it actually called — the orchestrator just forwards it."""
 
         # Extra registered agents
         for prefix, agent in self._extra_agents.items():
             if data_source.startswith(prefix):
-                query = self._apply_format_prefix(message.text, output_format)
-                response = await agent.run(query, history)
-                response.agent_type = f"{data_source}:{output_format}"
+                response = await agent.run(message.text, history)
+                response.agent_type = f"{data_source}:{response.metadata.get('output_format', 'chat')}"
                 return response
-
-        query = self._apply_format_prefix(message.text, output_format)
 
         # Allegro sub-systems → AllegroAgent
         if data_source.startswith("allegro_"):
-            response = await self._get_allegro_agent(user_id).run(query, history)
-            response.agent_type = f"{data_source}:{output_format}"
+            response = await self._get_allegro_agent(user_id).run(message.text, history)
+            response.agent_type = f"{data_source}:{response.metadata.get('output_format', 'chat')}"
             return response
 
         # Knowledge base
         if data_source == "rag":
             try:
-                response = await self._get_rag_agent().run(query, history)
-                response.agent_type = f"rag:{output_format}"
+                response = await self._get_rag_agent().run(message.text, history)
+                response.agent_type = "rag:chat"
                 return response
             except Exception as exc:
                 logger.error("RAGAgent failed, falling back to chitchat: %s", exc)
@@ -489,8 +357,8 @@ class Orchestrator:
                 return response
 
         # No data needed → conversational handler
-        response = await self._handle_chitchat(query, history)
-        response.agent_type = f"none:{output_format}"
+        response = await self._handle_chitchat(message.text, history)
+        response.agent_type = "none:chat"
         return response
 
     # ── Chitchat handler ───────────────────────────────────────────────────────
