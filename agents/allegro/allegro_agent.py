@@ -92,6 +92,10 @@ class AllegroAgent(BaseAgent):
         "• Offer list / 'lista ofert' / 'zestawienie ofert' / 'pokaż oferty' / 'moje oferty' → get_active_offers\n"
         "• Offer stock / 'stany magazynowe' / 'ile mam' / 'które kończą się' → query_offers_by_stock\n"
         "• Offer prices / 'ceny ofert' / 'drogie oferty' / 'najtańsze' → query_offers_by_price\n"
+        "• Reorder/restock email to a SUPPLIER — 'wygeneruj mail z zamówieniem do dostawcy', "
+        "'przygotuj zamówienie uzupełniające', 'lista produktów do zamówienia' — "
+        "→ get_products_to_reorder (NOT get_orders_delivery — that tool is for couriers/shipping "
+        "on existing customer orders, this one is for restocking FROM a supplier)\n"
         "Even if the conversation history contains order or offer data, you MUST re-fetch via tool for any of the above. "
         "ANTI-HALLUCINATION — Allegro offer IDs are always 11-digit numbers (e.g. '12345678901'). "
         "If you find yourself writing UUID-format IDs (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), "
@@ -724,6 +728,35 @@ class AllegroAgent(BaseAgent):
                 lines.append(
                     f"- **{name}** — **{self._format_price(price, currency)}** — "
                     f"stan: {stock} szt. — ID: `{oid}`"
+                )
+            return "\n".join(lines)
+
+        if tool_name == "get_products_to_reorder":
+            assortment = tool_input.get("assortment")
+            max_stock = tool_input.get("max_stock", 5)
+            if assortment:
+                offers, _ = await self._allegro.get_offers(name=assortment, limit=100)
+            else:
+                offers = await self._allegro.get_all_offers()
+            logger.info(
+                "get_products_to_reorder: %d raw offers (assortment=%r, max_stock=%s)",
+                len(offers), assortment, max_stock,
+            )
+            aggregated = self._aggregate_offers_by_name(offers)
+            results = [g for g in aggregated if g["total_stock"] <= max_stock]
+            results.sort(key=lambda g: g["total_stock"])
+            logger.info("get_products_to_reorder: %d products at or below threshold", len(results))
+            if not results:
+                scope = f" w asortymencie „{assortment}”" if assortment else ""
+                return f"Brak produktów{scope} wymagających uzupełnienia (próg: {max_stock} szt.)."
+            scope = f" — asortyment: „{assortment}”" if assortment else ""
+            header = f"Produkty do zamówienia (stan ≤ {max_stock} szt.{scope}) — {len(results)} pozycji:\n"
+            lines = [header]
+            for g in results:
+                ids_str = ", ".join(f"`{i}`" for i in g["ids"])
+                lines.append(
+                    f"- **{g['name']}** — stan obecny: **{g['total_stock']} szt.** — "
+                    f"cena sprzedaży: {self._format_price(g['price'], g['currency'])} — ID: {ids_str}"
                 )
             return "\n".join(lines)
 

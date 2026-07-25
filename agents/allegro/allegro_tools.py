@@ -201,6 +201,46 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_products_to_reorder",
+            "description": (
+                "Find products that are low on stock and need reordering/restocking from a "
+                "supplier, optionally narrowed to one assortment/category by partial name "
+                "match (e.g. 'włóczka', 'guziki', 'tkanina'). Returns each matching product's "
+                "name, current total stock, and price, aggregated across all listings of the "
+                "same product, sorted by stock ascending (lowest stock — most urgent — first). "
+                "USE THIS TOOL when the user asks to prepare a reorder/restock email or list "
+                "to send to a supplier: 'wygeneruj mail z zamówieniem do dostawcy', "
+                "'przygotuj zamówienie uzupełniające', 'napisz do dostawcy o brakujące "
+                "produkty', 'lista produktów do zamówienia', 'jakie produkty trzeba zamówić'. "
+                "Do NOT use this for a plain stock-level question — use query_offers_by_stock "
+                "for that."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "assortment": {
+                        "type": "string",
+                        "description": (
+                            "Optional: filter to one product category/assortment by partial "
+                            "name match (e.g. 'włóczka'). Leave empty to consider all products."
+                        ),
+                    },
+                    "max_stock": {
+                        "type": "integer",
+                        "description": (
+                            "Only include products with total stock at or below this level "
+                            "(i.e. needing restock). Defaults to 5 unless the user specifies "
+                            "a different threshold (e.g. 'poniżej 10 sztuk')."
+                        ),
+                        "default": 5,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_offer_details",
             "description": "Get full details of a specific offer by its ID.",
             "parameters": {
@@ -543,6 +583,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_offers_summary": "dashboard",
     "query_offers_by_stock": "table",
     "query_offers_by_price": "table",
+    "get_products_to_reorder": "document",
     "get_offer_details": "chat",
     "update_offer_price": "action",
     "update_offer_stock": "action",
