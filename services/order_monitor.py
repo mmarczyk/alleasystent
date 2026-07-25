@@ -128,8 +128,6 @@ async def _poll_user(r, user_id: str) -> None:
     except (AllegroAuthError, AllegroAPIError) as exc:
         logger.warning("Order monitor: Allegro API error user=%s: %s", user_id, exc)
         return
-    finally:
-        await allegro.close()
 
     # Persist the new last_event_id regardless of whether there are new orders
     new_last = result.get("last_event_id")
