@@ -71,12 +71,16 @@ KLUCZOWE ZASADY:
   dziedziczą kontekst z poprzednich wiadomości — nie traktuj ich jako nowych tematów
 - Jeśli user kontynuuje temat z historii, użyj tego samego źródła i formatu
 - Gdy user poprawia lub doprecyzowuje — to nadal ten sam kontekst
-- Prośba o LISTĘ wielu elementów (zamówienia, oferty, wiadomości, rozliczenia) → table,
-  nawet jeśli user nie użył słowa "tabela" (np. "pokaż moje nowe zamówienia" → table)
+- Prośba o LISTĘ wielu elementów, gdzie user oczekuje przejrzenia wielu rekordów naraz
+  (zamówienia, oferty, wiadomości, rozliczenia) → table, nawet jeśli user nie użył słowa
+  "tabela" (np. "pokaż moje nowe zamówienia" → table)
 - Prośba o OPIS, treść do wysłania/wklejenia gdzie indziej (opis produktu, mail, raport,
   ogłoszenie) → document
 - Prośba o ANALIZĘ, porównanie, trend, wykres, "jak idzie sprzedaż" → dashboard
-- Pojedyncza liczba/fakt bez potrzeby listy ani analizy (np. "ile mam nowych zamówień?") → chat
+- Pytanie TAK/NIE lub o pojedynczy fakt/liczbę → chat, NIGDY table, nawet jeśli dotyczy
+  zamówień/wiadomości/ofert (np. "czy mam nowe wiadomości?", "ile mam nowych zamówień?",
+  "czy są jakieś zwroty?", "czy ktoś do mnie napisał?") — user oczekuje krótkiej
+  odpowiedzi, nie listy do przeglądania
 
 Format odpowiedzi: source|format
 Przykłady: allegro_offers|document   allegro_orders|table   none|chat
@@ -101,6 +105,9 @@ _FORMAT_PREFIXES: dict[str, str] = {
         "[TRYB TABELI — ZASADY BEZWZGLĘDNE]\n"
         "KROK 1 — DANE PIERWSZE: wywołaj odpowiednie narzędzie(a) i poczekaj na wynik.\n"
         "         BEZ WYWOŁANIA NARZĘDZIA = BEZ TABELI. Nigdy nie generuj danych z pamięci.\n"
+        "KROK 1b — BRAK WYNIKÓW: jeśli narzędzie zwróciło 0 rekordów, NIE twórz tabeli "
+        "(pustej ani z przykładowymi danymi) — odpowiedz jednym krótkim zdaniem, np. "
+        "'Nie masz obecnie żadnych nowych wiadomości.'\n"
         "KROK 2 — TABELA: zbuduj tabelę markdown WYŁĄCZNIE z danych zwróconych przez narzędzie.\n"
         "         Pierwsza linia: nagłówek | kolumna1 | kolumna2 | ...\n"
         "         NIE pisz żadnego wstępu, potwierdzenia ani preambuły przed tabelą.\n"

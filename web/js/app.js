@@ -985,11 +985,11 @@ const Chat = (() => {
     }
   }
 
-  // Table-format responses put the markdown table first and any summary
-  // sentence last — slicing the first 220 raw chars just shows garbled
-  // "| Zamówienie | Kupujący | ... | :…" table syntax. Prefer the trailing
-  // summary sentence, or a row-count label, over dumping the table itself.
-  function _tablePreview(content) {
+  // Finds the markdown table (if any) in a bot reply and counts its data rows.
+  // Shared by _tablePreview (chat-bubble summary) and buildBubble (decides
+  // whether a table-format reply is substantial enough to be treated as an
+  // artifact — an empty/no-result table must NOT trigger the doc viewer).
+  function _tableStats(content) {
     const lines = content.split('\n');
     const isTableLine = (l) => /^\s*\|.*\|\s*$/.test(l);
     const isSepLine = (l) => /^\s*\|[\s:|-]+\|\s*$/.test(l);
@@ -1001,15 +1001,24 @@ const Chat = (() => {
         if (!isSepLine(l)) dataRows++;
       }
     });
-    if (lastTableLineIdx === -1) return null;
-    dataRows = Math.max(dataRows - 1, 0); // exclude header row
-    const trailing = lines.slice(lastTableLineIdx + 1).join(' ')
+    if (lastTableLineIdx === -1) return { hasTable: false, dataRows: 0, lines, lastTableLineIdx };
+    return { hasTable: true, dataRows: Math.max(dataRows - 1, 0), lines, lastTableLineIdx };
+  }
+
+  // Table-format responses put the markdown table first and any summary
+  // sentence last — slicing the first 220 raw chars just shows garbled
+  // "| Zamówienie | Kupujący | ... | :…" table syntax. Prefer the trailing
+  // summary sentence, or a row-count label, over dumping the table itself.
+  function _tablePreview(content) {
+    const stats = _tableStats(content);
+    if (!stats.hasTable) return null;
+    const trailing = stats.lines.slice(stats.lastTableLineIdx + 1).join(' ')
       .replace(/[#*`_[\]]/g, '').trim();
     if (trailing) {
       return trailing.slice(0, 220) + (trailing.length > 220 ? '…' : '');
     }
-    const noun = dataRows === 1 ? 'wiersz' : 'wierszy';
-    return `📊 Tabela — ${dataRows} ${noun}. Kliknij „Pełny widok”, aby zobaczyć szczegóły.`;
+    const noun = stats.dataRows === 1 ? 'wiersz' : 'wierszy';
+    return `📊 Tabela — ${stats.dataRows} ${noun}. Kliknij „Pełny widok”, aby zobaczyć szczegóły.`;
   }
 
   // Action buttons (monitoring toggle etc.) are always appended at the very end of
@@ -1045,7 +1054,12 @@ const Chat = (() => {
     const { text: bodyText, html: trailingHtml } = isUser
       ? { text: content, html: null }
       : _extractTrailingHtml(content);
-    const isArtifact = !isUser && _ARTIFACT_FORMATS.has(format);
+    // A "table" reply only counts as an artifact when it actually contains rows —
+    // an empty/no-results table (e.g. "brak nowych wiadomości") must render as a
+    // normal short chat reply, not get hidden behind a doc-viewer link.
+    const tableStats = !isUser ? _tableStats(bodyText) : null;
+    const isArtifact = !isUser && _ARTIFACT_FORMATS.has(format)
+      && (format !== 'table' || (tableStats.hasTable && tableStats.dataRows > 0));
     const isLong = !isUser && (bodyText.length > 500 || (isArtifact && bodyText.length > 150));
     const div = document.createElement('div');
     div.className = `msg msg-${isUser ? 'user' : 'bot'}`;
