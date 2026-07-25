@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 """
-Background order monitor — polls Allegro via event API and pushes notifications
-to all subscribed devices when new READY_FOR_PROCESSING orders arrive.
+Order monitor — polls Allegro via event API and pushes notifications to all
+subscribed devices when new READY_FOR_PROCESSING orders arrive.
 
-This runs as an asyncio background task started in the FastAPI lifespan so that
-iOS PWA users receive push notifications even when the app is backgrounded
-(JavaScript is paused by iOS and cannot poll on its own).
+Runs as a one-shot pass (run_once) invoked by the alleasystent-order-monitor
+Cloud Run Job on a Cloud Scheduler cron (see jobs/order_monitor_job.py) — NOT
+as a long-lived task inside the web app. That used to run as an infinite
+asyncio loop in the FastAPI process, but Cloud Run only allocates CPU while a
+request is in flight and can scale instances to zero, so the loop could go
+silently idle or die; a scheduled one-shot job is deterministic regardless of
+web traffic and works even when iOS PWA is backgrounded (JS can't poll then).
 """
 
-import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
 
-_POLL_INTERVAL = 90   # seconds between checks per user
-_STARTUP_DELAY  = 25  # wait for app to fully start before first poll
 _STATE_KEY      = "allegro:monitor:last_event:{user_id}"
 _STATE_TTL      = 86400 * 30  # 30 days
 _ENABLED_KEY    = "allegro:monitor:enabled:{user_id}"
@@ -55,24 +56,17 @@ async def set_monitor_enabled(user_id: str, enabled: bool) -> None:
         await r.aclose()
 
 
-async def run_order_monitor() -> None:
-    """Entry point — call as asyncio.create_task() from FastAPI lifespan."""
+async def run_once() -> None:
+    """Entry point for the Cloud Run Job — one polling pass over every
+    user with automatic order checking enabled, then returns."""
     from config.settings import get_settings
 
     redis_url = get_settings().redis_url
     if not redis_url or not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
-        logger.info("Order monitor disabled: REDIS_URL not set or has invalid scheme")
+        logger.info("Order monitor skipped: REDIS_URL not set or has invalid scheme")
         return
 
-    await asyncio.sleep(_STARTUP_DELAY)
-    logger.info("Order monitor started (poll every %ds)", _POLL_INTERVAL)
-
-    while True:
-        try:
-            await _poll_all_users()
-        except Exception:
-            logger.exception("Order monitor cycle error")
-        await asyncio.sleep(_POLL_INTERVAL)
+    await _poll_all_users()
 
 
 async def _poll_all_users() -> None:

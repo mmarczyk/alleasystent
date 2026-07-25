@@ -1,0 +1,18 @@
+# ── Minimal dependency set for jobs/ Cloud Run Jobs (scheduled background
+# tasks, e.g. order monitor) ────────────────────────────────────────────────
+# Deliberately excludes fastapi/uvicorn, openai, chromadb/sentence-transformers
+# (RAG) and google-cloud-* — none of that is needed to poll Allegro and send a
+# push notification, and skipping it keeps this image a fraction of the size
+# of the main web app image (which bakes in a ~400 MB embedding model).
+# Keep in sync with the subset of requirements.txt actually imported by
+# services/order_monitor.py, services/allegro_service.py, services/push_service.py.
+
+pydantic==2.10.3
+pydantic-settings==2.6.1
+eval_type_backport==0.2.0
+
+httpx>=0.24.0
+redis[hiredis]>=5.0.0
+pywebpush>=2.0.0
+
+python-dotenv==1.0.1
