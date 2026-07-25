@@ -62,6 +62,14 @@ jobs:
       # `gcloud run jobs deploy` creates the job if it doesn't exist yet and
       # updates it otherwise — but deployment/setup_gcp.sh should still be run
       # once first to create the Cloud Scheduler trigger that invokes it.
+      #
+      # Deliberately no --service-account: deploy-backend.yml doesn't set one
+      # either, so the main service runs as the default compute service
+      # account — which already has working access to the secrets below.
+      # Pinning this Job to alleasystent-sa would need github-actions@... to
+      # hold iam.serviceAccounts.actAs on it (a one-time IAM grant that isn't
+      # in place), so it fails with a "does not have permission to access
+      # namespaces... Permission 'iam.serviceaccounts.actAs' denied" error.
       - name: Deploy order-monitor Cloud Run Job
         run: |
           gcloud run jobs deploy ${{ env.JOB_NAME }} \
@@ -71,7 +79,6 @@ jobs:
             --cpu=1 \
             --max-retries=1 \
             --task-timeout=120s \
-            --service-account=alleasystent-sa@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com \
             --update-secrets=GOOGLE_API_KEY=google-api-key:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=vapid-public-key:latest \
             --update-env-vars=APP_ENV=production,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},VAPID_EMAIL=${{ vars.VAPID_EMAIL }} \
             --quiet
