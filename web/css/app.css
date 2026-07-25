@@ -593,6 +593,21 @@ select option { background: var(--bg2); }
 }
 .doc-content tbody tr:hover { background: rgba(99,102,241,.07); }
 
+/* Charts embedded in dashboard-format replies (see DocViewer._renderCharts) */
+.chart-wrap {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1rem 1.25rem 1.25rem;
+  margin: .75rem 0 1.25rem;
+}
+.chart-title {
+  font-size: .85rem; font-weight: 700; color: var(--accent);
+  text-transform: uppercase; letter-spacing: .4px; margin-bottom: .75rem;
+}
+.chart-canvas-box { position: relative; height: 280px; width: 100%; }
+@media (max-width: 768px) {
+  .chart-canvas-box { height: 220px; }
+}
+
 /* Button in chat bubble to open doc viewer */
 .msg-act-doc { color: var(--accent) !important; border-color: rgba(99,102,241,.4) !important; }
 .msg-act-doc:hover { background: rgba(99,102,241,.12) !important; border-color: var(--accent) !important; }

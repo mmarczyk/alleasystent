@@ -196,12 +196,23 @@ const DocViewer = (() => {
 
   function openFromKey(key) {
     const entry = _registry[key];
-    if (entry) open(_titleFromContent(entry.content), entry.content, entry.kind);
+    if (!entry) return;
+    // Auto-open (new replies) and the "Pełny widok" button on that same bubble
+    // both resolve to this key — reuse the existing tab instead of stacking
+    // duplicates when the user reopens something already open.
+    const existing = _tabs.find(t => t.regKey === key);
+    if (existing) {
+      _activeId = existing.id;
+      _render();
+      document.getElementById('doc-viewer').classList.remove('hidden');
+      return;
+    }
+    open(_titleFromContent(entry.content), entry.content, entry.kind, key);
   }
 
-  function open(title, content, kind) {
+  function open(title, content, kind, regKey) {
     const id = ++_nextId;
-    _tabs.push({ id, title: (title || _titleFromContent(content)).slice(0, 60), content, kind });
+    _tabs.push({ id, title: (title || _titleFromContent(content)).slice(0, 60), content, kind, regKey });
     _activeId = id;
     _render();
     document.getElementById('doc-viewer').classList.remove('hidden');
@@ -250,9 +261,80 @@ const DocViewer = (() => {
     content.innerHTML = active ? renderMarkdown(active.content) : '';
     content.dataset.kind = active?.kind || '';
     if (active?.kind === 'dashboard') _wrapDashboardSections(content);
+    _renderCharts(content);
     if (typeof hljs !== 'undefined') {
       content.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
     }
+  }
+
+  // ── Charts ────────────────────────────────────────
+  // Dashboard-format replies may embed one or more ```chart fenced JSON blocks
+  // (see agents/orchestrator.py _FORMAT_PREFIXES["dashboard"]). Marked renders
+  // those as <pre><code class="language-chart">...</code></pre> — swap each
+  // one for a live Chart.js canvas instead of showing raw JSON.
+  const CHART_PALETTE = ['#818cf8', '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16'];
+
+  function _chartConfig(spec) {
+    const type = ['bar', 'line', 'pie', 'doughnut'].includes(spec.type) ? spec.type : 'bar';
+    const isSliced = type === 'pie' || type === 'doughnut';
+    const labels = Array.isArray(spec.labels) ? spec.labels : [];
+    const series = Array.isArray(spec.series) ? spec.series : [];
+    const datasets = series.map((s, i) => ({
+      label: s.name || `Seria ${i + 1}`,
+      data: Array.isArray(s.data) ? s.data : [],
+      backgroundColor: isSliced
+        ? labels.map((_, j) => CHART_PALETTE[j % CHART_PALETTE.length])
+        : CHART_PALETTE[i % CHART_PALETTE.length],
+      borderColor: isSliced ? '#0f0f1a' : CHART_PALETTE[i % CHART_PALETTE.length],
+      borderWidth: isSliced ? 2 : (type === 'line' ? 2 : 1),
+      fill: type === 'line' ? false : true,
+      tension: .3,
+    }));
+    return {
+      type,
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            display: datasets.length > 1 || isSliced,
+            labels: { color: '#e2e8f0' },
+          },
+        },
+        scales: isSliced ? {} : {
+          x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,.12)' } },
+          y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,.12)' }, beginAtZero: true },
+        },
+      },
+    };
+  }
+
+  function _renderCharts(container) {
+    if (typeof Chart === 'undefined') return;
+    container.querySelectorAll('code[class*="language-chart"]').forEach(codeEl => {
+      let spec;
+      try { spec = JSON.parse(codeEl.textContent); } catch { return; }
+      const pre = codeEl.closest('pre');
+      if (!pre) return;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'chart-wrap';
+      if (spec.title) {
+        const title = document.createElement('div');
+        title.className = 'chart-title';
+        title.textContent = spec.title;
+        wrap.appendChild(title);
+      }
+      const canvasBox = document.createElement('div');
+      canvasBox.className = 'chart-canvas-box';
+      const canvas = document.createElement('canvas');
+      canvasBox.appendChild(canvas);
+      wrap.appendChild(canvasBox);
+
+      pre.replaceWith(wrap);
+      try { new Chart(canvas.getContext('2d'), _chartConfig(spec)); } catch (e) { console.error('[Chart]', e); }
+    });
   }
 
   // Groups each ## (or #) heading and the elements that follow it into a
@@ -938,12 +1020,33 @@ const Chat = (() => {
     return { text: content.slice(0, m.index).trimEnd(), html: m[0] };
   }
 
-  function buildBubble(role, content, ts, index, format) {
+  // Formats that always belong in the full-window doc viewer, the same way
+  // Claude pops a description into an artifact instead of dumping it in the
+  // chat bubble: tables get a chat summary + full table doc, documents and
+  // dashboards open straight away (see finalizeWaitingBubble's autoOpen).
+  const _ARTIFACT_FORMATS = new Set(['table', 'document', 'dashboard']);
+
+  // Short, human preview for document/dashboard replies: leading heading (if
+  // any) + the first line of body text — no raw markdown/table dump.
+  function _docPreview(bodyText, format) {
+    if (format !== 'document' && format !== 'dashboard') return null;
+    const heading = bodyText.match(/^#{1,2}\s+(.+)/m);
+    const title = heading ? heading[1].replace(/[*`_]/g, '').trim() : null;
+    const rest = heading ? bodyText.slice(bodyText.indexOf(heading[0]) + heading[0].length) : bodyText;
+    const lead = rest.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').replace(/\s+/g, ' ').trim();
+    const leadShort = lead.slice(0, 160) + (lead.length > 160 ? '…' : '');
+    const icon = format === 'dashboard' ? '📊' : '📄';
+    if (title) return `${icon} ${title}${leadShort ? ' — ' + leadShort : ''}`;
+    return `${icon} ${leadShort || (format === 'dashboard' ? 'Analiza gotowa.' : 'Dokument gotowy.')}`;
+  }
+
+  function buildBubble(role, content, ts, index, format, autoOpen) {
     const isUser = role === 'user';
     const { text: bodyText, html: trailingHtml } = isUser
       ? { text: content, html: null }
       : _extractTrailingHtml(content);
-    const isLong = !isUser && bodyText.length > 500;
+    const isArtifact = !isUser && _ARTIFACT_FORMATS.has(format);
+    const isLong = !isUser && (bodyText.length > 500 || (isArtifact && bodyText.length > 150));
     const div = document.createElement('div');
     div.className = `msg msg-${isUser ? 'user' : 'bot'}`;
     div.dataset.index = index ?? '';
@@ -963,10 +1066,15 @@ const Chat = (() => {
       if (tablePreview !== null) {
         previewShort = escHtml(tablePreview);
       } else {
-        const preview = bodyText.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
-        previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
+        const docPreview = _docPreview(bodyText, format);
+        if (docPreview !== null) {
+          previewShort = escHtml(docPreview);
+        } else {
+          const preview = bodyText.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
+          previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
+        }
       }
-      bubbleHtml = `<p style="color:var(--text-muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>` +
+      bubbleHtml = `<p style="color:var(--muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>` +
         `<a href="javascript:void(0)" onclick="DocViewer.openFromKey(${docKey})" ` +
         `style="display:inline-block;font-size:.85rem;font-weight:600;color:var(--accent);text-decoration:none">` +
         `📄 Zobacz pełną odpowiedź →</a>`;
@@ -987,6 +1095,14 @@ const Chat = (() => {
         </div>
         ${time ? `<span class="msg-time">${time}</span>` : ''}
       </div>`;
+
+    // Auto-open the full-window doc viewer for fresh table/document/dashboard
+    // replies — mirrors Claude popping an artifact open instead of making the
+    // user hunt for a "show more" link. Only requested for live new replies
+    // (see finalizeWaitingBubble); history reloads never pass autoOpen.
+    if (autoOpen && docKey !== null && isArtifact) {
+      DocViewer.openFromKey(docKey);
+    }
     return div;
   }
 
@@ -1014,7 +1130,7 @@ const Chat = (() => {
     const bubble = document.getElementById('waiting-bubble');
     if (!bubble) return;
     const idx = Store.active()?.messages.length - 1;
-    const replacement = buildBubble('assistant', fullText, ts, idx, format);
+    const replacement = buildBubble('assistant', fullText, ts, idx, format, true);
     bubble.replaceWith(replacement);
     _applyMonitoringState(replacement);
     if (typeof hljs !== 'undefined') {

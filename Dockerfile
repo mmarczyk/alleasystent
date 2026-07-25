@@ -27,7 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 RUN mkdir -p /app/web/js/vendor /app/web/css/vendor && \
     curl -sSfL "https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"                                               -o /app/web/js/vendor/marked.min.js && \
     curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"                        -o /app/web/js/vendor/highlight.min.js && \
-    curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"              -o /app/web/css/vendor/github-dark.min.css
+    curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"              -o /app/web/css/vendor/github-dark.min.css && \
+    curl -sSfL "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"                                      -o /app/web/js/vendor/chart.min.js
 
 # Pre-download the embedding model — cached as long as pip packages don't change.
 # Must be BEFORE COPY . . so code edits don't invalidate this ~400 MB layer.

@@ -37,6 +37,8 @@ jobs:
             -o web/js/vendor/highlight.min.js
           curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" \
             -o web/css/vendor/github-dark.min.css
+          curl -sSfL "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" \
+            -o web/js/vendor/chart.min.js
 
       # Inject Cloud Run backend URL and this deploy's commit SHA into config.js.
       # Set BACKEND_URL as a GitHub Actions variable (repo → Settings → Variables):

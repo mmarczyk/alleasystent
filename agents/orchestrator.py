@@ -60,10 +60,10 @@ WYMIAR 1 — ŹRÓDŁO DANYCH (co pobrać żeby odpowiedzieć):
   none              — nie trzeba danych: pozdrowienia, rozmowa, pytania o asystenta
 
 WYMIAR 2 — FORMAT ODPOWIEDZI (jak ma wyglądać wynik):
-  chat      — krótka konwersacyjna odpowiedź
+  chat      — krótka konwersacyjna odpowiedź (jedno pytanie, jedna liczba, pogawędka)
   table     — tabela markdown z wierszami i kolumnami
-  document  — pełny sformatowany dokument (mail, raport, list, szablon)
-  dashboard — wielosekcyjne podsumowanie z kilkoma metrykami
+  document  — pełny sformatowany dokument (mail, raport, list, szablon, OPIS produktu/oferty)
+  dashboard — analiza z metrykami i porównaniami, w tym wykresy (sprzedaż, trendy, statystyki)
 
 KLUCZOWE ZASADY:
 - Uwzględnij CAŁĄ historię rozmowy, szczególnie gdy bieżąca wiadomość jest krótka
@@ -71,6 +71,12 @@ KLUCZOWE ZASADY:
   dziedziczą kontekst z poprzednich wiadomości — nie traktuj ich jako nowych tematów
 - Jeśli user kontynuuje temat z historii, użyj tego samego źródła i formatu
 - Gdy user poprawia lub doprecyzowuje — to nadal ten sam kontekst
+- Prośba o LISTĘ wielu elementów (zamówienia, oferty, wiadomości, rozliczenia) → table,
+  nawet jeśli user nie użył słowa "tabela" (np. "pokaż moje nowe zamówienia" → table)
+- Prośba o OPIS, treść do wysłania/wklejenia gdzie indziej (opis produktu, mail, raport,
+  ogłoszenie) → document
+- Prośba o ANALIZĘ, porównanie, trend, wykres, "jak idzie sprzedaż" → dashboard
+- Pojedyncza liczba/fakt bez potrzeby listy ani analizy (np. "ile mam nowych zamówień?") → chat
 
 Format odpowiedzi: source|format
 Przykłady: allegro_offers|document   allegro_orders|table   none|chat
@@ -108,7 +114,21 @@ _FORMAT_PREFIXES: dict[str, str] = {
         "1. Zacznij od ## nagłówka sekcji — NIE od wstępu.\n"
         "2. Przygotuj wielosekcyjny raport zarządczy: każda sekcja z nagłówkiem ##, "
         "kluczowe liczby pogrubione (**x**), porównania i trendy gdzie możliwe.\n"
-        "3. Pobierz WSZYSTKIE potrzebne dane narzędziami.\n\n"
+        "3. Pobierz WSZYSTKIE potrzebne dane narzędziami.\n"
+        "4. Jeśli dane zawierają liczby nadające się do porównania (np. przychód wg produktu, "
+        "liczba/wartość zamówień wg dnia lub statusu, koszty vs zysk, top produkty) — dołącz "
+        "PO odpowiedniej sekcji jeden blok kodu oznaczony jako 'chart' z wykresem w formacie JSON:\n"
+        "```chart\n"
+        '{"type":"bar","title":"Tytuł wykresu","labels":["Etykieta 1","Etykieta 2"],'
+        '"series":[{"name":"Nazwa serii","data":[100,200]}]}\n'
+        "```\n"
+        "   - type: \"bar\" | \"line\" | \"pie\" | \"doughnut\" — dobierz do danych "
+        "(trend w czasie → line, porównanie kategorii → bar, udział w całości → pie/doughnut)\n"
+        "   - labels: kategorie, dni lub nazwy produktów (oś X albo segmenty)\n"
+        "   - series: jedna lub więcej serii liczbowych, każda o tej samej długości co labels\n"
+        "   - Użyj WYŁĄCZNIE prawdziwych liczb zwróconych przez narzędzia — nigdy nie zmyślaj "
+        "danych do wykresu; jeśli danych jest za mało na sensowny wykres, pomiń blok chart\n"
+        "   - Możesz dodać więcej niż jeden blok ```chart, jeśli sensowne są różne wykresy\n\n"
         "Zapytanie: "
     ),
 }
@@ -150,7 +170,7 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
 ]
 
 _FORMAT_KEYWORDS: list[tuple[list[str], str]] = [
-    # Document — email, report, letter, template
+    # Document — email, report, letter, template, product/offer description
     (["wygeneruj", "generuj ", "napisz mail", "napisz email", "email do ",
       "mail do ", "stwórz raport", "utwórz raport", "przygotuj raport",
       "przygotuj dokument", "stwórz dokument", "napisz list", "szablon maila",
@@ -159,15 +179,24 @@ _FORMAT_KEYWORDS: list[tuple[list[str], str]] = [
       "przygotuj wiadomość", "napisz wiadomość", "utwórz maila",
       "utwórz mail", "utwórz email", "utwórz wiadomość",
       "przygotuj ofertę", "napisz ofertę", "przygotuj list",
-      "wyślij maila", "wyślij mail", "wyślij email"],
+      "wyślij maila", "wyślij mail", "wyślij email",
+      "napisz opis", "przygotuj opis", "stwórz opis", "utwórz opis",
+      "wygeneruj opis", "opisz produkt", "opisz ofertę", "opis produktu",
+      "opis oferty", "napisz ogłoszenie", "przygotuj ogłoszenie"],
      "document"),
-    # Dashboard — multi-metric summary
+    # Dashboard — multi-metric summary / analysis / charts
     (["dashboard", "panel sterowania", "podsumowanie całościowe", "przegląd całościowy",
-      "raport zarządczy", "zestawienie zbiorcze"],
+      "raport zarządczy", "zestawienie zbiorcze", "analiza sprzedaży", "analizę sprzedaży",
+      "podsumowanie sprzedaży", "wyniki sprzedaży", "trend sprzedaży", "trendy sprzedaży",
+      "jak idzie sprzedaż", "jak sprzedaje", "wykres", "chart", "porównaj sprzedaż"],
      "dashboard"),
-    # Table — structured data
+    # Table — structured data, or a request to list multiple records
     (["w tabeli", "jako tabela", "tabelę", "tabelarycznie", "zestawienie w tabeli",
-      "pokaż tabelę", "csv", "w formie tabeli"],
+      "pokaż tabelę", "csv", "w formie tabeli",
+      "nowe zamówieni", "moje zamówieni", "pokaż zamówieni", "lista zamówień",
+      "wszystkie zamówieni", "moje oferty", "aktywne oferty", "pokaż oferty",
+      "lista ofert", "nieprzeczytane wiadomości", "ostatnie rozliczeni",
+      "rozliczenia allegro"],
      "table"),
 ]
 
