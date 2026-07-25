@@ -85,7 +85,9 @@ for SECRET in \
   fb-verify-token \
   allegro-client-id \
   allegro-client-secret \
-  infakt-api-key; do
+  infakt-api-key \
+  vapid-private-key \
+  vapid-public-key; do
   gcloud secrets create "$SECRET" \
     --replication-policy=automatic \
     --project="$PROJECT_ID" 2>/dev/null || echo "  $SECRET already exists"
@@ -115,10 +117,15 @@ echo "✅ GCP setup complete!"
 echo ""
 echo "Next steps:"
 echo "  1. Add secret values:  gcloud secrets versions add allegro-client-id --data-file=-  (etc.)"
-echo "  2. Build & deploy:     push to main (deploy-backend.yml / deploy-jobs.yml via GitHub Actions)"
-echo "  3. Set FB webhook URL: https://YOUR_CLOUD_RUN_URL/webhook/facebook"
-echo "  4. Re-run this script once the order-monitor job exists, to create its Scheduler trigger"
-echo "  5. VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY / VAPID_EMAIL: copy whatever the main"
-echo "     'alleasystent' Cloud Run service currently uses onto the order-monitor Job too"
-echo "     (gcloud run jobs update $JOB_NAME --update-env-vars=... or --update-secrets=...)"
-echo "     — without them the job detects new orders but send_push() silently skips."
+echo "  2. Generate VAPID keys (Web Push was never configured — required for OS/browser"
+echo "     push, not needed for the in-app Notifications panel):"
+echo "       python generate_vapid_keys.py"
+echo "       printf '%s' \"\$VAPID_PRIVATE_KEY_PEM\" | gcloud secrets versions add vapid-private-key --data-file=-"
+echo "       printf '%s' \"\$VAPID_PUBLIC_KEY\"       | gcloud secrets versions add vapid-public-key  --data-file=-"
+echo "     Then add VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=vapid-public-key:latest"
+echo "     to --update-secrets, and VAPID_EMAIL=mailto:you@example.com to --update-env-vars,"
+echo "     on BOTH the 'alleasystent' service (deploy-backend.yml) and the"
+echo "     'alleasystent-order-monitor' job (deploy-jobs.yml)."
+echo "  3. Build & deploy:     push to main (deploy-backend.yml / deploy-jobs.yml via GitHub Actions)"
+echo "  4. Set FB webhook URL: https://YOUR_CLOUD_RUN_URL/webhook/facebook"
+echo "  5. Re-run this script once the order-monitor job exists, to create its Scheduler trigger"
