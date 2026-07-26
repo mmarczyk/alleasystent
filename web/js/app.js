@@ -549,17 +549,20 @@ const WebPush = (() => {
 
   // persist=true also stores this as an entry in the Notifications inbox (bell
   // icon panel) server-side, instead of injecting anything into the chat.
-  async function sendNotification(title, body, persist, url) {
+  async function sendNotification(title, body, persist, url, prompt) {
     const cleanBody = String(body).replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
 
     // Direct Notification — instant, for the current device (desktop/Android tab)
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
-        new Notification(title, {
+        const n = new Notification(title, {
           body: cleanBody,
           icon: 'icons/icon-192.svg',
           tag: 'alleasystent-monitor',  // same tag so SW push replaces it silently
         });
+        // Tapping the notification jumps straight into the chat question, same as the
+        // OS-level push click handled by sw.js's notificationclick.
+        if (prompt) n.onclick = () => { window.focus(); Chat.send(prompt); n.close(); };
       } catch {}
     }
 
@@ -568,6 +571,7 @@ const WebPush = (() => {
     if (localStorage.getItem(SUB_KEY)) {
       const payload = { title, body: cleanBody, url: url ?? '/' };
       if (persist) payload.notify = true;
+      if (prompt) payload.prompt = prompt;
       fetch(Settings.api('/push/notify'), {
         method: 'POST',
         credentials: 'include',
@@ -686,9 +690,12 @@ const OrderMonitor = (() => {
       if (count > 0) {
         const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
         const msg = `Masz ${count} nowe ${label} do realizacji!`;
+        const prompt = count === 1
+          ? 'Podaj mi szczegóły ostatniego nowego zamówienia.'
+          : `Podaj mi szczegóły ${count} ostatnich nowych zamówień.`;
         console.log('[OrderMonitor] NEW ORDERS DETECTED:', count, data.new_orders);
         UI.toast(`🛒 ${msg}`, 10000);
-        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg, true, '/?open=notifications');
+        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg, true, '/?open=notifications', prompt);
         Notifications.refresh();
       } else {
         console.log('[OrderMonitor] no new orders');
@@ -774,8 +781,11 @@ const InvoiceMonitor = (() => {
       const count = newOnes.length;
       const label = count === 1 ? 'zamówienie wymaga' : count < 5 ? 'zamówienia wymagają' : 'zamówień wymaga';
       const msg = `${count} ${label} wystawienia faktury VAT.`;
+      const prompt = count === 1
+        ? 'Podaj mi szczegóły zamówienia, które wymaga wystawienia faktury VAT.'
+        : `Podaj mi szczegóły ${count} zamówień, które wymagają wystawienia faktury VAT.`;
       UI.toast(`🧾 ${msg}`, 10000);
-      WebPush.sendNotification('AllEasystent — Faktura VAT!', msg, true, '/?open=notifications');
+      WebPush.sendNotification('AllEasystent — Faktura VAT!', msg, true, '/?open=notifications', prompt);
       Notifications.refresh();
     } catch (e) {}
   }
@@ -833,7 +843,8 @@ const Notifications = (() => {
       return;
     }
     list.innerHTML = _items.map(n => `
-      <div class="notif-item${n.read ? '' : ' unread'}">
+      <div class="notif-item${n.read ? '' : ' unread'}${n.prompt ? ' has-action' : ''}"
+           ${n.prompt ? `onclick="Notifications.activate('${n.id}')"` : ''}>
         <div class="notif-title">${_esc(n.title)}</div>
         <div class="notif-body">${_esc(n.body)}</div>
         <div class="notif-time">${_timeAgo(n.created_at)}</div>
@@ -868,9 +879,17 @@ const Notifications = (() => {
     document.getElementById('notifications-panel').classList.add('hidden');
   }
 
+  // Tapping a notification with a ready-made question fires it straight into the
+  // chat instead of just closing the panel — same behavior as tapping the OS push.
+  function activate(id) {
+    const n = _items.find(i => i.id === id);
+    close();
+    if (n?.prompt) Chat.send(n.prompt);
+  }
+
   function init() { refresh(); }
 
-  return { open, close, refresh, init };
+  return { open, close, refresh, activate, init };
 })();
 
 // ── UI helpers ───────────────────────────────────
@@ -1499,9 +1518,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   InvoiceMonitor.init();
 
   Notifications.init();
-  // Tapping a system push notification opens straight into the Notifications panel
-  if (new URLSearchParams(location.search).get('open') === 'notifications') {
+  // Tapping a system push notification with a ready-made question fires it straight
+  // into the chat; otherwise it just opens the Notifications panel.
+  const _startParams = new URLSearchParams(location.search);
+  const _ask = _startParams.get('ask');
+  if (_ask) {
+    Chat.send(_ask);
+  } else if (_startParams.get('open') === 'notifications') {
     Notifications.open();
-    history.replaceState(null, '', location.pathname);
   }
+  if (_ask || _startParams.get('open')) history.replaceState(null, '', location.pathname);
 });

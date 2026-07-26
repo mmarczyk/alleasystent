@@ -79,11 +79,15 @@ async def pop_pending_chat(user_id: str) -> str | None:
         await r.aclose()
 
 
-async def add_notification(user_id: str, title: str, body: str, url: str = "/") -> dict | None:
+async def add_notification(user_id: str, title: str, body: str, url: str = "/", prompt: str | None = None) -> dict | None:
     """Append an entry to the user's in-app Notifications list (bell icon panel).
 
     Stored as a capped Redis list (newest first) so the frontend can render a
     persistent inbox instead of the automatic monitors writing into the chat.
+
+    `prompt`, if set, is a ready-made chat question the frontend fires
+    automatically when the user taps the notification (e.g. "Podaj mi
+    szczegóły 2 ostatnich zamówień."), instead of just navigating somewhere.
     """
     from config.settings import get_settings
     settings = get_settings()
@@ -95,6 +99,7 @@ async def add_notification(user_id: str, title: str, body: str, url: str = "/") 
         "title": title,
         "body": body,
         "url": url,
+        "prompt": prompt,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "read": False,
     }
@@ -182,8 +187,13 @@ async def _get_subscriptions(user_id: str) -> list[dict]:
         await r.aclose()
 
 
-async def send_push(user_id: str, title: str, body: str, url: str = "/") -> None:
-    """Send a Web Push notification to all subscribed devices for a user."""
+async def send_push(user_id: str, title: str, body: str, url: str = "/", prompt: str | None = None) -> None:
+    """Send a Web Push notification to all subscribed devices for a user.
+
+    `prompt`, if set, travels in the push payload so the service worker can
+    attach it to the notification's click target — tapping the OS notification
+    then fires that chat question automatically instead of just opening the app.
+    """
     from config.settings import get_settings
     settings = get_settings()
     if not settings.vapid_private_key or not settings.vapid_public_key:
@@ -201,7 +211,7 @@ async def send_push(user_id: str, title: str, body: str, url: str = "/") -> None
         logger.error("pywebpush not installed — cannot send push notifications")
         return
 
-    payload = json.dumps({"title": title, "body": body, "url": url}).encode()
+    payload = json.dumps({"title": title, "body": body, "url": url, "prompt": prompt}).encode()
     loop = asyncio.get_event_loop()
     stale: list[str] = []
 

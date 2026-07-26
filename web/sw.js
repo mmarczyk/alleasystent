@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v42';
+const CACHE = 'alleasystent-v43';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
@@ -47,7 +47,7 @@ self.addEventListener('push', e => {
       body: data.body ?? '',
       icon: './icons/icon-192.svg',
       badge: './icons/icon-192.svg',
-      data: { url: data.url ?? '/' },
+      data: { url: data.url ?? '/', prompt: data.prompt ?? null },
       vibrate: [200, 100, 200],
       tag: 'alleasystent-monitor',  // replaces any direct Notification on same device silently
       renotify: false,
@@ -58,12 +58,20 @@ self.addEventListener('push', e => {
 self.addEventListener('notificationclick', e => {
   e.notification.close();
   const url = e.notification.data?.url ?? '/';
+  const prompt = e.notification.data?.prompt;
+  // Tapping the notification jumps straight into the chat question, not just the app —
+  // 'ask' is picked up and auto-sent by app.js on load.
+  const base = new URL(url, self.location.origin);
+  if (prompt) base.searchParams.set('ask', prompt);
+  const target = base.href;
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
       const origin = self.location.origin;
-      const target = new URL(url, origin).href;
-      const existing = cs.find(c => c.url === target || c.url.startsWith(origin));
-      return existing ? existing.focus() : clients.openWindow(url);
+      const existing = cs.find(c => c.url.startsWith(origin));
+      if (existing) {
+        return (existing.navigate ? existing.navigate(target) : Promise.resolve(existing)).then(c => c.focus());
+      }
+      return clients.openWindow(target);
     })
   );
 });
