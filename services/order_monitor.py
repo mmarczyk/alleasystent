@@ -137,8 +137,14 @@ async def _poll_user(r, user_id: str) -> None:
 
     title = "Nowe zamówienie na Allegro" if count == 1 else f"{count} nowych zamówień na Allegro"
     body  = "Zamówienie czeka na realizację." if count == 1 else f"{count} zamówień czeka na realizację."
+    prompt = (
+        "Podaj mi szczegóły ostatniego nowego zamówienia."
+        if count == 1 else
+        f"Podaj mi szczegóły {count} ostatnich nowych zamówień."
+    )
 
     # Goes to the in-app Notifications inbox (bell icon), not the chat — the OS-level
-    # push below is what actually alerts the user (browser + iOS PWA).
-    await add_notification(user_id, title=title, body=body, url="/?open=notifications")
-    await send_push(user_id=user_id, title=title, body=body, url="/?open=notifications")
+    # push below is what actually alerts the user (browser + iOS PWA). `prompt` is the
+    # chat question fired automatically when the user taps the notification.
+    await add_notification(user_id, title=title, body=body, url="/?open=notifications", prompt=prompt)
+    await send_push(user_id=user_id, title=title, body=body, url="/?open=notifications", prompt=prompt)

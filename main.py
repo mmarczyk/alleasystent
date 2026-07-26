@@ -738,6 +738,9 @@ async def push_notify(request: Request):
     Optional body field `notify`: if truthy, the same title/body/url is also
     stored in the user's Notifications inbox (GET /notifications) instead of
     being injected into the chat.
+
+    Optional body field `prompt`: a ready-made chat question fired automatically
+    when the user taps the notification, instead of just opening the app.
     """
     from services.auth_service import get_current_user
     from services.push_service import send_push, add_notification
@@ -746,9 +749,10 @@ async def push_notify(request: Request):
     title = body.get("title", "AllEasystent")
     notify_body = body.get("body", "")
     url = body.get("url", "/")
+    prompt = body.get("prompt")
     if body.get("notify"):
-        await add_notification(user["sub"], title=title, body=notify_body, url=url)
-    await send_push(user_id=user["sub"], title=title, body=notify_body, url=url)
+        await add_notification(user["sub"], title=title, body=notify_body, url=url, prompt=prompt)
+    await send_push(user_id=user["sub"], title=title, body=notify_body, url=url, prompt=prompt)
     return {"status": "sent"}
 
 
