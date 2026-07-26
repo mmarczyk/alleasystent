@@ -509,6 +509,14 @@ const WebPush = (() => {
   async function subscribe() {
     if (!isSupported()) return false;
     try {
+      // Safari/WebKit only honors Notification.requestPermission() when it runs
+      // within the same synchronous gesture as the click — any await before it
+      // (e.g. a network fetch) silently breaks the prompt on iOS. Ask first.
+      if (Notification.permission !== 'granted') {
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') return false;
+      }
+
       const keyRes = await fetch(Settings.api('/push/vapid-public-key'), { credentials: 'include', headers: Auth.headers() });
       if (!keyRes.ok) return false;
       const { publicKey } = await keyRes.json();
@@ -516,19 +524,21 @@ const WebPush = (() => {
       const reg = await navigator.serviceWorker.ready;
       let sub = await reg.pushManager.getSubscription();
       if (!sub) {
-        const perm = await Notification.requestPermission();
-        if (perm !== 'granted') return false;
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: _urlBase64ToUint8Array(publicKey),
         });
       }
-      await fetch(Settings.api('/push/subscribe'), {
+      const subRes = await fetch(Settings.api('/push/subscribe'), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', ...Auth.headers() },
         body: JSON.stringify(sub.toJSON()),
       });
+      if (!subRes.ok) {
+        console.error('[WebPush] /push/subscribe failed, status:', subRes.status);
+        return false;
+      }
       localStorage.setItem(SUB_KEY, '1');
       return true;
     } catch (e) {
@@ -585,10 +595,10 @@ const WebPush = (() => {
       const reg = await navigator.serviceWorker.ready;
       const sub = await reg.pushManager.getSubscription();
       if (!sub) { localStorage.removeItem(SUB_KEY); return; }
-      await fetch('/push/subscribe', {
+      await fetch(Settings.api('/push/subscribe'), {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...Auth.headers() },
         body: JSON.stringify(sub.toJSON()),
       }).catch(() => {});
     } catch {}
@@ -607,7 +617,8 @@ const OrderMonitor = (() => {
 
   async function enable() {
     console.log('[OrderMonitor] enable() called');
-    await WebPush.subscribe();
+    const pushOk = await WebPush.subscribe();
+    console.log('[OrderMonitor] push subscribe result:', pushOk);
     localStorage.setItem(ENABLED_KEY, '1');
     fetch(Settings.api('/allegro/monitor/enable'), {
       method: 'POST', credentials: 'include', headers: Auth.headers(),
@@ -616,7 +627,11 @@ const OrderMonitor = (() => {
     if (_timer) clearInterval(_timer);
     _timer = setInterval(_check, 5 * 60 * 1000);
     console.log('[OrderMonitor] timer started, interval 5 min');
-    UI.toast('✓ Monitoring zamówień włączony (co 5 minut)');
+    if (pushOk) {
+      UI.toast('✓ Monitoring zamówień włączony (co 5 minut)');
+    } else {
+      UI.toast('⚠️ Monitoring włączony, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
+    }
     document.querySelectorAll('.btn-monitoring').forEach(btn => {
       btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring aktywny</span>';
     });
@@ -626,7 +641,7 @@ const OrderMonitor = (() => {
   async function _saveBaseline() {
     try {
       console.log('[OrderMonitor] saving baseline via /order-event-stats…');
-      const res = await fetch(Settings.api('/allegro/order-event-stats'), { credentials: 'include' });
+      const res = await fetch(Settings.api('/allegro/order-event-stats'), { credentials: 'include', headers: Auth.headers() });
       console.log('[OrderMonitor] baseline HTTP', res.status);
       if (!res.ok) return;
       const data = await res.json();
@@ -661,7 +676,7 @@ const OrderMonitor = (() => {
     }
     try {
       const url = Settings.api(`/allegro/order-events?since=${encodeURIComponent(lastId)}`);
-      const res = await fetch(url, { credentials: 'include' });
+      const res = await fetch(url, { credentials: 'include', headers: Auth.headers() });
       console.log('[OrderMonitor] poll HTTP', res.status, 'url:', url);
       if (!res.ok) { console.error('[OrderMonitor] poll failed, status:', res.status); return; }
       const data = await res.json();
@@ -723,10 +738,14 @@ const InvoiceMonitor = (() => {
   }
 
   async function enable() {
-    await WebPush.subscribe();
+    const pushOk = await WebPush.subscribe();
     localStorage.setItem(ENABLED_KEY, '1');
     _startPolling(); // first check notifies about ALL currently pending invoices
-    UI.toast('✓ Monitoring faktur włączony (co 15 minut)');
+    if (pushOk) {
+      UI.toast('✓ Monitoring faktur włączony (co 15 minut)');
+    } else {
+      UI.toast('⚠️ Monitoring włączony, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
+    }
     document.querySelectorAll('.btn-invoice-monitoring').forEach(btn => {
       btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
     });
@@ -740,7 +759,7 @@ const InvoiceMonitor = (() => {
 
   async function _check() {
     try {
-      const res = await fetch(Settings.api('/allegro/pending-invoices'), { credentials: 'include' });
+      const res = await fetch(Settings.api('/allegro/pending-invoices'), { credentials: 'include', headers: Auth.headers() });
       if (!res.ok) return;
       const data = await res.json();
       const orders = data.orders || [];
