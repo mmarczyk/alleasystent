@@ -820,6 +820,7 @@ class AllegroAgent(BaseAgent):
                 fees_per_order: dict[str, float] = {}   # order_id → total fees (costs, positive value)
                 refunds_per_order: dict[str, float] = {}  # order_id → total refunds/credits
                 fee_by_type: dict[str, float] = {}
+                refund_by_type: dict[str, float] = {}
                 total_fees = 0.0
                 total_refunds = 0.0
                 for e in billing_entries:
@@ -833,6 +834,7 @@ class AllegroAgent(BaseAgent):
                             fees_per_order[order_id] = fees_per_order.get(order_id, 0) + abs(amount)
                     elif amount > 0:
                         total_refunds += amount
+                        refund_by_type[type_desc] = refund_by_type.get(type_desc, 0) + amount
                         if order_id:
                             refunds_per_order[order_id] = refunds_per_order.get(order_id, 0) + amount
                 net_profit = total_revenue - total_fees + total_refunds
@@ -845,6 +847,10 @@ class AllegroAgent(BaseAgent):
                 billing_lines = "\n".join(
                     f"  - {desc}: {self._format_price(amt)}"
                     for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
+                )
+                refund_lines = "\n".join(
+                    f"  - {desc}: +{self._format_price(amt)}"
+                    for desc, amt in sorted(refund_by_type.items(), key=lambda x: x[1], reverse=True)
                 )
                 # Per-order table (sorted by date)
                 order_rows = []
@@ -881,6 +887,7 @@ class AllegroAgent(BaseAgent):
                     f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
                     + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
+                    + (f"{refund_lines}\n" if refund_lines else "")
                     + (
                         f"- w tym opłaty/zwroty nieprzypisane do zamówienia (abonament, inne): "
                         f"**{self._format_price(unattributed_fees - unattributed_refunds)}**\n"
