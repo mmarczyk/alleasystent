@@ -224,6 +224,12 @@ async def send_push(user_id: str, title: str, body: str, url: str = "/", prompt:
                     data=payload,
                     vapid_private_key=settings.vapid_private_key,
                     vapid_claims={"sub": settings.vapid_email},
+                    # "high" tells the push service (incl. Apple's, for iOS PWA push)
+                    # to prioritize immediate delivery instead of batching/delaying it
+                    # for battery savings — iOS otherwise can sit on "normal"-urgency
+                    # pushes for tens of minutes before surfacing them.
+                    headers={"Urgency": "high"},
+                    ttl=1800,  # keep retrying delivery for 30 min if the device is briefly unreachable
                 ),
             )
             logger.debug("Push sent → %s", sub.get("endpoint", "")[:60])
