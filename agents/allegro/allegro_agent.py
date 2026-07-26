@@ -781,14 +781,10 @@ class AllegroAgent(BaseAgent):
                 raise results[0]
             if billing_error:
                 logger.warning("get_sales_summary: billing fetch failed (%s), continuing without cost data", billing_error)
-            # Keep only billing entries that belong to our orders (matched by order.id)
+            # Keep only billing entries that belong to our orders (matched by order.id),
+            # plus account-level entries without an order ref (subscriptions, listing fees)
+            # restricted to the strict period since they aren't tied to any order's widened window.
             order_ids = {o.order_id for o in orders}
-            billing_entries = [
-                e for e in all_billing
-                if (e.get("order") or {}).get("id") in order_ids
-                or not (e.get("order") or {}).get("id")  # entries without order ref (subscriptions etc.)
-            ]
-            # Entries without order.id but within the strict period (subscriptions, listing fees)
             billing_entries_no_order = [
                 e for e in all_billing
                 if not (e.get("order") or {}).get("id")
@@ -840,6 +836,12 @@ class AllegroAgent(BaseAgent):
                         if order_id:
                             refunds_per_order[order_id] = refunds_per_order.get(order_id, 0) + amount
                 net_profit = total_revenue - total_fees + total_refunds
+                # Fees/refunds not tied to any single order (account subscriptions, listing
+                # fees) are still real costs and belong in the total above, but they can't
+                # appear in any order's row below — track them so the per-order table's sum
+                # doesn't silently disagree with the total.
+                unattributed_fees = total_fees - sum(fees_per_order.values())
+                unattributed_refunds = total_refunds - sum(refunds_per_order.values())
                 billing_lines = "\n".join(
                     f"  - {desc}: {self._format_price(amt)}"
                     for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
@@ -864,12 +866,26 @@ class AllegroAgent(BaseAgent):
                     )
                 per_order_section = ""
                 if order_rows:
-                    per_order_section = "\n\n**Zestawienie per zamówienie:**\n" + "\n".join(order_rows)
+                    per_order_section = (
+                        "\n\n**Zestawienie per zamówienie** (opłaty przypisane do konkretnego zamówienia; "
+                        "nie obejmuje opłat kontowych, np. abonamentu):\n" + "\n".join(order_rows)
+                    )
+                    if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
+                        per_order_section += (
+                            f"\n\n  Uwaga: suma opłat/zwrotów z powyższej tabeli nie zsumuje się do "
+                            f"\"Zysk netto\" powyżej — różnicę ({self._format_price(unattributed_refunds - unattributed_fees)}) "
+                            f"stanowią opłaty/zwroty nieprzypisane do żadnego zamówienia (patrz niżej)."
+                        )
                 billing_section = (
                     f"\n\n**Koszty Allegro** ({date_from[:10]} – {date_to[:10]})\n"
                     f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
                     + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
+                    + (
+                        f"- w tym opłaty/zwroty nieprzypisane do zamówienia (abonament, inne): "
+                        f"**{self._format_price(unattributed_fees - unattributed_refunds)}**\n"
+                        if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01 else ""
+                    )
                     + f"\n**Zysk netto (przychód − opłaty): {self._format_price(net_profit)}**"
                     + per_order_section
                 )
