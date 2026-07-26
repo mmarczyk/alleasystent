@@ -781,23 +781,26 @@ class AllegroAgent(BaseAgent):
                 raise results[0]
             if billing_error:
                 logger.warning("get_sales_summary: billing fetch failed (%s), continuing without cost data", billing_error)
-            # Keep only billing entries that belong to our orders (matched by order.id),
-            # plus account-level entries without an order ref (subscriptions, listing fees)
-            # restricted to the strict period since they aren't tied to any order's widened window.
+            # Keep entries tied to one of our orders (matched by order.id) — these ride the
+            # widened fetch window so late-posted fees/rebates for in-period orders are caught.
+            # Everything else (no order ref at all, OR an order ref that belongs to some other
+            # order outside this period — e.g. a rebate posted this week for last month's sale)
+            # is still real money in this period, so it's kept too, but restricted to the
+            # strict period since it has no order of its own to justify the wider window.
             order_ids = {o.order_id for o in orders}
-            billing_entries_no_order = [
-                e for e in all_billing
-                if not (e.get("order") or {}).get("id")
-                and date_from <= e.get("occurredAt", "") <= date_to
-            ]
             billing_entries_with_order = [
                 e for e in all_billing
                 if (e.get("order") or {}).get("id") in order_ids
             ]
-            billing_entries = billing_entries_with_order + billing_entries_no_order
+            billing_entries_unmatched = [
+                e for e in all_billing
+                if (e.get("order") or {}).get("id") not in order_ids
+                and date_from <= e.get("occurredAt", "") <= date_to
+            ]
+            billing_entries = billing_entries_with_order + billing_entries_unmatched
             logger.info(
-                "get_sales_summary: %d paid orders, %d billing entries (%d matched by order.id, %d no-order in period)",
-                len(orders), len(billing_entries), len(billing_entries_with_order), len(billing_entries_no_order),
+                "get_sales_summary: %d paid orders, %d billing entries (%d matched by order.id, %d unmatched in period)",
+                len(orders), len(billing_entries), len(billing_entries_with_order), len(billing_entries_unmatched),
             )
             if not orders:
                 return f"Brak opłaconych zamówień w okresie {date_from[:10]} – {date_to[:10]}."
@@ -830,12 +833,12 @@ class AllegroAgent(BaseAgent):
                     if amount < 0:
                         total_fees += abs(amount)
                         fee_by_type[type_desc] = fee_by_type.get(type_desc, 0) + abs(amount)
-                        if order_id:
+                        if order_id and order_id in order_ids:
                             fees_per_order[order_id] = fees_per_order.get(order_id, 0) + abs(amount)
                     elif amount > 0:
                         total_refunds += amount
                         refund_by_type[type_desc] = refund_by_type.get(type_desc, 0) + amount
-                        if order_id:
+                        if order_id and order_id in order_ids:
                             refunds_per_order[order_id] = refunds_per_order.get(order_id, 0) + amount
                 net_profit = total_revenue - total_fees + total_refunds
                 # Fees/refunds not tied to any single order (account subscriptions, listing
