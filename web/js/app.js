@@ -1060,7 +1060,11 @@ const Chat = (() => {
     const tableStats = !isUser ? _tableStats(bodyText) : null;
     const isArtifact = !isUser && _ARTIFACT_FORMATS.has(format)
       && (format !== 'table' || (tableStats.hasTable && tableStats.dataRows > 0));
-    const isLong = !isUser && (bodyText.length > 500 || (isArtifact && bodyText.length > 150));
+    // Plain "chat"/"action" replies are never truncated, no matter how long —
+    // only table/document/dashboard artifacts get the compact-preview +
+    // doc-viewer treatment. Truncating ordinary text answers just to make the
+    // user click "Zobacz pełną odpowiedź" was the exact thing this was meant to fix.
+    const isLong = !isUser && isArtifact && bodyText.length > 150;
     const div = document.createElement('div');
     div.className = `msg msg-${isUser ? 'user' : 'bot'}`;
     div.dataset.index = index ?? '';
