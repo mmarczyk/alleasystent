@@ -814,14 +814,19 @@ class AllegroAgent(BaseAgent):
             date_from = tool_input["date_from"]
             date_to = tool_input["date_to"]
             logger.info("get_sales_summary: fetching orders and billing %s → %s", date_from, date_to)
-            # Billing window is wider: delivery labels are printed after payment,
-            # so billing entries (occurredAt) may fall up to ~14 days after date_to.
+            # Every fee/rebate type except account subscriptions is tied to an order.id, and
+            # matching happens by that ID — not by the entry's own date — so the date window
+            # on the billing fetch only exists to bound how much we pull from the API. Widen it
+            # a month either side of the order period: any fee/rebate for an order paid in this
+            # period should have posted (or been pre-calculated) within that margin.
             from datetime import datetime, timedelta, timezone
+            dt_from = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
             dt_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
-            billing_date_to = (dt_to + timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            billing_date_from = (dt_from - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            billing_date_to = (dt_to + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
             results = await asyncio.gather(
                 self._allegro.get_all_paid_orders_in_period(date_from, date_to),
-                self._allegro.get_billing_entries_in_period(date_from, billing_date_to),
+                self._allegro.get_billing_entries_in_period(billing_date_from, billing_date_to),
                 return_exceptions=True,
             )
             orders = results[0] if not isinstance(results[0], BaseException) else []
@@ -831,22 +836,21 @@ class AllegroAgent(BaseAgent):
                 raise results[0]
             if billing_error:
                 logger.warning("get_sales_summary: billing fetch failed (%s), continuing without cost data", billing_error)
-            # Keep only billing entries that belong to our orders (matched by order.id)
+            # Entries tied to one of our orders (matched by order.id) count regardless of their
+            # own date — the widened fetch above is what guarantees they were found. Entries
+            # with no order ref at all (subscriptions, listing fees) have nothing to match by,
+            # so those are counted only if they actually occurred within the strict period —
+            # an entry for some OTHER order outside this period is correctly excluded either way,
+            # since its revenue isn't part of this report.
             order_ids = {o.order_id for o in orders}
-            billing_entries = [
+            billing_entries_with_order = [
                 e for e in all_billing
                 if (e.get("order") or {}).get("id") in order_ids
-                or not (e.get("order") or {}).get("id")  # entries without order ref (subscriptions etc.)
             ]
-            # Entries without order.id but within the strict period (subscriptions, listing fees)
             billing_entries_no_order = [
                 e for e in all_billing
                 if not (e.get("order") or {}).get("id")
                 and date_from <= e.get("occurredAt", "") <= date_to
-            ]
-            billing_entries_with_order = [
-                e for e in all_billing
-                if (e.get("order") or {}).get("id") in order_ids
             ]
             billing_entries = billing_entries_with_order + billing_entries_no_order
             logger.info(
@@ -874,6 +878,7 @@ class AllegroAgent(BaseAgent):
                 fees_per_order: dict[str, float] = {}   # order_id → total fees (costs, positive value)
                 refunds_per_order: dict[str, float] = {}  # order_id → total refunds/credits
                 fee_by_type: dict[str, float] = {}
+                refund_by_type: dict[str, float] = {}
                 total_fees = 0.0
                 total_refunds = 0.0
                 for e in billing_entries:
@@ -887,12 +892,23 @@ class AllegroAgent(BaseAgent):
                             fees_per_order[order_id] = fees_per_order.get(order_id, 0) + abs(amount)
                     elif amount > 0:
                         total_refunds += amount
+                        refund_by_type[type_desc] = refund_by_type.get(type_desc, 0) + amount
                         if order_id:
                             refunds_per_order[order_id] = refunds_per_order.get(order_id, 0) + amount
                 net_profit = total_revenue - total_fees + total_refunds
+                # Fees/refunds not tied to any single order (account subscriptions, listing
+                # fees) are still real costs and belong in the total above, but they can't
+                # appear in any order's row below — track them so the per-order table's sum
+                # doesn't silently disagree with the total.
+                unattributed_fees = total_fees - sum(fees_per_order.values())
+                unattributed_refunds = total_refunds - sum(refunds_per_order.values())
                 billing_lines = "\n".join(
                     f"  - {desc}: {self._format_price(amt)}"
                     for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
+                )
+                refund_lines = "\n".join(
+                    f"  - {desc}: +{self._format_price(amt)}"
+                    for desc, amt in sorted(refund_by_type.items(), key=lambda x: x[1], reverse=True)
                 )
                 # Per-order table (sorted by date)
                 order_rows = []
@@ -914,12 +930,27 @@ class AllegroAgent(BaseAgent):
                     )
                 per_order_section = ""
                 if order_rows:
-                    per_order_section = "\n\n**Zestawienie per zamówienie:**\n" + "\n".join(order_rows)
+                    per_order_section = (
+                        "\n\n**Zestawienie per zamówienie** (opłaty przypisane do konkretnego zamówienia; "
+                        "nie obejmuje opłat kontowych, np. abonamentu):\n" + "\n".join(order_rows)
+                    )
+                    if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
+                        per_order_section += (
+                            f"\n\n  Uwaga: suma opłat/zwrotów z powyższej tabeli nie zsumuje się do "
+                            f"\"Zysk netto\" powyżej — różnicę ({self._format_price(unattributed_refunds - unattributed_fees)}) "
+                            f"stanowią opłaty/zwroty nieprzypisane do żadnego zamówienia (patrz niżej)."
+                        )
                 billing_section = (
                     f"\n\n**Koszty Allegro** ({date_from[:10]} – {date_to[:10]})\n"
                     f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
                     + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
+                    + (f"{refund_lines}\n" if refund_lines else "")
+                    + (
+                        f"- w tym opłaty/zwroty nieprzypisane do zamówienia (abonament, inne): "
+                        f"**{self._format_price(unattributed_fees - unattributed_refunds)}**\n"
+                        if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01 else ""
+                    )
                     + f"\n**Zysk netto (przychód − opłaty): {self._format_price(net_profit)}**"
                     + per_order_section
                 )
