@@ -1,0 +1,84 @@
+name: Deploy AllEasystent Background Jobs to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'jobs/**'
+      - 'services/order_monitor.py'
+      - 'services/allegro_service.py'
+      - 'services/push_service.py'
+      - 'config/settings.py'
+      - 'models/**'
+      - 'requirements-jobs.txt'
+      - 'Dockerfile.jobs'
+      - '.github/workflows/deploy-jobs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGION: europe-central2
+  JOB_NAME: alleasystent-order-monitor
+  REGISTRY: europe-central2-docker.pkg.dev
+
+jobs:
+  deploy:
+    name: Build & Deploy Cloud Run Job
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same service account as deploy-backend.yml — needs Cloud Run Developer
+      # in addition to the roles already granted (used for `gcloud run jobs`).
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push jobs image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.jobs
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # `gcloud run jobs deploy` creates the job if it doesn't exist yet and
+      # updates it otherwise — but deployment/setup_gcp.sh should still be run
+      # once first to create the Cloud Scheduler trigger that invokes it.
+      #
+      # Deliberately no --service-account: deploy-backend.yml doesn't set one
+      # either, so the main service runs as the default compute service
+      # account — which already has working access to the secrets below.
+      # Pinning this Job to alleasystent-sa would need github-actions@... to
+      # hold iam.serviceAccounts.actAs on it (a one-time IAM grant that isn't
+      # in place), so it fails with a "does not have permission to access
+      # namespaces... Permission 'iam.serviceaccounts.actAs' denied" error.
+      - name: Deploy order-monitor Cloud Run Job
+        run: |
+          gcloud run jobs deploy ${{ env.JOB_NAME }} \
+            --image=${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --memory=512Mi \
+            --cpu=1 \
+            --max-retries=1 \
+            --task-timeout=120s \
+            --update-secrets=GOOGLE_API_KEY=google-api-key:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=vapid-public-key:latest \
+            --update-env-vars=APP_ENV=production,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},VAPID_EMAIL=${{ vars.VAPID_EMAIL }} \
+            --quiet

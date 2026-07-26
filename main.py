@@ -74,18 +74,13 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_prewarm_retriever())
 
-    # Backend order monitor: sends push notifications when new Allegro orders
-    # arrive — works even when iOS PWA is backgrounded (JS can't run then).
-    from services.order_monitor import run_order_monitor
-    monitor_task = asyncio.create_task(run_order_monitor())
+    # Order monitor (push notifications for new Allegro orders) now runs as a
+    # scheduled Cloud Run Job (jobs/order_monitor_job.py), not a background
+    # task here — Cloud Run only allocates CPU during request handling and can
+    # scale this service to zero, so an in-process loop wasn't reliable.
 
     yield
 
-    monitor_task.cancel()
-    try:
-        await monitor_task
-    except asyncio.CancelledError:
-        pass
     logger.info("AllEasystent shutting down")
 
 
