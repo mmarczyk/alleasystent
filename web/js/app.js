@@ -1029,6 +1029,19 @@ const Chat = (() => {
     return { text: content.slice(0, m.index).trimEnd(), html: m[0] };
   }
 
+  // Some document-format replies lead with a ```summary fenced block — a short
+  // bulleted summary meant for the chat bubble (see get_order_details in
+  // agents/allegro/allegro_agent.py), with the fuller detail (products,
+  // billing, ...) reserved for the doc viewer. Pulls it out and returns the
+  // remaining text separately so it isn't shown twice / rendered as a raw code block.
+  function _extractSummaryBlock(content) {
+    const m = content.match(/```summary\r?\n([\s\S]*?)```[ \t]*\r?\n?/);
+    if (!m) return { summary: null, rest: content };
+    const summary = m[1].trim();
+    const rest = (content.slice(0, m.index) + content.slice(m.index + m[0].length)).replace(/^\s+/, '');
+    return { summary, rest };
+  }
+
   // Formats that always belong in the full-window doc viewer, the same way
   // Claude pops a description into an artifact instead of dumping it in the
   // chat bubble: tables get a chat summary + full table doc, documents and
@@ -1051,9 +1064,15 @@ const Chat = (() => {
 
   function buildBubble(role, content, ts, index, format, autoOpen) {
     const isUser = role === 'user';
-    const { text: bodyText, html: trailingHtml } = isUser
+    const { text: bodyTextRaw, html: trailingHtml } = isUser
       ? { text: content, html: null }
       : _extractTrailingHtml(content);
+    // Pull out a leading ```summary block, if any — it's the chat-bubble
+    // preview; the doc viewer only gets the remaining detail content, so the
+    // summary isn't shown twice or rendered as a raw code block there.
+    const { summary: summaryBlock, rest: bodyText } = isUser
+      ? { summary: null, rest: bodyTextRaw }
+      : _extractSummaryBlock(bodyTextRaw);
     // A "table" reply only counts as an artifact when it actually contains rows —
     // an empty/no-results table (e.g. "brak nowych wiadomości") must render as a
     // normal short chat reply, not get hidden behind a doc-viewer link.
@@ -1064,7 +1083,7 @@ const Chat = (() => {
     // only table/document/dashboard artifacts get the compact-preview +
     // doc-viewer treatment. Truncating ordinary text answers just to make the
     // user click "Zobacz pełną odpowiedź" was the exact thing this was meant to fix.
-    const isLong = !isUser && isArtifact && bodyText.length > 150;
+    const isLong = !isUser && (summaryBlock !== null || (isArtifact && bodyText.length > 150));
     const div = document.createElement('div');
     div.className = `msg msg-${isUser ? 'user' : 'bot'}`;
     div.dataset.index = index ?? '';
@@ -1072,27 +1091,36 @@ const Chat = (() => {
     const avatar = isUser ? '👤' : '🛒';
     const time = ts ? new Date(ts).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '';
 
-    // Register long bot responses so "Pełny widok" button can re-open the doc viewer
-    // (full content, including any trailing button, so the doc viewer still shows it)
-    const docKey = isLong ? DocViewer.register(content, format) : null;
+    // Register long bot responses so "Pełny widok" button can re-open the doc viewer.
+    // Doc content = detail body (summary block stripped) + any trailing button HTML.
+    const docContent = trailingHtml ? bodyText + '\n\n' + trailingHtml : bodyText;
+    const docKey = isLong ? DocViewer.register(docContent, format) : null;
 
     // Long responses: show a compact preview in the bubble — full content is in the doc viewer
     let bubbleHtml;
     if (isLong) {
-      const tablePreview = _tablePreview(bodyText);
-      let previewShort;
-      if (tablePreview !== null) {
-        previewShort = escHtml(tablePreview);
+      let previewHtml;
+      if (summaryBlock !== null) {
+        // Model-authored bulleted summary — render as real markdown, not a
+        // single truncated line.
+        previewHtml = `<div style="font-size:.88rem;margin:0 0 .5rem">${renderMarkdown(summaryBlock)}</div>`;
       } else {
-        const docPreview = _docPreview(bodyText, format);
-        if (docPreview !== null) {
-          previewShort = escHtml(docPreview);
+        const tablePreview = _tablePreview(bodyText);
+        let previewShort;
+        if (tablePreview !== null) {
+          previewShort = escHtml(tablePreview);
         } else {
-          const preview = bodyText.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
-          previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
+          const docPreview = _docPreview(bodyText, format);
+          if (docPreview !== null) {
+            previewShort = escHtml(docPreview);
+          } else {
+            const preview = bodyText.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
+            previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
+          }
         }
+        previewHtml = `<p style="color:var(--muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>`;
       }
-      bubbleHtml = `<p style="color:var(--muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>` +
+      bubbleHtml = previewHtml +
         `<a href="javascript:void(0)" onclick="DocViewer.openFromKey(${docKey})" ` +
         `style="display:inline-block;font-size:.85rem;font-weight:600;color:var(--accent);text-decoration:none">` +
         `📄 Zobacz pełną odpowiedź →</a>`;

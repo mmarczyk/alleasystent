@@ -76,6 +76,28 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "(bez statusu realizacji, bez linku, bez daty złożenia), chyba że user o nie "
         "poprosi osobno. Bez wstępu przed listą."
     ),
+    "get_order_details": (
+        "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]\n"
+        "Odpowiedź MUSI składać się z dwóch części, w tej kolejności:\n"
+        "1. Na samym początku, jako PIERWSZA rzecz w odpowiedzi (bez żadnego wstępu) — "
+        "blok kodu oznaczony jako 'summary' z krótkim podsumowaniem w formie listy "
+        "punktowanej, dokładnie te pola:\n"
+        "```summary\n"
+        "- Zamówienie: `ID zamówienia`\n"
+        "- Kupujący: ...\n"
+        "- Status: ...\n"
+        "- Wartość: ...\n"
+        "- Faktura: ...\n"
+        "```\n"
+        "   Pole 'Faktura' musi jasno mówić, czy kupujący poprosił o fakturę, a jeśli "
+        "tak — czy została już wystawiona (dane z narzędzia to mówią wprost).\n"
+        "2. Zaraz po tym bloku — pełny dokument szczegółów: pierwsza linia # Szczegóły "
+        "zamówienia {ID}, a w nim sekcje ## Produkty (KAŻDY produkt osobno, z ilością i "
+        "ceną), ## Dostawa (metoda, tracking), ## Rozliczenie (wszystkie wpisy "
+        "billingowe osobno, jeśli są w danych, plus zysk netto).\n"
+        "Użyj WYŁĄCZNIE danych zwróconych przez narzędzie powyżej — nigdy nie zmyślaj "
+        "produktów, cen ani statusu faktury."
+    ),
 }
 
 
@@ -577,14 +599,22 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_order_details":
             logger.info("DEBUG get_order_details called for order_id=%s", tool_input.get("order_id"))
-            order, billing_entries = await asyncio.gather(
+            order, billing_entries, existing_invoices = await asyncio.gather(
                 self._allegro.get_order(tool_input["order_id"]),
                 self._allegro.get_billing_entries_for_order(tool_input["order_id"]),
+                self._allegro.get_order_invoices(tool_input["order_id"]),
                 return_exceptions=True,
             )
             if isinstance(order, BaseException):
                 raise order
             billing_entries = billing_entries if not isinstance(billing_entries, BaseException) else []
+            existing_invoices = existing_invoices if not isinstance(existing_invoices, BaseException) else []
+            if not order.invoice_required:
+                invoice_str = "Kupujący nie poprosił o fakturę."
+            elif existing_invoices:
+                invoice_str = "Kupujący poprosił o fakturę — faktura już wystawiona."
+            else:
+                invoice_str = "Kupujący poprosił o fakturę — NIE WYSTAWIONO jeszcze faktury."
             items_str = "\n".join(
                 f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} × {li.price} {li.currency}"
                 for li in order.line_items
@@ -626,8 +656,11 @@ class AllegroAgent(BaseAgent):
                 f"Order ID: {order.order_id}\n"
                 f"Buyer: {order.buyer_login} ({order.buyer_email})\n"
                 f"Status: {order.status}\n"
+                f"Fulfillment status: {self._fulfillment_pl(order.fulfillment_status)}\n"
                 f"Total: {order.total_price} {order.currency}\n"
                 f"Created: {order.created_at}\n"
+                f"Paid: {self._format_dt_pl(order.paid_at)}\n"
+                f"Invoice: {invoice_str}\n"
                 f"Delivery method: {method_name}\n"
                 f"Tracking: {tracking}\n"
                 f"Items:\n{items_str}"

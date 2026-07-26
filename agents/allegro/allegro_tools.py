@@ -576,7 +576,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # Zamówienia
     "get_new_orders": "chat",
     "get_orders": "table",
-    "get_order_details": "chat",
+    "get_order_details": "document",
     "get_orders_delivery": "table",
     # Oferty
     "get_active_offers": "table",
