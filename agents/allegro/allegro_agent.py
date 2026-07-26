@@ -62,6 +62,22 @@ _OUTPUT_FORMAT_INSTRUCTIONS: dict[str, str] = {
     ),
 }
 
+# Per-tool overrides, checked BEFORE the generic per-format instruction above —
+# for cases where "chat" isn't specific enough (get_new_orders is "chat" format
+# but still needs a fixed shape, not whatever prose/table the model feels like).
+_TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
+    "get_new_orders": (
+        "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]\n"
+        "Przedstaw zamówienia z danych powyżej jako listę punktowaną — jeden blok na "
+        "zamówienie, dokładnie jak w danych narzędzia. NIGDY nie buduj tabeli markdown "
+        "dla zamówień.\n"
+        "Dla każdego zamówienia pokaż TYLKO te pola: Zamawiający, Rodzaj dostawy, "
+        "Ilość szt., Wartość, Opłacone (data i godzina). Nie dodawaj innych pól "
+        "(bez statusu realizacji, bez linku, bez daty złożenia), chyba że user o nie "
+        "poprosi osobno. Bez wstępu przed listą."
+    ),
+}
+
 
 class AllegroAgent(BaseAgent):
     """
@@ -244,7 +260,11 @@ class AllegroAgent(BaseAgent):
         # Deterministic — decided by WHICH TOOL ran, not guessed from the
         # user's wording (see TOOL_OUTPUT_FORMAT in allegro_tools.py for why).
         output_format = resolve_output_format(called_tools)
-        format_instruction = _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
+        tool_instruction = next(
+            (_TOOL_SPECIFIC_INSTRUCTIONS[t] for t in called_tools if t in _TOOL_SPECIFIC_INSTRUCTIONS),
+            None,
+        )
+        format_instruction = tool_instruction or _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
         if format_instruction:
             messages.append({"role": "user", "content": format_instruction})
 
@@ -427,6 +447,36 @@ class AllegroAgent(BaseAgent):
         )
 
     @classmethod
+    def _format_dt_pl(cls, iso_str: str) -> str:
+        """ISO 8601 (UTC) → 'DD.MM.RRRR, HH:MM' in Warsaw local time."""
+        if not iso_str:
+            return "—"
+        try:
+            dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+            return dt.astimezone(cls._WARSAW).strftime("%d.%m.%Y, %H:%M")
+        except ValueError:
+            return iso_str
+
+    @classmethod
+    def _new_order_bullet(cls, o: Any) -> str:
+        """Render one new order as a bullet-list block with exactly the fields
+        the store owner asked for: buyer, delivery type, item count, value,
+        payment date/time. No status, no link, no order-creation date — those
+        are for get_orders / get_order_details, not this compact new-orders view."""
+        d = o.delivery if isinstance(o.delivery, dict) else {}
+        delivery_name = cls._dig(d, "method", "name", default="—")
+        total_qty = sum(li.quantity for li in o.line_items)
+        price = cls._format_price(o.total_price, o.currency)
+        return (
+            f"**Zamówienie** `{o.order_id}`\n"
+            f"- Zamawiający: **{o.buyer_login}**\n"
+            f"- Rodzaj dostawy: {delivery_name}\n"
+            f"- Ilość: {total_qty} szt.\n"
+            f"- Wartość: **{price}**\n"
+            f"- Opłacone: {cls._format_dt_pl(o.paid_at)}"
+        )
+
+    @classmethod
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
         """Render a single order as a markdown bullet-point block."""
         price = cls._format_price(o.total_price, o.currency)
@@ -502,7 +552,7 @@ class AllegroAgent(BaseAgent):
                 buyer_login=tool_input.get("buyer_login"),
                 limit=min(int(tool_input.get("limit", 100)), 100),
             )
-            body = "Brak nowych zamówień." if not orders else "\n\n".join(self._order_block(o) for o in orders)
+            body = "Brak nowych zamówień." if not orders else "\n\n".join(self._new_order_bullet(o) for o in orders)
             return body + "\n\n" + await self._monitoring_status_block()
 
         if tool_name == "get_orders":
