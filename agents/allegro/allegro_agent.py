@@ -887,8 +887,11 @@ class AllegroAgent(BaseAgent):
                     if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
                         per_order_section += (
                             f"\n\n  Uwaga: suma opłat/zwrotów z powyższej tabeli nie zsumuje się do "
-                            f"\"Zysk netto\" powyżej — różnicę ({self._format_price(unattributed_refunds - unattributed_fees)}) "
-                            f"stanowią opłaty/zwroty nieprzypisane do żadnego zamówienia (patrz niżej)."
+                            f"\"Zysk netto\" powyżej — brakującą różnicę stanowią opłaty/zwroty "
+                            f"nieprzypisane do żadnego zamówienia, patrz niżej "
+                            f"(opłaty {self._format_price(unattributed_fees)}"
+                            + (f", zwroty +{self._format_price(unattributed_refunds)}" if unattributed_refunds > 0.01 else "")
+                            + ")."
                         )
                 billing_section = (
                     f"\n\n**Koszty Allegro** ({date_from[:10]} – {date_to[:10]})\n"
@@ -897,8 +900,10 @@ class AllegroAgent(BaseAgent):
                     + (f"{billing_lines}\n" if billing_lines else "")
                     + (f"{refund_lines}\n" if refund_lines else "")
                     + (
-                        f"- w tym opłaty/zwroty nieprzypisane do zamówienia (abonament, inne): "
-                        f"**{self._format_price(unattributed_fees - unattributed_refunds)}**\n"
+                        "- w tym nieprzypisane do żadnego zamówienia (abonament, inne): "
+                        + f"opłaty **{self._format_price(unattributed_fees)}**"
+                        + (f", zwroty/rabaty **+{self._format_price(unattributed_refunds)}**" if unattributed_refunds > 0.01 else "")
+                        + "\n"
                         if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01 else ""
                     )
                     + f"\n**Zysk netto (przychód − opłaty): {self._format_price(net_profit)}**"
