@@ -824,9 +824,10 @@ class AllegroAgent(BaseAgent):
             )
             billing_section = ""
             if billing_entries:
-                # Group billing entries by order ID
-                fees_per_order: dict[str, float] = {}   # order_id → total fees (costs, positive value)
-                refunds_per_order: dict[str, float] = {}  # order_id → total refunds/credits
+                # order_id → {"fees": total costs, "refunds": total credits}, both as
+                # positive values. Built once from the batch billing fetch above — no
+                # per-order API calls.
+                by_order: dict[str, dict[str, float]] = defaultdict(lambda: {"fees": 0.0, "refunds": 0.0})
                 fee_by_type: dict[str, float] = {}
                 refund_by_type: dict[str, float] = {}
                 total_fees = 0.0
@@ -839,19 +840,19 @@ class AllegroAgent(BaseAgent):
                         total_fees += abs(amount)
                         fee_by_type[type_desc] = fee_by_type.get(type_desc, 0) + abs(amount)
                         if order_id:
-                            fees_per_order[order_id] = fees_per_order.get(order_id, 0) + abs(amount)
+                            by_order[order_id]["fees"] += abs(amount)
                     elif amount > 0:
                         total_refunds += amount
                         refund_by_type[type_desc] = refund_by_type.get(type_desc, 0) + amount
                         if order_id:
-                            refunds_per_order[order_id] = refunds_per_order.get(order_id, 0) + amount
+                            by_order[order_id]["refunds"] += amount
                 net_profit = total_revenue - total_fees + total_refunds
                 # Fees/refunds not tied to any single order (account subscriptions, listing
                 # fees) are still real costs and belong in the total above, but they can't
                 # appear in any order's row below — track them so the per-order table's sum
                 # doesn't silently disagree with the total.
-                unattributed_fees = total_fees - sum(fees_per_order.values())
-                unattributed_refunds = total_refunds - sum(refunds_per_order.values())
+                unattributed_fees = total_fees - sum(v["fees"] for v in by_order.values())
+                unattributed_refunds = total_refunds - sum(v["refunds"] for v in by_order.values())
                 billing_lines = "\n".join(
                     f"  - {desc}: {self._format_price(amt)}"
                     for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
@@ -865,8 +866,8 @@ class AllegroAgent(BaseAgent):
                 for o in sorted(orders, key=lambda x: x.paid_at or x.created_at):
                     oid = o.order_id
                     rev = o.total_price
-                    fees = fees_per_order.get(oid, 0.0)
-                    refunds = refunds_per_order.get(oid, 0.0)
+                    fees = by_order[oid]["fees"] if oid in by_order else 0.0
+                    refunds = by_order[oid]["refunds"] if oid in by_order else 0.0
                     net = rev - fees + refunds
                     date_str = (o.paid_at or o.created_at)[:10]
                     buyer = o.buyer_login[:15] if o.buyer_login else "—"
