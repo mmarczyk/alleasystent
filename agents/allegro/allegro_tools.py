@@ -10,6 +10,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Use for any question about 'nowe zamówienia', 'nowe', 'oczekujące', "
                 "'co nowego', 'jakie zamówienia mam', 'ile zamówień', new/pending orders. "
                 "Automatically filters for READY_FOR_PROCESSING + fulfillment=NEW orders. "
+                "Results are sorted newest-first. "
+                "SINGULAR vs PLURAL: for 'ostatnie zamówienie' / 'ostatnie nowe zamówienie' / "
+                "'najnowsze zamówienie' / 'last order' (singular — asking about ONE order), "
+                "set limit=1. Only use the default (all orders) for plural phrasing like "
+                "'nowe zamówienia' / 'ostatnie zamówienia' / 'jakie zamówienia mam'. "
                 "Returns order IDs, buyer info, fulfillment status, and totals."
             ),
             "parameters": {
@@ -21,7 +26,11 @@ ALLEGRO_TOOLS: list[dict] = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max orders to return (1–100).",
+                        "description": (
+                            "Max orders to return (1–100). Set to 1 when the user asks about "
+                            "THE LAST/newest order in the singular ('ostatnie zamówienie', "
+                            "'ostatnie nowe zamówienie'). Leave at default for plural questions."
+                        ),
                         "default": 100,
                     },
                 },

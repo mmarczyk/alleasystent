@@ -443,11 +443,15 @@ class AllegroService:
         if bought_at_lte:
             base_params["lineItems.boughtAt.lte"] = bought_at_lte
 
-        # Auto-paginate — Allegro returns up to 100 per page
+        # Auto-paginate — Allegro returns up to 100 per page.
+        # Scan a full page even when `limit` is small (e.g. limit=1 for "last order"):
+        # the API's own ordering isn't guaranteed newest-first, so we need enough data
+        # to sort ourselves below before truncating to `limit`.
         all_orders: list[AllegroOrder] = []
-        page_size = min(limit, 100)
+        page_size = 100
+        scan_cap = max(limit, page_size)
         cur_offset = offset
-        while len(all_orders) < limit:
+        while len(all_orders) < scan_cap:
             params = {**base_params, "limit": page_size, "offset": cur_offset}
             data = await self._get("/order/checkout-forms", params=params)
             forms = data.get("checkoutForms", [])
@@ -457,6 +461,8 @@ class AllegroService:
                 break
             cur_offset += page_size
 
+        # Newest-first, so a small `limit` reliably returns the most recent orders.
+        all_orders.sort(key=lambda o: o.created_at or "", reverse=True)
         result = all_orders[:limit]
         # Populate the single-order detail cache as a side-effect so that
         # a subsequent get_order(id) for any of these doesn't need a round-trip.
