@@ -90,7 +90,10 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
      "allegro_offers"),
     # Orders — "dostaw" covers dostawy/dostawę (delivery) but comes after offers
     # so "dostawcy" (supplier) is already caught above
-    (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
+    # "zamówi"/"zamowi" (stem, no case ending) covers zamówienie/zamówienia/zamówień/
+    # zamówić/zamówię — the old "zamówien" keyword missed genitive plural "zamówień"
+    # because that form ends in "ń", a different character than the "n" it looked for.
+    (["zamówi", "zamowi", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
       "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
       "niespakow", "wysłan", "niewysłan", "nieopakow", "wartość zam"],
      "allegro_orders"),
