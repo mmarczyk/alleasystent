@@ -29,6 +29,7 @@ import logging
 from openai import (
     AsyncOpenAI,
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     InternalServerError,
     NotFoundError,
@@ -186,6 +187,18 @@ class Orchestrator:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
             response = AgentResponse(
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
+                agent_type=data_source,
+            )
+        except APIStatusError as exc:
+            # Non-retryable API errors (e.g. 400 INVALID_ARGUMENT) used to crash all
+            # the way out to a raw 500 — _classify() already had this safety net,
+            # _route() didn't. Log the query so a recurring bad payload is diagnosable.
+            logger.error(
+                "LLM API error during routing (source=%s): %s | query=%.200r",
+                data_source, exc, message.text,
+            )
+            response = AgentResponse(
+                text="Przepraszam, nie udało się przetworzyć tej wiadomości. Spróbuj sformułować pytanie inaczej.",
                 agent_type=data_source,
             )
 
