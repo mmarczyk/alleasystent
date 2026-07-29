@@ -152,10 +152,12 @@ class AllegroAgent(BaseAgent):
         "(read-only list, nothing created) → get_orders_pending_invoice (includes address automatically)\n"
         "• ISSUE/CREATE the invoice(s) — ONLY when the user uses an explicit issuance verb "
         "('wystaw fakturę/faktury', 'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X') "
-        "— call issue_pending_invoices directly and report the result. "
+        "→ preview_pending_invoices. NOTE: this does NOT actually send anything to inFakt — automatic "
+        "issuance is currently disabled, so this tool only builds and shows the invoice data (as JSON) "
+        "for manual review/issuance. Tell the user clearly that nothing was actually issued. "
         "A question about WHETHER invoices are pending ('czy mam faktury do wystawienia?', "
         "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
-        "never issue_pending_invoices for a yes/no question.\n"
+        "never preview_pending_invoices for a yes/no question.\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit → get_sales_summary. "
@@ -180,20 +182,6 @@ class AllegroAgent(BaseAgent):
         super().__init__()
         self.model_override = self._settings.gemini_model_fast
         self._allegro = AllegroService.get_instance(user_id)
-        if not self._settings.enable_invoice_issuance:
-            # issue_pending_invoices is also removed from _get_tools() — this
-            # keeps the prompt from pointing at a tool the model can't call.
-            self.system_prompt = self.system_prompt.replace(
-                "• ISSUE/CREATE the invoice(s) — ONLY when the user uses an explicit issuance verb "
-                "('wystaw fakturę/faktury', 'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X') "
-                "— call issue_pending_invoices directly and report the result. "
-                "A question about WHETHER invoices are pending ('czy mam faktury do wystawienia?', "
-                "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
-                "never issue_pending_invoices for a yes/no question.\n",
-                "• Issuing/creating invoices automatically is currently DISABLED. If the user asks to "
-                "issue/create an invoice, tell them this feature is temporarily turned off and they should "
-                "issue it manually in inFakt — optionally show the pending list via get_orders_pending_invoice.\n",
-            )
 
     async def run(
         self,
@@ -317,13 +305,7 @@ class AllegroAgent(BaseAgent):
         return AgentResponse(text=text, agent_type=self.agent_name, metadata={"output_format": "chat"})
 
     def _get_tools(self) -> list[dict[str, Any]]:
-        if self._settings.enable_invoice_issuance:
-            return ALLEGRO_TOOLS
-        # Kill switch: the model can misfire on ambiguous phrasing and this
-        # tool creates real invoices in inFakt — omit it from the tool list
-        # entirely so it's physically impossible to call, not just discouraged
-        # in the prompt (prompt-level guidance already proved insufficient).
-        return [t for t in ALLEGRO_TOOLS if t["function"]["name"] != "issue_pending_invoices"]
+        return ALLEGRO_TOOLS
 
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:
@@ -528,44 +510,40 @@ class AllegroAgent(BaseAgent):
         lines.append(f"- Link: {link}")
         return "\n".join(lines)
 
-    async def _issue_pending_invoices(self, month: int | None, year: int | None) -> str:
-        """Actually create VAT invoices in inFakt for orders that need one and lack one.
+    async def _preview_pending_invoices(self, month: int | None, year: int | None) -> str:
+        """Build the exact inFakt invoice payload for each pending order WITHOUT sending it.
 
-        Sequential on purpose — this creates real, numbered invoices in an
-        external accounting system, so it deliberately doesn't hammer that
-        API with concurrent writes the way read-only Allegro calls do.
+        Real submission (InfaktService.create_invoice/get_share_link) is
+        intentionally not called here — automatic issuance is disabled until
+        someone has reviewed a batch of these payloads and turned it back on.
+        No inFakt API call at all means no INFAKT_API_KEY is even needed for
+        this preview to work.
         """
-        from services.infakt_service import (
-            InfaktAPIError,
-            InfaktService,
-            InfaktTaskError,
-            build_invoice_payload,
-        )
+        from services.infakt_service import build_invoice_payload
 
         orders = await self._allegro.get_orders_needing_invoice(month=month, year=year)
         if not orders:
             return "Brak zamówień wymagających wystawienia faktury."
 
-        infakt = InfaktService.get_instance()
         is_production = self._settings.is_production
-        lines = []
+        blocks = []
         for o in orders:
             try:
                 address = await self._allegro.get_order_invoice_data(o.order_id)
                 payload = build_invoice_payload(o, address, is_production)
-                status = await infakt.create_invoice(payload)
-                link = await infakt.get_share_link(status["invoice_uuid"])
-                lines.append(f"✅ Zamówienie `{o.order_id}` ({o.buyer_login}): faktura wystawiona — {link}")
-            except (InfaktAPIError, InfaktTaskError, TimeoutError) as exc:
-                logger.error("issue_pending_invoices: order %s failed: %s", o.order_id, exc)
-                lines.append(f"❌ Zamówienie `{o.order_id}` ({o.buyer_login}): błąd — {exc}")
+                payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+                blocks.append(
+                    f"**Zamówienie `{o.order_id}` ({o.buyer_login}):**\n```json\n{payload_json}\n```"
+                )
             except Exception:
-                logger.exception("issue_pending_invoices: unexpected error for order %s", o.order_id)
-                lines.append(f"❌ Zamówienie `{o.order_id}` ({o.buyer_login}): nieoczekiwany błąd")
+                logger.exception("preview_pending_invoices: failed to build payload for %s", o.order_id)
+                blocks.append(f"**Zamówienie `{o.order_id}` ({o.buyer_login}):** ❌ nie udało się zbudować danych faktury")
 
-        header = f"**Przetworzono {len(orders)} zamówień bez faktury:**\n"
-        footer = "\n\nKażdą fakturę warto zweryfikować w inFakt przed wysłaniem do kupującego."
-        return header + "\n".join(lines) + footer
+        header = (
+            f"**Podgląd danych faktur dla {len(orders)} zamówień — NIC nie zostało wysłane do inFakt:**\n\n"
+        )
+        footer = "\n\nSprawdź dane, a wystawienie w inFakt zrób ręcznie lub poproś o włączenie automatycznego wysyłania."
+        return header + "\n\n".join(blocks) + footer
 
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
@@ -1204,8 +1182,8 @@ class AllegroAgent(BaseAgent):
                 blocks.append(self._order_block(o, extra_lines=extra))
             return header + "\n\n".join(blocks)
 
-        if tool_name == "issue_pending_invoices":
-            return await self._issue_pending_invoices(
+        if tool_name == "preview_pending_invoices":
+            return await self._preview_pending_invoices(
                 month=tool_input.get("month"),
                 year=tool_input.get("year"),
             )

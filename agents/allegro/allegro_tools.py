@@ -528,18 +528,17 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "issue_pending_invoices",
+            "name": "preview_pending_invoices",
             "description": (
-                "Actually CREATE/ISSUE VAT invoices in the seller's inFakt account for orders "
-                "that need one and don't have one yet (for the given month, defaults to current). "
+                "Build the exact VAT invoice data (as JSON) that WOULD be sent to inFakt for orders "
+                "that need an invoice and don't have one yet (for the given month, defaults to current). "
+                "IMPORTANT: this does NOT create or send anything — automatic issuance is currently "
+                "disabled, so this only shows a preview for manual review/issuance in inFakt. "
                 "Use when the user explicitly asks to ISSUE/CREATE invoices — "
                 "'wystaw faktury', 'wystaw brakujące faktury', 'wystaw fakturę dla zamówienia X', "
                 "'utwórz faktury za ten miesiąc' — as opposed to just listing which orders need one "
                 "(use get_orders_pending_invoice for a read-only list, or get_order_invoice_data for "
-                "just the billing address of one order). "
-                "This creates real, numbered invoices in inFakt — it is not easily reversible. "
-                "Returns a share link per created invoice for manual review in inFakt (the invoice "
-                "still needs to be checked there — this tool does not generate or store a PDF)."
+                "just the billing address of one order)."
             ),
             "parameters": {
                 "type": "object",
