@@ -605,7 +605,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # Faktury
     "get_orders_pending_invoice": "chat",
     "get_order_invoice_data": "chat",
-    "issue_pending_invoices": "action",
+    "preview_pending_invoices": "action",
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
     "suggest_invoice_monitoring": "action",

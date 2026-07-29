@@ -175,7 +175,10 @@ class AllegroAgent(BaseAgent):
         "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
         "as a standalone promise — you cannot do this. Always call a tool and let it render the button. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
-        "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way."
+        "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way. "
+        "JSON PREVIEWS — CRITICAL: When a tool result contains ```json code blocks (e.g. from preview_pending_invoices), "
+        "include them VERBATIM, character-for-character — this is exact data the user will verify, never summarize, "
+        "reformat, or reorder the JSON fields."
     )
 
     def __init__(self, user_id: str | None = None):
