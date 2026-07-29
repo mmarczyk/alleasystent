@@ -29,6 +29,7 @@ import logging
 from openai import (
     AsyncOpenAI,
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     InternalServerError,
     NotFoundError,
@@ -90,7 +91,10 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
      "allegro_offers"),
     # Orders — "dostaw" covers dostawy/dostawę (delivery) but comes after offers
     # so "dostawcy" (supplier) is already caught above
-    (["zamówien", "zamowien", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
+    # "zamówi"/"zamowi" (stem, no case ending) covers zamówienie/zamówienia/zamówień/
+    # zamówić/zamówię — the old "zamówien" keyword missed genitive plural "zamówień"
+    # because that form ends in "ń", a different character than the "n" it looked for.
+    (["zamówi", "zamowi", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
       "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
       "niespakow", "wysłan", "niewysłan", "nieopakow", "wartość zam"],
      "allegro_orders"),
@@ -183,6 +187,18 @@ class Orchestrator:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
             response = AgentResponse(
                 text="Przepraszam, usługa AI jest chwilowo przeciążona. Spróbuj ponownie za chwilę.",
+                agent_type=data_source,
+            )
+        except APIStatusError as exc:
+            # Non-retryable API errors (e.g. 400 INVALID_ARGUMENT) used to crash all
+            # the way out to a raw 500 — _classify() already had this safety net,
+            # _route() didn't. Log the query so a recurring bad payload is diagnosable.
+            logger.error(
+                "LLM API error during routing (source=%s): %s | query=%.200r",
+                data_source, exc, message.text,
+            )
+            response = AgentResponse(
+                text="Przepraszam, nie udało się przetworzyć tej wiadomości. Spróbuj sformułować pytanie inaczej.",
                 agent_type=data_source,
             )
 
