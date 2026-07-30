@@ -207,8 +207,20 @@ async def send_push(user_id: str, title: str, body: str, url: str = "/", prompt:
 
     try:
         from pywebpush import webpush, WebPushException
+        from py_vapid import Vapid01
     except ImportError:
         logger.error("pywebpush not installed — cannot send push notifications")
+        return
+
+    try:
+        # Pass a pre-built Vapid01 object, not the raw PEM string: webpush()'s
+        # string path (Vapid.from_string) doesn't strip the "-----BEGIN/END-----"
+        # header lines before base64-decoding, so it always fails on a real PEM
+        # key with "ASN.1 parsing error: invalid length" — Vapid01.from_pem()
+        # (used here) handles the full PEM correctly.
+        vapid_key = Vapid01.from_pem(settings.vapid_private_key.encode())
+    except Exception as exc:
+        logger.error("Invalid VAPID private key, cannot send push: %s", exc)
         return
 
     payload = json.dumps({"title": title, "body": body, "url": url, "prompt": prompt}).encode()
@@ -222,7 +234,7 @@ async def send_push(user_id: str, title: str, body: str, url: str = "/", prompt:
                 lambda s=sub: webpush(
                     subscription_info=s,
                     data=payload,
-                    vapid_private_key=settings.vapid_private_key,
+                    vapid_private_key=vapid_key,
                     vapid_claims={"sub": settings.vapid_email},
                     # "high" tells the push service (incl. Apple's, for iOS PWA push)
                     # to prioritize immediate delivery instead of batching/delaying it
