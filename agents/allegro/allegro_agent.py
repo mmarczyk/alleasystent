@@ -150,14 +150,18 @@ class AllegroAgent(BaseAgent):
         "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order (no issuance verb) → get_order_invoice_data\n"
         "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'brakujące faktury' "
         "(read-only list, nothing created) → get_orders_pending_invoice (includes address automatically)\n"
-        "• ISSUE/CREATE the invoice(s) — ONLY when the user uses an explicit issuance verb "
-        "('wystaw fakturę/faktury', 'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X') "
-        "→ preview_pending_invoices. NOTE: this does NOT actually send anything to inFakt — automatic "
-        "issuance is currently disabled, so this tool only builds and shows the invoice data (as JSON) "
-        "for manual review/issuance. Tell the user clearly that nothing was actually issued. "
+        "• ISSUE/CREATE invoice(s) — ONLY with an explicit issuance verb ('wystaw fakturę/faktury', "
+        "'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X'):\n"
+        "  - ONE specific order named (a concrete order_id from context or given directly by the "
+        "user) → issue_invoice_for_order. This is REAL — it actually creates the invoice in inFakt. "
+        "Never invent or guess an order_id; if you don't have one, ask the user or look it up first.\n"
+        "  - Batch / whole month, no single order named ('wystaw wszystkie faktury', 'wystaw brakujące "
+        "faktury za ten miesiąc') → preview_pending_invoices. This does NOT send anything — bulk "
+        "issuance is preview-only by design. Tell the user clearly that nothing was actually issued and "
+        "that they can ask you to issue a specific order individually instead.\n"
         "A question about WHETHER invoices are pending ('czy mam faktury do wystawienia?', "
         "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
-        "never preview_pending_invoices for a yes/no question.\n"
+        "never issue_invoice_for_order or preview_pending_invoices for a yes/no question.\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit → get_sales_summary. "
@@ -545,8 +549,49 @@ class AllegroAgent(BaseAgent):
         header = (
             f"**Podgląd danych faktur dla {len(orders)} zamówień — NIC nie zostało wysłane do inFakt:**\n\n"
         )
-        footer = "\n\nSprawdź dane, a wystawienie w inFakt zrób ręcznie lub poproś o włączenie automatycznego wysyłania."
+        footer = (
+            "\n\nSprawdź dane, a wystawienie w inFakt zrób ręcznie, albo poproś o wystawienie "
+            "konkretnego zamówienia pojedynczo (np. „wystaw fakturę dla zamówienia <id>”)."
+        )
         return header + "\n\n".join(blocks) + footer
+
+    async def _issue_invoice_for_order(self, order_id: str) -> str:
+        """Actually create ONE real VAT invoice in inFakt for a single named order.
+
+        Deliberately single-order only — bulk issuance stays preview-only
+        (see _preview_pending_invoices) after an earlier misfire on an
+        ambiguous yes/no question created a real (failed) issuance attempt.
+        Requiring a concrete order_id per call keeps the blast radius of any
+        future misfire to at most one invoice.
+        """
+        from services.infakt_service import (
+            InfaktAPIError,
+            InfaktService,
+            InfaktTaskError,
+            build_invoice_payload,
+        )
+
+        order = await self._allegro.get_order(order_id)
+        if not order.invoice_required:
+            return f"Zamówienie `{order_id}`: kupujący nie poprosił o fakturę VAT — nic nie wystawiono."
+
+        existing = await self._allegro.get_order_invoices(order_id)
+        if existing:
+            return f"Zamówienie `{order_id}`: faktura już istnieje w Allegro — nie wystawiono kolejnej."
+
+        try:
+            address = await self._allegro.get_order_invoice_data(order_id)
+            payload = build_invoice_payload(order, address, self._settings.is_production)
+            infakt = InfaktService.get_instance()
+            status = await infakt.create_invoice(payload)
+            link = await infakt.get_share_link(status["invoice_uuid"])
+            return (
+                f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt: {link}\n"
+                "Zweryfikuj ją tam przed wysłaniem do kupującego."
+            )
+        except (InfaktAPIError, InfaktTaskError, TimeoutError) as exc:
+            logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
+            return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
 
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
@@ -1190,6 +1235,9 @@ class AllegroAgent(BaseAgent):
                 month=tool_input.get("month"),
                 year=tool_input.get("year"),
             )
+
+        if tool_name == "issue_invoice_for_order":
+            return await self._issue_invoice_for_order(tool_input["order_id"])
 
         if tool_name == "suggest_order_monitoring":
             return (

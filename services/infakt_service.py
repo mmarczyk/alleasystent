@@ -9,12 +9,13 @@ status is polled until it resolves. Only invoice issuance + a shareable
 view link are implemented — no PDF export, no Google Drive storage (the
 invoice still needs manual review in the inFakt web app either way).
 
-NOTE: InfaktService.create_invoice()/get_share_link() are not currently
-called by any agent tool — allegro_agent._preview_pending_invoices only
-uses build_invoice_payload() and shows the result, it never submits it.
-Real submission was intentionally disconnected after it fired on an
-ambiguous yes/no question; this class is kept ready for when that's
-wired back in behind an explicit confirmation step.
+NOTE: real submission (create_invoice/get_share_link) is only called from
+allegro_agent._issue_invoice_for_order, which requires one concrete
+order_id per call. Bulk issuance for a whole month/batch stays
+preview-only (_preview_pending_invoices, build_invoice_payload only) —
+that's the one that misfired on an ambiguous yes/no question earlier;
+scoping real submission to a single named order at a time caps the
+blast radius of any future misfire at one invoice.
 
 API docs: https://github.com/infakt/API
 """

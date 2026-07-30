@@ -530,15 +530,15 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "preview_pending_invoices",
             "description": (
-                "Build the exact VAT invoice data (as JSON) that WOULD be sent to inFakt for orders "
-                "that need an invoice and don't have one yet (for the given month, defaults to current). "
-                "IMPORTANT: this does NOT create or send anything — automatic issuance is currently "
-                "disabled, so this only shows a preview for manual review/issuance in inFakt. "
-                "Use when the user explicitly asks to ISSUE/CREATE invoices — "
-                "'wystaw faktury', 'wystaw brakujące faktury', 'wystaw fakturę dla zamówienia X', "
-                "'utwórz faktury za ten miesiąc' — as opposed to just listing which orders need one "
-                "(use get_orders_pending_invoice for a read-only list, or get_order_invoice_data for "
-                "just the billing address of one order)."
+                "Build the exact VAT invoice data (as JSON) that WOULD be sent to inFakt for MULTIPLE "
+                "orders — all orders that need an invoice and don't have one yet, for the given month "
+                "(defaults to current). IMPORTANT: this does NOT create or send anything — bulk issuance "
+                "is intentionally preview-only, so this just shows the data for manual review. "
+                "Use for a BATCH request with no single specific order named — "
+                "'wystaw faktury', 'wystaw brakujące faktury', 'utwórz faktury za ten miesiąc'. "
+                "If the user names ONE specific order, use issue_invoice_for_order instead — that one "
+                "actually issues it. For a read-only list use get_orders_pending_invoice, and for just "
+                "the billing address of one order use get_order_invoice_data."
             ),
             "parameters": {
                 "type": "object",
@@ -552,6 +552,31 @@ ALLEGRO_TOOLS: list[dict] = [
                         "description": "4-digit year. Defaults to current year.",
                     },
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "issue_invoice_for_order",
+            "description": (
+                "Actually CREATE/ISSUE a real VAT invoice in inFakt for exactly ONE named Allegro order. "
+                "Requires an explicit order_id — never call this for a batch/month-wide request (use "
+                "preview_pending_invoices for that, which only previews, never sends). "
+                "Use when the user names a specific order and uses an issuance verb: "
+                "'wystaw fakturę dla zamówienia <id>', 'wystaw fakturę do tego zamówienia', "
+                "'utwórz fakturę dla <id>' — where <id> is a concrete order ID (from this conversation "
+                "or given directly by the user). If you don't have a concrete order_id in context, ask "
+                "the user for it or look it up first — never guess or invent one. "
+                "This creates a real, numbered invoice in inFakt — it is not easily reversible. "
+                "Returns a share link for manual review in inFakt (no PDF is generated or stored)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
+                },
+                "required": ["order_id"],
             },
         },
     },
@@ -606,6 +631,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_orders_pending_invoice": "chat",
     "get_order_invoice_data": "chat",
     "preview_pending_invoices": "action",
+    "issue_invoice_for_order": "action",
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
     "suggest_invoice_monitoring": "action",
