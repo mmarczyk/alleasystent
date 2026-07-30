@@ -389,6 +389,16 @@ class AllegroService:
             raise AllegroAPIError(resp.status_code, resp.text[:500])
         return resp.json()
 
+    async def _put_bytes(self, path: str, content: bytes, content_type: str) -> None:
+        headers = await self._get_headers()
+        headers["Content-Type"] = content_type
+        try:
+            resp = await self._client.put(path, headers=headers, content=content)
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise AllegroAPIError(0, f"Network error: {exc}") from exc
+        if resp.status_code >= 400:
+            raise AllegroAPIError(resp.status_code, resp.text[:500])
+
     # ── Orders ────────────────────────────────────────────────────────────────
 
     async def get_orders(
@@ -590,6 +600,26 @@ class AllegroService:
         invoices = data.get("invoices", [])
         self._invoice_cache.set(order_id, invoices)
         return invoices
+
+    async def create_order_invoice_record(self, order_id: str, invoice_number: str, filename: str) -> str:
+        """POST .../invoices — register invoice metadata on the order, return Allegro's invoice id.
+
+        Must be followed by upload_order_invoice_file() with the same id.
+        """
+        body: dict[str, Any] = {"file": {"name": filename}}
+        if invoice_number:
+            body["invoiceNumber"] = invoice_number
+        data = await self._post(f"/order/checkout-forms/{order_id}/invoices", body)
+        self._invoice_cache.invalidate(order_id)
+        return data["id"]
+
+    async def upload_order_invoice_file(self, order_id: str, allegro_invoice_id: str, pdf_bytes: bytes) -> None:
+        """PUT .../invoices/{invoiceId}/file — upload the actual PDF (max 2MB, one per order)."""
+        await self._put_bytes(
+            f"/order/checkout-forms/{order_id}/invoices/{allegro_invoice_id}/file",
+            pdf_bytes,
+            "application/pdf",
+        )
 
     async def get_orders_needing_invoice(
         self,

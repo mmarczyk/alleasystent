@@ -162,6 +162,23 @@ class AllegroAgent(BaseAgent):
         "A question about WHETHER invoices are pending ('czy mam faktury do wystawienia?', "
         "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
         "never issue_invoice_for_order or preview_pending_invoices for a yes/no question.\n"
+        "AFTER ISSUING AN INVOICE (issue_invoice_for_order succeeded) — delivering it further:\n"
+        "  - attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
+        "Allegro order, so the buyer sees it on their order page. Needs order_id + invoice_uuid "
+        "(invoice_uuid comes from the issue_invoice_for_order result earlier in this conversation — "
+        "never guess it, ask if it's not in context).\n"
+        "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
+        "invoice_uuid, same rule — never guess it.\n"
+        "  - If the user's ORIGINAL request already named the channel(s) ('wystaw i wyślij do KSeF i "
+        "Allegro', 'wystaw i dodaj do Allegro') — just call the matching tool(s) directly, no need to ask.\n"
+        "  - Otherwise: once the user confirms the issued invoice looks fine ('ok', 'faktura jest ok', "
+        "'wygląda dobrze') and hasn't named a channel yet, call get_order_invoice_data for that order to "
+        "check whether the buyer is a company or private person, then ASK in your reply: "
+        "for a company buyer — 'Wysłać fakturę do KSeF i dołączyć ją do zamówienia w Allegro?'; "
+        "for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' (don't default to KSeF for "
+        "a private person — only call send_invoice_to_ksef for one if the user explicitly asks). "
+        "Only call the delivery tool(s) after the user answers that question, unless they already "
+        "specified the channel(s) upfront as above.\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit → get_sales_summary. "
@@ -584,14 +601,63 @@ class AllegroAgent(BaseAgent):
             payload = build_invoice_payload(order, address, self._settings.is_production)
             infakt = InfaktService.get_instance()
             status = await infakt.create_invoice(payload)
-            link = await infakt.get_share_link(status["invoice_uuid"])
+            invoice_uuid = status["invoice_uuid"]
+            link = await infakt.get_share_link(invoice_uuid)
+            buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
             return (
                 f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt: {link}\n"
-                "Zweryfikuj ją tam przed wysłaniem do kupującego."
+                f"ID faktury w inFakt: `{invoice_uuid}`\n"
+                f"Nabywca: {buyer_kind}.\n"
+                "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
             )
         except (InfaktAPIError, InfaktTaskError, TimeoutError) as exc:
             logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
             return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
+
+    async def _attach_invoice_to_allegro_order(self, order_id: str, invoice_uuid: str) -> str:
+        """Fetch the invoice PDF from inFakt and attach it to the Allegro order.
+
+        Allegro allows exactly one PDF invoice per order (2 MB max) via a
+        two-step API: POST registers the invoice metadata, PUT uploads the
+        actual file bytes against the id from that response.
+        """
+        from services.infakt_service import InfaktAPIError, InfaktService
+
+        infakt = InfaktService.get_instance()
+        try:
+            invoice = await infakt.get_invoice(invoice_uuid)
+            pdf_bytes = await infakt.get_invoice_pdf(invoice_uuid)
+        except InfaktAPIError as exc:
+            logger.error("attach_invoice_to_allegro_order: fetch from inFakt failed for %s: %s", invoice_uuid, exc)
+            return f"❌ Nie udało się pobrać faktury `{invoice_uuid}` z inFakt: {exc}"
+
+        number = invoice.get("number", "")
+        filename = f"faktura-{number or invoice_uuid}.pdf"
+        try:
+            allegro_invoice_id = await self._allegro.create_order_invoice_record(order_id, number, filename)
+            await self._allegro.upload_order_invoice_file(order_id, allegro_invoice_id, pdf_bytes)
+        except AllegroAPIError as exc:
+            logger.error("attach_invoice_to_allegro_order: order %s failed: %s", order_id, exc)
+            return f"❌ Nie udało się dołączyć faktury do zamówienia `{order_id}` w Allegro: {exc}"
+
+        return f"✅ Faktura {number or invoice_uuid} dołączona do zamówienia `{order_id}` w Allegro — kupujący zobaczy ją na stronie zamówienia."
+
+    async def _send_invoice_to_ksef(self, invoice_uuid: str) -> str:
+        """Submit an already-issued inFakt invoice to KSeF."""
+        from services.infakt_service import InfaktAPIError, InfaktService
+
+        infakt = InfaktService.get_instance()
+        try:
+            result = await infakt.send_to_ksef(invoice_uuid)
+        except InfaktAPIError as exc:
+            logger.error("send_invoice_to_ksef: invoice %s failed: %s", invoice_uuid, exc)
+            return f"❌ Nie udało się wysłać faktury `{invoice_uuid}` do KSeF: {exc}"
+
+        status = result.get("status", "?")
+        return (
+            f"📤 Faktura `{invoice_uuid}` wysłana do KSeF (status zgłoszenia: {status}). "
+            "Wysyłka do KSeF jest asynchroniczna — ostateczny status sprawdź w panelu inFakt."
+        )
 
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
@@ -1238,6 +1304,14 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "issue_invoice_for_order":
             return await self._issue_invoice_for_order(tool_input["order_id"])
+
+        if tool_name == "attach_invoice_to_allegro_order":
+            return await self._attach_invoice_to_allegro_order(
+                tool_input["order_id"], tool_input["invoice_uuid"]
+            )
+
+        if tool_name == "send_invoice_to_ksef":
+            return await self._send_invoice_to_ksef(tool_input["invoice_uuid"])
 
         if tool_name == "suggest_order_monitoring":
             return (

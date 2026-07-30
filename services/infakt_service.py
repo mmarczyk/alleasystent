@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 """
-inFakt REST API client — VAT invoice creation.
+inFakt REST API client — VAT invoice creation, KSeF submission, PDF export.
 
 Ported from a previous Google Apps Script integration. inFakt's invoice
 creation is asynchronous: POST kicks off a background task, then the task
-status is polled until it resolves. Only invoice issuance + a shareable
-view link are implemented — no PDF export, no Google Drive storage (the
-invoice still needs manual review in the inFakt web app either way).
+status is polled until it resolves. KSeF submission is also asynchronous —
+send_to_ksef() only confirms the request was accepted, final processing
+must be checked in the inFakt panel.
 
 NOTE: real submission (create_invoice/get_share_link) is only called from
 allegro_agent._issue_invoice_for_order, which requires one concrete
@@ -17,7 +17,7 @@ that's the one that misfired on an ambiguous yes/no question earlier;
 scoping real submission to a single named order at a time caps the
 blast radius of any future misfire at one invoice.
 
-API docs: https://github.com/infakt/API
+API docs: https://github.com/infakt/API (KSeF specifics in ksef.md)
 """
 
 import asyncio
@@ -136,6 +136,33 @@ class InfaktService:
         """Generate a shareable, no-login-required view link for an invoice."""
         data = await self._post(f"/invoices/{invoice_uuid}/share_links.json")
         return data["share_link"]
+
+    async def get_invoice(self, invoice_uuid: str) -> dict[str, Any]:
+        """Fetch full invoice details — includes "number" (human invoice number) and "ksef_number"."""
+        return await self._get(f"/invoices/{invoice_uuid}.json")
+
+    async def get_invoice_pdf(self, invoice_uuid: str) -> bytes:
+        """Fetch the invoice's original PDF as raw bytes (for handing off to Allegro)."""
+        try:
+            resp = await self._client.get(
+                f"/invoices/{invoice_uuid}/pdf.json",
+                params={"document_type": "original"},
+                headers=self._headers(),
+            )
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise InfaktAPIError(0, f"Network error: {exc}") from exc
+        if resp.status_code >= 400:
+            raise InfaktAPIError(resp.status_code, resp.text[:500])
+        return resp.content
+
+    async def send_to_ksef(self, invoice_uuid: str) -> dict[str, Any]:
+        """Submit an issued invoice to KSeF (Krajowy System e-Faktur).
+
+        Submission is asynchronous on inFakt's side — this call only confirms
+        the request was accepted (status "sent"), not that KSeF finished
+        processing it. Final status must be checked in the inFakt panel.
+        """
+        return await self._post(f"/invoices/{invoice_uuid}/send_to_ksef.json")
 
     async def aclose(self) -> None:
         await self._client.aclose()

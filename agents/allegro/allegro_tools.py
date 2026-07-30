@@ -569,7 +569,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "or given directly by the user). If you don't have a concrete order_id in context, ask "
                 "the user for it or look it up first — never guess or invent one. "
                 "This creates a real, numbered invoice in inFakt — it is not easily reversible. "
-                "Returns a share link for manual review in inFakt (no PDF is generated or stored)."
+                "Returns a share link for manual review PLUS the invoice_uuid needed for the follow-up "
+                "delivery tools (attach_invoice_to_allegro_order, send_invoice_to_ksef)."
             ),
             "parameters": {
                 "type": "object",
@@ -577,6 +578,50 @@ ALLEGRO_TOOLS: list[dict] = [
                     "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
                 },
                 "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "attach_invoice_to_allegro_order",
+            "description": (
+                "Download the invoice PDF from inFakt and attach it to the corresponding Allegro order, "
+                "so the buyer can see/download it directly from their Allegro order page. "
+                "Requires BOTH the Allegro order_id and the inFakt invoice_uuid returned by an earlier "
+                "issue_invoice_for_order call in this conversation — never guess either ID; ask or look "
+                "it up if missing. Allegro allows only ONE PDF invoice per order — calling this twice "
+                "for the same order will fail."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
+                    "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                },
+                "required": ["order_id", "invoice_uuid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_invoice_to_ksef",
+            "description": (
+                "Submit an already-issued inFakt invoice to KSeF (Krajowy System e-Faktur), Poland's "
+                "mandatory national e-invoicing system. Requires the inFakt invoice_uuid returned by an "
+                "earlier issue_invoice_for_order call in this conversation — never guess it. "
+                "Submission is asynchronous — this only confirms the request was accepted, final "
+                "processing must be checked in the inFakt panel. "
+                "Typically relevant for company (B2B) buyers; don't call it for a private-person buyer "
+                "unless the user explicitly asks for it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                },
+                "required": ["invoice_uuid"],
             },
         },
     },
@@ -632,6 +677,8 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_order_invoice_data": "chat",
     "preview_pending_invoices": "action",
     "issue_invoice_for_order": "action",
+    "attach_invoice_to_allegro_order": "action",
+    "send_invoice_to_ksef": "action",
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
     "suggest_invoice_monitoring": "action",
