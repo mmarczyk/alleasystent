@@ -561,11 +561,18 @@ class AllegroService:
         address = invoice.get("address") or {}
         company = address.get("company") or {}
         natural = address.get("naturalPerson") or {}
+        # Allegro's tax ID field has moved twice: legacy "taxId" is deprecated
+        # in favor of an "ids" array (e.g. [{"type": "PL_NIP", "value": "..."}])
+        # — "vatId" was never a real field on either shape. Prefer the current
+        # PL_NIP entry, fall back to the deprecated field for older responses.
+        tax_ids = company.get("ids") or []
+        vat_id = next((i.get("value", "") for i in tax_ids if i.get("type") == "PL_NIP"), "")
+        vat_id = vat_id or company.get("taxId", "")
         return {
             "required": bool(invoice.get("required")),
             "dontWant": bool(invoice.get("dontWant")),
             "company_name": company.get("name", ""),
-            "vat_id": company.get("vatId", ""),
+            "vat_id": vat_id,
             "first_name": natural.get("firstName", ""),
             "last_name": natural.get("lastName", ""),
             "street": address.get("street", ""),
