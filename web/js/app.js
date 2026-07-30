@@ -36,6 +36,7 @@ const AppUpdater = (() => {
       + '<button onclick="AppUpdater.reload()" style="background:#fff;color:#2563eb;border:none;'
       + 'border-radius:4px;padding:.25rem .75rem;font-weight:700;cursor:pointer">Odśwież teraz</button>';
     document.body.prepend(banner);
+    OfflineBanner.reposition();
     // Auto-reload after 10 s if user hasn't clicked
     setTimeout(() => AppUpdater.reload(), 10000);
   }
@@ -56,6 +57,53 @@ const AppUpdater = (() => {
   }
 
   return { check, reload, showBanner: _showBanner };
+})();
+
+// ── Offline banner ────────────────────────────────
+// navigator.onLine / the online-offline events reflect whether the device has
+// a live network interface (airplane mode, no wifi/cellular) — exactly the
+// "no internet at all" case this banner is for. The app shell and cached data
+// (chat history, notifications) already come from localStorage/the SW cache,
+// so there's nothing to fetch here — just tell the user why things look static.
+const OfflineBanner = (() => {
+  let el = null;
+
+  function _reposition() {
+    if (!el) return;
+    const updateBanner = document.getElementById('update-banner');
+    el.style.top = updateBanner ? updateBanner.offsetHeight + 'px' : '0';
+  }
+
+  function show() {
+    if (el) { _reposition(); return; }
+    el = document.createElement('div');
+    el.id = 'offline-banner';
+    el.style.cssText = [
+      'position:fixed', 'left:0', 'right:0', 'z-index:9998',
+      'background:#57534e', 'color:#fff', 'text-align:center',
+      'padding:.5rem 1rem', 'font-size:.85rem', 'font-weight:500',
+    ].join(';');
+    el.textContent = '📡 Tryb offline — pokazuję zapisane dane. Połączenie zostanie wznowione automatycznie.';
+    document.body.prepend(el);
+    _reposition();
+  }
+
+  function hide() {
+    el?.remove();
+    el = null;
+  }
+
+  function _sync() {
+    if (navigator.onLine === false) show(); else hide();
+  }
+
+  function init() {
+    window.addEventListener('online', _sync);
+    window.addEventListener('offline', _sync);
+    _sync();
+  }
+
+  return { init, show, hide, reposition: _reposition };
 })();
 
 // ── Version info ──────────────────────────────────
@@ -810,6 +858,26 @@ const InvoiceMonitor = (() => {
 // ── Notifications (bell icon panel) ──────────────
 const Notifications = (() => {
   let _items = [];
+  const CACHE_KEY = 'ae_notifications_cache';
+
+  function _loadCache() {
+    try {
+      const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+      if (!cached) return false;
+      _items = cached.items || [];
+      _renderBadge(cached.unread_count || 0);
+      _render();
+      return true;
+    } catch { return false; }
+  }
+
+  function _saveCache(data) {
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        items: data.items || [], unread_count: data.unread_count || 0,
+      }));
+    } catch {}
+  }
 
   function _esc(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -860,7 +928,13 @@ const Notifications = (() => {
       _items = data.items || [];
       _renderBadge(data.unread_count || 0);
       _render();
-    } catch (e) { console.error('[Notifications] refresh error:', e); }
+      _saveCache(data);
+    } catch (e) {
+      console.error('[Notifications] refresh error:', e);
+      // Offline / network failure — fall back to the last cached snapshot
+      // instead of leaving the panel empty.
+      if (!_items.length) _loadCache();
+    }
   }
 
   async function open() {
@@ -887,7 +961,10 @@ const Notifications = (() => {
     if (n?.prompt) Chat.send(n.prompt);
   }
 
-  function init() { refresh(); }
+  function init() {
+    _loadCache();  // instant paint from last known state, then refresh from network
+    refresh();
+  }
 
   return { open, close, refresh, activate, init };
 })();
@@ -1332,6 +1409,7 @@ const Chat = (() => {
 
 // ── Boot ─────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
+  OfflineBanner.init();
   Settings.load();
   Store.load();
   updateVersionInfo();

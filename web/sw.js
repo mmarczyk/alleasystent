@@ -1,14 +1,16 @@
-const CACHE = 'alleasystent-v43';
+const CACHE = 'alleasystent-v44';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
   './',
   './manifest.json',
+  './config.js',
   './css/app.css',
   './css/vendor/github-dark.min.css',
   './js/app.js',
   './js/vendor/marked.min.js',
   './js/vendor/highlight.min.js',
+  './js/vendor/chart.min.js',
   './icons/icon-192.svg',
   './icons/icon-512.svg',
 ];
