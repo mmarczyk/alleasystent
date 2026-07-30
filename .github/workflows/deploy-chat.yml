@@ -39,6 +39,10 @@ jobs:
             -o web/css/vendor/github-dark.min.css
           curl -sSfL "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" \
             -o web/js/vendor/chart.min.js
+          # chart.umd.min.js embeds "//# sourceMappingURL=chart.umd.min.js.map",
+          # so the matching map must sit alongside it under its original name.
+          curl -sSfL "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js.map" \
+            -o web/js/vendor/chart.umd.min.js.map
 
       # Inject Cloud Run backend URL and this deploy's commit SHA into config.js.
       # Set BACKEND_URL as a GitHub Actions variable (repo → Settings → Variables):
