@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -118,6 +119,16 @@ class Settings(BaseSettings):
     vapid_private_key: str = ""  # PEM-encoded EC private key
     vapid_public_key: str = ""   # base64url uncompressed P-256 public key (for browser)
     vapid_email: str = "mailto:admin@alleasystent.app"
+
+    @field_validator("vapid_email", mode="before")
+    @classmethod
+    def _default_vapid_email(cls, v: str | None) -> str:
+        # Cloud Run's --update-env-vars=VAPID_EMAIL=${{ vars.VAPID_EMAIL }} sets this
+        # env var to an empty string (not unset) when the GitHub Actions repo variable
+        # isn't configured — which overrides the class default below with "", and
+        # py_vapid then rejects the push with "Missing 'sub' from claims". Fall back
+        # explicitly so an empty env var behaves the same as a missing one.
+        return v or "mailto:admin@alleasystent.app"
 
     # ── Application ───────────────────────────────────────────────────────────
     app_env: Literal["development", "production"] = "development"
