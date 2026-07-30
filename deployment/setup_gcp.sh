@@ -87,7 +87,8 @@ for SECRET in \
   allegro-client-secret \
   infakt-api-key \
   vapid-private-key \
-  vapid-public-key; do
+  vapid-public-key \
+  analytics-secret-token; do
   gcloud secrets create "$SECRET" \
     --replication-policy=automatic \
     --project="$PROJECT_ID" 2>/dev/null || echo "  $SECRET already exists"
@@ -126,6 +127,10 @@ echo "     Then add VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=
 echo "     to --update-secrets, and VAPID_EMAIL=mailto:you@example.com to --update-env-vars,"
 echo "     on BOTH the 'alleasystent' service (deploy-backend.yml) and the"
 echo "     'alleasystent-order-monitor' job (deploy-jobs.yml)."
-echo "  3. Build & deploy:     push to main (deploy-backend.yml / deploy-jobs.yml via GitHub Actions)"
-echo "  4. Set FB webhook URL: https://YOUR_CLOUD_RUN_URL/webhook/facebook"
-echo "  5. Re-run this script once the order-monitor job exists, to create its Scheduler trigger"
+echo "  3. Generate the hidden analytics token (dashboard lives at /analytics/{token},"
+echo "     not linked from the UI):"
+echo "       python -c \"import secrets; print(secrets.token_urlsafe(32))\" | gcloud secrets versions add analytics-secret-token --data-file=-"
+echo "     Then visit https://YOUR_CLOUD_RUN_URL/analytics/<the-generated-token>"
+echo "  4. Build & deploy:     push to main (deploy-backend.yml / deploy-jobs.yml via GitHub Actions)"
+echo "  5. Set FB webhook URL: https://YOUR_CLOUD_RUN_URL/webhook/facebook"
+echo "  6. Re-run this script once the order-monitor job exists, to create its Scheduler trigger"
