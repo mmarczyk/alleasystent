@@ -183,7 +183,7 @@
 <body>
 
 <div class="topbar">
-  <a href="./" class="back-link">← Chat</a>
+  <a href="/" class="back-link">← Chat</a>
   <h1>📊 Panel Analityczny</h1>
   <span class="topbar-sub" id="last-updated"></span>
   <button class="btn btn-outline" id="btn-refresh" onclick="refresh()">↺ Odśwież</button>
@@ -234,36 +234,18 @@
 
 </div>
 
-<script src="config.js"></script>
 <script>
   // ── Auth ──────────────────────────────────────────────────────────────────
-  const TOKEN_KEY = 'ae_session_token';
-  const SETTINGS_KEY = 'ae_settings';
+  // This page is only reachable via /analytics/{token}; the same token gates
+  // the underlying API calls (see main.py:_check_analytics_token).
+  const SECRET_TOKEN = decodeURIComponent(window.location.pathname.split('/').filter(Boolean).pop() || '');
 
-  function getToken() { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } }
-
-  function apiBase() {
-    try {
-      const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
-      const b = (s.backendUrl || window.__BACKEND_URL__ || '').replace(/\/$/, '');
-      return b;
-    } catch { return ''; }
-  }
-
-  function authHeaders() {
-    const t = getToken();
-    return t ? { 'Authorization': 'Bearer ' + t } : {};
+  function withToken(path) {
+    return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(SECRET_TOKEN);
   }
 
   async function apiFetch(path, opts = {}) {
-    const url = apiBase() + path;
-    const res = await fetch(url, {
-      credentials: 'include',
-      headers: { ...authHeaders(), ...(opts.headers || {}) },
-      ...opts,
-    });
-    if (res.status === 401) { window.location.href = './'; throw new Error('401'); }
-    return res;
+    return fetch(withToken(path), opts);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -300,9 +282,8 @@
       document.getElementById('last-updated').textContent =
         'Odświeżono: ' + new Date().toLocaleTimeString('pl-PL');
     } catch (e) {
-      if (e.message !== '401')
-        document.getElementById('panel-intents').innerHTML =
-          '<div class="error-msg">Błąd ładowania: ' + esc(e.message) + '</div>';
+      document.getElementById('panel-intents').innerHTML =
+        '<div class="error-msg">Błąd ładowania: ' + esc(e.message) + '</div>';
     } finally {
       document.getElementById('btn-refresh').disabled = false;
     }
@@ -392,8 +373,7 @@
       }
       renderLLMResult(data);
     } catch (e) {
-      if (e.message !== '401')
-        panel.innerHTML = '<div class="card error-msg">Błąd: ' + esc(e.message) + '</div>';
+      panel.innerHTML = '<div class="card error-msg">Błąd: ' + esc(e.message) + '</div>';
     } finally {
       btn.disabled = false;
       btn.textContent = '🧠 Uruchom ponownie';
@@ -443,12 +423,7 @@
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────────
-  if (!getToken()) {
-    // No token — redirect to main app which will show the login overlay
-    window.location.href = './';
-  } else {
-    refresh();
-  }
+  refresh();
 </script>
 
 </body>

@@ -130,6 +130,13 @@ class Settings(BaseSettings):
         # explicitly so an empty env var behaves the same as a missing one.
         return v or "mailto:admin@alleasystent.app"
 
+    # ── Analytics (hidden panel) ────────────────────────────────────────────
+    # Secret token gating the hidden dashboard at /analytics/{token}. It is not
+    # linked from the UI — store the value in GCP Secret Manager in production
+    # (same pattern as jwt_secret) and share the resulting URL only with whoever
+    # needs it. Leave empty to disable the endpoint entirely (returns 404).
+    analytics_secret_token: str = ""
+
     # ── Application ───────────────────────────────────────────────────────────
     app_env: Literal["development", "production"] = "development"
     log_level: str = "INFO"
