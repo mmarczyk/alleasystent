@@ -566,7 +566,8 @@ class AllegroAgent(BaseAgent):
                 payload = build_invoice_payload(o, address, is_production)
                 payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
                 blocks.append(
-                    f"**Zamówienie `{o.order_id}` ({o.buyer_login}):**\n```json\n{payload_json}\n```"
+                    f"**Zamówienie `{o.order_id}` ({o.buyer_login}) — status zamówienia: {self._status_pl(o.status)}:**\n"
+                    f"```json\n{payload_json}\n```"
                 )
             except Exception:
                 logger.exception("preview_pending_invoices: failed to build payload for %s", o.order_id)
@@ -1289,6 +1290,7 @@ class AllegroAgent(BaseAgent):
                 items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
                 extra = [
                     f"E-mail: {o.buyer_email}",
+                    f"Status zamówienia: **{self._status_pl(o.status)}**",
                     f"Data: {o.created_at[:10] if o.created_at else '—'}",
                     f"Produkty: {items_str}",
                     "**Faktura: niewystawiona**",
