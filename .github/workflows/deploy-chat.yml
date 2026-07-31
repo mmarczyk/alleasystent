@@ -3,7 +3,7 @@ name: Deploy AllEasystent Chat UI to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ["web/**", ".github/workflows/deploy-chat.yml"]
+    paths: ["web/**", "web_private/**", ".github/workflows/deploy-chat.yml"]
   workflow_dispatch:
 
 permissions:
@@ -55,6 +55,26 @@ jobs:
         run: |
           echo "window.__BACKEND_URL__ = '${BACKEND_URL}';" > web/config.js
           echo "window.__FRONTEND_VERSION__ = '${GIT_SHA}';" >> web/config.js
+
+      # Build the hidden analytics dashboard at web/{token}/ — not linked from
+      # anywhere in the UI. {token} must be the same value as the backend's
+      # ANALYTICS_SECRET_TOKEN (GCP Secret Manager, see deploy-backend.yml),
+      # since the page calls the backend with ?token=<token> and the backend
+      # independently verifies it. Set ANALYTICS_SECRET_TOKEN as a GitHub
+      # Actions secret (repo → Settings → Secrets and variables → Actions →
+      # Secrets) — repo is public, so treat this only as an unlisted URL, not
+      # a real secret: it is readable from this workflow's public run logs/
+      # artifact by anyone. Skipped entirely when the secret isn't set.
+      - name: Build hidden analytics dashboard folder
+        env:
+          ANALYTICS_SECRET_TOKEN: ${{ secrets.ANALYTICS_SECRET_TOKEN }}
+        run: |
+          if [ -n "$ANALYTICS_SECRET_TOKEN" ]; then
+            mkdir -p "web/$ANALYTICS_SECRET_TOKEN"
+            cp web_private/analytics.html "web/$ANALYTICS_SECRET_TOKEN/index.html"
+          else
+            echo "ANALYTICS_SECRET_TOKEN not set — skipping hidden analytics dashboard."
+          fi
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

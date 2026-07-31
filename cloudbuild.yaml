@@ -13,8 +13,12 @@
 #   jwt-secret            — Random string for JWT signing
 #   fb-page-token         — Facebook Page Access Token (or empty)
 #   fb-app-secret         — Facebook App Secret (or empty)
-#   analytics-secret-token — random token gating the hidden /analytics/{token}
-#                            dashboard (not linked from the UI)
+#   analytics-secret-token — random token gating /admin/analytics +
+#                            /admin/analytics/analyze; must match the
+#                            ANALYTICS_SECRET_TOKEN GitHub Actions secret used
+#                            to build the hidden dashboard on GitHub Pages
+#                            (see deploy-chat.yml) — the dashboard HTML is not
+#                            served by this backend
 
 steps:
   # Build Docker image

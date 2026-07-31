@@ -183,7 +183,7 @@
 <body>
 
 <div class="topbar">
-  <a href="/" class="back-link">← Chat</a>
+  <a href="../" class="back-link">← Chat</a>
   <h1>📊 Panel Analityczny</h1>
   <span class="topbar-sub" id="last-updated"></span>
   <button class="btn btn-outline" id="btn-refresh" onclick="refresh()">↺ Odśwież</button>
@@ -234,14 +234,23 @@
 
 </div>
 
+<script src="../config.js"></script>
 <script>
   // ── Auth ──────────────────────────────────────────────────────────────────
-  // This page is only reachable via /analytics/{token}; the same token gates
-  // the underlying API calls (see main.py:_check_analytics_token).
+  // This page is built at web/{token}/ (see deploy-chat.yml); the folder name
+  // doubles as the secret the backend checks on every call (see
+  // main.py:_check_analytics_token) — nothing to configure here.
   const SECRET_TOKEN = decodeURIComponent(window.location.pathname.split('/').filter(Boolean).pop() || '');
 
+  // Same-origin (all-in-one) deployments leave __BACKEND_URL__ unset; split
+  // deployments (this page on GitHub Pages, backend on Cloud Run) inject it
+  // via config.js at build time, same as the main chat UI.
+  function apiBase() {
+    return (window.__BACKEND_URL__ || '').replace(/\/$/, '');
+  }
+
   function withToken(path) {
-    return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(SECRET_TOKEN);
+    return apiBase() + path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(SECRET_TOKEN);
   }
 
   async function apiFetch(path, opts = {}) {
