@@ -73,9 +73,9 @@ class Settings(BaseSettings):
     # ── inFakt (invoicing) ───────────────────────────────────────────────────
     # Single API key tied to the store owner's own inFakt account — store in
     # GCP Secret Manager in production, same pattern as allegro_client_secret.
-    # Not currently used by any tool: preview_pending_invoices only builds the
-    # payload locally and never calls inFakt. Kept ready for when real
-    # submission (InfaktService.create_invoice/get_share_link) is wired back in.
+    # Used by issue_invoice_for_order / attach_invoice_to_allegro_order /
+    # send_invoice_to_ksef (all single-order, real API calls). Bulk issuance
+    # (preview_pending_invoices) stays local-only and never needs this key.
     infakt_api_key: str = ""
     infakt_api_url: str = "https://api.infakt.pl/api/v3"
 
