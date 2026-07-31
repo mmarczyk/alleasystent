@@ -523,12 +523,24 @@ const WebPush = (() => {
 
       const reg = await navigator.serviceWorker.ready;
       let sub = await reg.pushManager.getSubscription();
-      if (!sub) {
-        sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: _urlBase64ToUint8Array(publicKey),
-        });
+      if (sub) {
+        // A subscription is permanently bound to the VAPID key it was created
+        // with — the browser won't let it silently follow a rotated server
+        // key. Drop it and create a fresh one so it's guaranteed to match
+        // the current public key (otherwise push fails with VapidPkHashMismatch
+        // forever, and re-clicking "enable" looks like it does nothing).
+        await fetch(Settings.api('/push/subscribe'), {
+          method: 'DELETE',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', ...Auth.headers() },
+          body: JSON.stringify({ endpoint: sub.endpoint }),
+        }).catch(() => {});
+        await sub.unsubscribe();
       }
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: _urlBase64ToUint8Array(publicKey),
+      });
       const subRes = await fetch(Settings.api('/push/subscribe'), {
         method: 'POST',
         credentials: 'include',
