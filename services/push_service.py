@@ -247,8 +247,21 @@ async def send_push(user_id: str, title: str, body: str, url: str = "/", prompt:
             logger.debug("Push sent → %s", sub.get("endpoint", "")[:60])
         except WebPushException as exc:
             logger.warning("Push delivery failed: %s", exc)
-            # 404/410 = subscription no longer valid, clean it up
-            if exc.response is not None and exc.response.status_code in (404, 410):
+            is_stale = False
+            if exc.response is not None:
+                # 404/410 = subscription no longer valid.
+                if exc.response.status_code in (404, 410):
+                    is_stale = True
+                # VapidPkHashMismatch = subscription was created under a VAPID public
+                # key that no longer matches ours (e.g. after a key rotation, or a
+                # local browser subscription orphaned by clearing site data before it
+                # could be unsubscribed) — permanently unrecoverable, same as 410.
+                elif exc.response.status_code == 400:
+                    try:
+                        is_stale = exc.response.json().get("reason") == "VapidPkHashMismatch"
+                    except Exception:
+                        pass
+            if is_stale:
                 stale.append(sub.get("endpoint", ""))
         except Exception as exc:
             logger.error("Unexpected push error: %s", exc)
