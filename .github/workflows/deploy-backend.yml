@@ -74,9 +74,11 @@ jobs:
       # vapid-public-key — generate with `python generate_vapid_keys.py` and add
       # via `gcloud secrets versions add`. See deployment/setup_gcp.sh.
       #
-      # analytics-secret-token gates the hidden dashboard at /analytics/{token}
-      # (not linked from the UI) — generate with `secrets.token_urlsafe(32)`,
-      # see deployment/setup_gcp.sh.
+      # analytics-secret-token gates /admin/analytics + /admin/analytics/analyze
+      # (?token= query param). The dashboard HTML is built and served by GitHub
+      # Pages instead, not this backend — see deploy-chat.yml's
+      # ANALYTICS_SECRET_TOKEN secret, which must hold the same value.
+      # Generate with `secrets.token_urlsafe(32)`, see deployment/setup_gcp.sh.
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE }} \

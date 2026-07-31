@@ -131,10 +131,13 @@ class Settings(BaseSettings):
         return v or "mailto:admin@alleasystent.app"
 
     # ── Analytics (hidden panel) ────────────────────────────────────────────
-    # Secret token gating the hidden dashboard at /analytics/{token}. It is not
-    # linked from the UI — store the value in GCP Secret Manager in production
-    # (same pattern as jwt_secret) and share the resulting URL only with whoever
-    # needs it. Leave empty to disable the endpoint entirely (returns 404).
+    # Gates /admin/analytics and /admin/analytics/analyze — both require a
+    # matching ?token= query param. The dashboard HTML itself is built and
+    # served by GitHub Pages, not this backend (see deploy-chat.yml), at
+    # web/{token}/, so this value must equal the ANALYTICS_SECRET_TOKEN
+    # GitHub Actions secret used for that build. Store here in GCP Secret
+    # Manager in production (same pattern as jwt_secret). Leave empty to
+    # disable both endpoints entirely (they return 404).
     analytics_secret_token: str = ""
 
     # ── Application ───────────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -523,24 +523,19 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
 
 
 # ── Analytics (hidden dashboard) ──────────────────────────────────────────────
-# Not linked from the UI. Reachable only at /analytics/{token}, where {token}
-# must match ANALYTICS_SECRET_TOKEN (sourced from GCP Secret Manager in prod).
-# 404 (not 401/403) on any mismatch so the endpoint's existence isn't revealed.
-
-_analytics_dir = pathlib.Path(__file__).parent / "web_private"
+# The dashboard HTML itself is built and served entirely by GitHub Pages (see
+# deploy-chat.yml), not by this backend — it lives at build time under
+# web/{token}/, where {token} is a GitHub Actions secret. This backend only
+# gates the underlying data: both endpoints below require a ?token= query
+# param matching ANALYTICS_SECRET_TOKEN (sourced from GCP Secret Manager in
+# prod — must be kept equal to the GitHub Actions secret used for the build).
+# 404 (not 401/403) on any mismatch so the endpoints' existence isn't revealed.
 
 
 def _check_analytics_token(token: str | None) -> None:
     secret = settings.analytics_secret_token
     if not secret or not token or not _hmac.compare_digest(token, secret):
         raise HTTPException(status_code=404)
-
-
-@app.get("/analytics/{token}", tags=["Analytics Admin"], include_in_schema=False)
-async def analytics_page(token: str):
-    """Serve the hidden analytics dashboard HTML, gated by the secret token."""
-    _check_analytics_token(token)
-    return FileResponse(_analytics_dir / "analytics.html")
 
 
 @app.get("/admin/analytics", tags=["Analytics Admin"], include_in_schema=False)
