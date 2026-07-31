@@ -21,6 +21,9 @@ google-cloud-pubsub==2.27.1
 google-cloud-secret-manager==2.21.1
 # google-cloud-aiplatform==1.73.0  # Uncomment for Vertex AI RAG
 
+# ── Google Sign-In verification (analytics dashboard auth) ────────────────────
+google-auth>=2.35.0
+
 # ── Redis (persistent storage — token cache + conversation history) ───────────
 redis[hiredis]>=5.0.0
 PyJWT>=2.9.0

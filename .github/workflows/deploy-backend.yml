@@ -74,11 +74,12 @@ jobs:
       # vapid-public-key — generate with `python generate_vapid_keys.py` and add
       # via `gcloud secrets versions add`. See deployment/setup_gcp.sh.
       #
-      # analytics-secret-token gates /admin/analytics + /admin/analytics/analyze
-      # (?token= query param). The dashboard HTML is built and served by GitHub
-      # Pages instead, not this backend — see deploy-chat.yml's
-      # ANALYTICS_SECRET_TOKEN secret, which must hold the same value.
-      # Generate with `secrets.token_urlsafe(32)`, see deployment/setup_gcp.sh.
+      # analytics-allowed-emails (Secret Manager) + ANALYTICS_GOOGLE_CLIENT_ID /
+      # ANALYTICS_FRONTEND_URL (repo variables, not secret) gate
+      # /admin/analytics + /admin/analytics/analyze via Google Sign-In. The
+      # dashboard itself lives in the alleasystent-analytics repo (GitHub
+      # Pages) and must use a Google OAuth Client ID matching
+      # ANALYTICS_GOOGLE_CLIENT_ID here. See deployment/setup_gcp.sh.
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE }} \
@@ -91,6 +92,6 @@ jobs:
             --cpu=1 \
             --min-instances=0 \
             --max-instances=10 \
-            --update-secrets=GOOGLE_API_KEY=google-api-key:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest,VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=vapid-public-key:latest,INFAKT_API_KEY=infakt-api-key:latest,ANALYTICS_SECRET_TOKEN=analytics-secret-token:latest \
+            --update-secrets=GOOGLE_API_KEY=google-api-key:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,JWT_SECRET=jwt-secret:latest,VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=vapid-public-key:latest,INFAKT_API_KEY=infakt-api-key:latest,ANALYTICS_ALLOWED_EMAILS=analytics-allowed-emails:latest \
             --remove-secrets=FACEBOOK_PAGE_ACCESS_TOKEN,FACEBOOK_APP_SECRET \
-            --update-env-vars=APP_ENV=production,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},RAG_BACKEND=chromadb,FRONTEND_URL=${{ vars.FRONTEND_URL }},VAPID_EMAIL=${{ vars.VAPID_EMAIL }}
+            --update-env-vars=APP_ENV=production,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},RAG_BACKEND=chromadb,FRONTEND_URL=${{ vars.FRONTEND_URL }},VAPID_EMAIL=${{ vars.VAPID_EMAIL }},ANALYTICS_GOOGLE_CLIENT_ID=${{ vars.ANALYTICS_GOOGLE_CLIENT_ID }},ANALYTICS_FRONTEND_URL=${{ vars.ANALYTICS_FRONTEND_URL }}

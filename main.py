@@ -115,6 +115,8 @@ _cors_origins = (
     if settings.frontend_url
     else ["*"]
 )
+if settings.analytics_frontend_url and _cors_origins != ["*"]:
+    _cors_origins.append(_origin_from_url(settings.analytics_frontend_url))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -522,34 +524,53 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
     }
 
 
-# ── Analytics (hidden dashboard) ──────────────────────────────────────────────
-# The dashboard HTML itself is built and served entirely by GitHub Pages (see
-# deploy-chat.yml), not by this backend — it lives at build time under
-# web/{token}/, where {token} is a GitHub Actions secret. This backend only
-# gates the underlying data: both endpoints below require a ?token= query
-# param matching ANALYTICS_SECRET_TOKEN (sourced from GCP Secret Manager in
-# prod — must be kept equal to the GitHub Actions secret used for the build).
-# 404 (not 401/403) on any mismatch so the endpoints' existence isn't revealed.
+# ── Analytics API (dashboard lives in the alleasystent-analytics repo) ────────
+# The dashboard is a static site hosted on GitHub Pages in a separate repo
+# (alleasystent-analytics) and signs users in with Google Sign-In. This
+# backend only gates the underlying data: both endpoints below require an
+# `Authorization: Bearer <Google ID token>` header. The token's signature,
+# expiry and audience (analytics_google_client_id) are verified against
+# Google, and the token's email must be in analytics_allowed_emails.
 
 
-def _check_analytics_token(token: str | None) -> None:
-    secret = settings.analytics_secret_token
-    if not secret or not token or not _hmac.compare_digest(token, secret):
-        raise HTTPException(status_code=404)
+def _check_analytics_auth(request: Request) -> None:
+    client_id = settings.analytics_google_client_id
+    allowed_emails = settings.analytics_allowed_emails_set()
+    if not client_id or not allowed_emails:
+        raise HTTPException(status_code=401, detail="Analytics dashboard not configured")
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    id_token_str = auth_header[7:]
+
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+
+    try:
+        claims = google_id_token.verify_oauth2_token(
+            id_token_str, google_requests.Request(), client_id
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid Google ID token")
+
+    email = (claims.get("email") or "").lower()
+    if not claims.get("email_verified") or email not in allowed_emails:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
 
 @app.get("/admin/analytics", tags=["Analytics Admin"], include_in_schema=False)
-async def admin_analytics(token: str | None = None) -> dict:
+async def admin_analytics(request: Request) -> dict:
     """Return aggregated query analytics (intent counts, recent queries, gap suggestions)."""
-    _check_analytics_token(token)
+    _check_analytics_auth(request)
     from services.analytics_service import get_stats
     return await get_stats()
 
 
 @app.post("/admin/analytics/analyze", tags=["Analytics Admin"], include_in_schema=False)
-async def admin_analytics_analyze(token: str | None = None) -> dict:
+async def admin_analytics_analyze(request: Request) -> dict:
     """Run LLM clustering on recent queries to surface missing features."""
-    _check_analytics_token(token)
+    _check_analytics_auth(request)
     from services.analytics_service import analyze_with_llm
     return await analyze_with_llm(
         client=_orchestrator._client,

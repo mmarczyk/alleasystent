@@ -130,15 +130,24 @@ class Settings(BaseSettings):
         # explicitly so an empty env var behaves the same as a missing one.
         return v or "mailto:admin@alleasystent.app"
 
-    # ── Analytics (hidden panel) ────────────────────────────────────────────
-    # Gates /admin/analytics and /admin/analytics/analyze — both require a
-    # matching ?token= query param. The dashboard HTML itself is built and
-    # served by GitHub Pages, not this backend (see deploy-chat.yml), at
-    # web/{token}/, so this value must equal the ANALYTICS_SECRET_TOKEN
-    # GitHub Actions secret used for that build. Store here in GCP Secret
-    # Manager in production (same pattern as jwt_secret). Leave empty to
-    # disable both endpoints entirely (they return 404).
-    analytics_secret_token: str = ""
+    # ── Analytics API (dashboard lives in the alleasystent-analytics repo) ────
+    # /admin/analytics and /admin/analytics/analyze require a Google ID token
+    # (Authorization: Bearer <token>) whose audience matches this OAuth 2.0
+    # Client ID and whose email is in analytics_allowed_emails. Client IDs are
+    # not secret (they're shipped to the browser), so this can be a plain env
+    # var. Leave empty to disable both endpoints entirely (they return 401).
+    analytics_google_client_id: str = ""
+    # Comma-separated allowlist of Google account emails permitted to view the
+    # analytics dashboard. Store in GCP Secret Manager in production (same
+    # pattern as jwt_secret).
+    analytics_allowed_emails: str = ""
+    # Origin of the GitHub Pages analytics dashboard (alleasystent-analytics),
+    # e.g. https://mmarczyk.github.io — added to the CORS allowlist alongside
+    # frontend_url so the dashboard can call this API cross-origin.
+    analytics_frontend_url: str = ""
+
+    def analytics_allowed_emails_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.analytics_allowed_emails.split(",") if e.strip()}
 
     # ── Application ───────────────────────────────────────────────────────────
     app_env: Literal["development", "production"] = "development"

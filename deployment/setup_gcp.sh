@@ -88,7 +88,7 @@ for SECRET in \
   infakt-api-key \
   vapid-private-key \
   vapid-public-key \
-  analytics-secret-token; do
+  analytics-allowed-emails; do
   gcloud secrets create "$SECRET" \
     --replication-policy=automatic \
     --project="$PROJECT_ID" 2>/dev/null || echo "  $SECRET already exists"
@@ -127,14 +127,19 @@ echo "     Then add VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=
 echo "     to --update-secrets, and VAPID_EMAIL=mailto:you@example.com to --update-env-vars,"
 echo "     on BOTH the 'alleasystent' service (deploy-backend.yml) and the"
 echo "     'alleasystent-order-monitor' job (deploy-jobs.yml)."
-echo "  3. Generate the hidden analytics token (this backend only checks it on"
-echo "     /admin/analytics* — the dashboard itself is built by GitHub Pages,"
-echo "     see deploy-chat.yml):"
-echo "       python -c \"import secrets; print(secrets.token_urlsafe(32))\""
-echo "     Add the SAME value as:"
-echo "       - GCP secret:            gcloud secrets versions add analytics-secret-token --data-file=-"
-echo "       - GitHub Actions secret: ANALYTICS_SECRET_TOKEN (repo → Settings → Secrets and variables → Actions)"
-echo "     Then, after the next GitHub Pages deploy, visit https://mmarczyk.github.io/alleasystent/<the-token>/"
+echo "  3. Set up the analytics dashboard (now in the alleasystent-analytics repo,"
+echo "     Google Sign-In instead of a secret URL token):"
+echo "       - Create an OAuth 2.0 Client ID (Web application) in GCP Console →"
+echo "         APIs & Services → Credentials. Authorized JavaScript origin:"
+echo "         https://mmarczyk.github.io"
+echo "       - GCP secret (comma-separated allowlist of Google emails):"
+echo "           printf '%s' 'you@example.com' | gcloud secrets versions add analytics-allowed-emails --data-file=-"
+echo "       - GitHub repo variables on alleasystent (Settings → Secrets and variables → Actions → Variables):"
+echo "           ANALYTICS_GOOGLE_CLIENT_ID = <the OAuth Client ID>"
+echo "           ANALYTICS_FRONTEND_URL     = https://mmarczyk.github.io/alleasystent-analytics"
+echo "       - GitHub repo variables on alleasystent-analytics:"
+echo "           BACKEND_URL       = <this Cloud Run URL>"
+echo "           GOOGLE_CLIENT_ID  = <the same OAuth Client ID>"
 echo "  4. Build & deploy:     push to main (deploy-backend.yml / deploy-jobs.yml via GitHub Actions)"
 echo "  5. Set FB webhook URL: https://YOUR_CLOUD_RUN_URL/webhook/facebook"
 echo "  6. Re-run this script once the order-monitor job exists, to create its Scheduler trigger"
