@@ -208,7 +208,13 @@ class AllegroAgent(BaseAgent):
         "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way. "
         "JSON PREVIEWS — CRITICAL: When a tool result contains ```json code blocks (e.g. from preview_pending_invoices), "
         "include them VERBATIM, character-for-character — this is exact data the user will verify, never summarize, "
-        "reformat, or reorder the JSON fields."
+        "reformat, or reorder the JSON fields. "
+        "INVOICE UUID — CRITICAL: When a tool result (e.g. issue_invoice_for_order) contains a line like "
+        "'ID faktury w inFakt: `...`', you MUST keep that exact line, with the exact ID in backticks, "
+        "VERBATIM in your reply — never drop it as 'technical detail' and never paraphrase or shorten the "
+        "ID. It is the ONLY way a later attach_invoice_to_allegro_order or send_invoice_to_ksef call in "
+        "this conversation can find the right invoice — losing it forces you to guess an ID later, which "
+        "fails against the real inFakt API (404)."
     )
 
     def __init__(self, user_id: str | None = None):
@@ -638,6 +644,12 @@ class AllegroAgent(BaseAgent):
             pdf_bytes = await infakt.get_invoice_pdf(invoice_uuid)
         except InfaktAPIError as exc:
             logger.error("attach_invoice_to_allegro_order: fetch from inFakt failed for %s: %s", invoice_uuid, exc)
+            if exc.status_code == 404:
+                return (
+                    f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
+                    "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
+                    "zamówienia ponownie przez issue_invoice_for_order."
+                )
             return f"❌ Nie udało się pobrać faktury `{invoice_uuid}` z inFakt: {exc}"
 
         number = invoice.get("number", "")
@@ -660,6 +672,12 @@ class AllegroAgent(BaseAgent):
             result = await infakt.send_to_ksef(invoice_uuid)
         except InfaktAPIError as exc:
             logger.error("send_invoice_to_ksef: invoice %s failed: %s", invoice_uuid, exc)
+            if exc.status_code == 404:
+                return (
+                    f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
+                    "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
+                    "zamówienia ponownie przez issue_invoice_for_order."
+                )
             return f"❌ Nie udało się wysłać faktury `{invoice_uuid}` do KSeF: {exc}"
 
         status = result.get("status", "?")
