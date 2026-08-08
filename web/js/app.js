@@ -717,7 +717,7 @@ const OrderMonitor = (() => {
     }
   }
 
-  function init() {
+  function init(skipInitialCheck) {
     const enabled = isEnabled();
     const lastId  = localStorage.getItem(LAST_EVT_KEY);
     console.log('[OrderMonitor] init() enabled =', enabled, 'lastId =', lastId,
@@ -731,7 +731,10 @@ const OrderMonitor = (() => {
       WebPush.subscribe().then(ok => console.log('[OrderMonitor] auto-subscribe result:', ok)).catch(() => {});
     }
     if (_timer) clearInterval(_timer);
-    _check();
+    // Skip the immediate check when the app was just opened by tapping a
+    // notification — that notification IS the detection, so re-polling right
+    // away just finds the same order again and fires a redundant duplicate.
+    if (!skipInitialCheck) _check();
     _timer = setInterval(_check, 5 * 60 * 1000);
     console.log('[OrderMonitor] polling started');
   }
@@ -802,18 +805,21 @@ const InvoiceMonitor = (() => {
     } catch (e) {}
   }
 
-  function _startPolling() {
+  function _startPolling(skipInitialCheck) {
     if (_timer) clearInterval(_timer);
-    _check();
+    // Skip the immediate check when the app was just opened by tapping a
+    // notification — that notification IS the detection, so re-polling right
+    // away just finds the same invoice again and fires a redundant duplicate.
+    if (!skipInitialCheck) _check();
     _timer = setInterval(_check, 15 * 60 * 1000);
   }
 
-  function init() {
+  function init(skipInitialCheck) {
     if (!isEnabled()) return;
     if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       WebPush.subscribe().catch(() => {});
     }
-    _startPolling();
+    _startPolling(skipInitialCheck);
   }
 
   return { isEnabled, enable, disable, init };
@@ -1526,18 +1532,18 @@ window.addEventListener('DOMContentLoaded', async () => {
   }).catch(() => {});
 
   // Init monitors AFTER full UI setup so chat injection finds a ready DOM
-  OrderMonitor.init();
-  InvoiceMonitor.init();
+  const _startParams = new URLSearchParams(location.search);
+  const _cameFromNotification = _startParams.get('open') === 'notifications';
+  OrderMonitor.init(_cameFromNotification);
+  InvoiceMonitor.init(_cameFromNotification);
 
   Notifications.init();
-  // Tapping a system push notification with a ready-made question fires it straight
-  // into the chat; otherwise it just opens the Notifications panel.
-  const _startParams = new URLSearchParams(location.search);
-  const _ask = _startParams.get('ask');
-  if (_ask) {
-    Chat.send(_ask);
-  } else if (_startParams.get('open') === 'notifications') {
+  // Tapping a system push notification opens straight into the Notifications
+  // panel — and skips the monitors' immediate re-check above, since the
+  // notification IS the detection; re-polling on arrival would just find the
+  // same order/invoice again and fire a redundant duplicate.
+  if (_cameFromNotification) {
     Notifications.open();
+    history.replaceState(null, '', location.pathname);
   }
-  if (_ask || _startParams.get('open')) history.replaceState(null, '', location.pathname);
 });

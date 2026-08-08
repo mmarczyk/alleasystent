@@ -1,4 +1,4 @@
-const CACHE = 'alleasystent-v43';
+const CACHE = 'alleasystent-v45';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
@@ -47,7 +47,7 @@ self.addEventListener('push', e => {
       body: data.body ?? '',
       icon: './icons/icon-192.svg',
       badge: './icons/icon-192.svg',
-      data: { url: data.url ?? '/', prompt: data.prompt ?? null },
+      data: { url: data.url ?? '/' },
       vibrate: [200, 100, 200],
       tag: 'alleasystent-monitor',  // replaces any direct Notification on same device silently
       renotify: false,
@@ -57,13 +57,11 @@ self.addEventListener('push', e => {
 
 self.addEventListener('notificationclick', e => {
   e.notification.close();
+  // Tapping the notification opens straight into the Notifications panel (app.js
+  // reads ?open=notifications on load) — it does NOT re-fire the chat question or
+  // re-poll for new orders/invoices; the notification itself IS the detection.
   const url = e.notification.data?.url ?? '/';
-  const prompt = e.notification.data?.prompt;
-  // Tapping the notification jumps straight into the chat question, not just the app —
-  // 'ask' is picked up and auto-sent by app.js on load.
-  const base = new URL(url, self.location.origin);
-  if (prompt) base.searchParams.set('ask', prompt);
-  const target = base.href;
+  const target = new URL(url, self.location.origin).href;
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
       const origin = self.location.origin;
