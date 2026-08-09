@@ -66,6 +66,10 @@ Odpowiedz TYLKO jedną etykietą — nic więcej.
   none              — nie trzeba danych: pozdrowienia, rozmowa, pytania o asystenta
 
 KLUCZOWE ZASADY:
+- Pytanie o OGÓLNĄ MOŻLIWOŚĆ ("czy jesteś w stanie...", "czy potrafisz...", "czy umiesz...")
+  to zawsze "none" — nawet jeśli wymienia dane (zamówienia, wiadomości, oferty). Użytkownik
+  pyta czy dana funkcja istnieje, nie prosi o wykonanie jej teraz. Dopiero konkretne polecenie
+  ("sprawdź nowe wiadomości", "pokaż zamówienia") jest właściwym źródłem danych.
 - Uwzględnij CAŁĄ historię rozmowy, szczególnie gdy bieżąca wiadomość jest krótka
 - Krótkie follow-upy ("A teraz", "Spróbuj ponownie", "Ok", "Zrób to", "I co?", "Dobra")
   dziedziczą kontekst z poprzednich wiadomości — nie traktuj ich jako nowych tematów
@@ -80,6 +84,15 @@ Przykłady: allegro_offers   allegro_orders   none
 # Ordered list — first match wins. Each entry: (keyword_list, label)
 
 _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
+    # Capability questions ("czy jesteś w stanie sprawdzać wiadomości?", "czy potrafisz...")
+    # — checked FIRST, before any domain keyword. These ask what the assistant CAN do in
+    # general, not for live data right now, even though they often name a domain noun
+    # ("wiadomości", "zamówienia"). Without this, "czy jesteś w stanie sprawdzać nowe
+    # wiadomości" would match the messaging bucket below and force an immediate (and
+    # irrelevant) tool call instead of a plain "yes, I can do that" answer.
+    (["czy jesteś w stanie", "jesteś w stanie", "czy potrafisz", "czy umiesz",
+      "are you able to", "do you know how to"],
+     "none"),
     # Store policies / FAQs — check BEFORE orders so "polityka zwrotów" → rag not orders
     (["polityk", "faq", "regulamin", "kiedy wysyłacie", "kiedy wysyłają"],
      "rag"),
