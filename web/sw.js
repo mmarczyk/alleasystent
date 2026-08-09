@@ -1,4 +1,8 @@
-const CACHE = 'alleasystent-v45';
+// Injected with the deploy's commit SHA by deploy-chat.yml, so this file's
+// bytes — and therefore the cache name — change on every deploy. That's what
+// makes the browser's own sw.js byte-diff detect an update; no one has to
+// remember to bump a version number by hand.
+const CACHE = 'alleasystent-__GIT_SHA__';
 
 // Everything needed to render the UI shell without a network request
 const SHELL = [
