@@ -55,6 +55,7 @@ jobs:
         run: |
           echo "window.__BACKEND_URL__ = '${BACKEND_URL}';" > web/config.js
           echo "window.__FRONTEND_VERSION__ = '${GIT_SHA}';" >> web/config.js
+          sed -i "s/__GIT_SHA__/${GIT_SHA}/" web/sw.js
 
       # The analytics dashboard no longer lives here — it moved to the
       # alleasystent-analytics repo (own GitHub Pages deploy, Google Sign-In).

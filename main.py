@@ -19,7 +19,6 @@ import logging
 import os
 import pathlib
 import secrets as _secrets
-import uuid as _uuid
 
 # Disable ChromaDB telemetry before it is imported anywhere
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
@@ -86,10 +85,6 @@ async def lifespan(app: FastAPI):
 
 settings = get_settings()
 
-# Unique token generated fresh on each process start — frontend uses it to
-# detect backend redeployments and prompt the user to reload for new assets.
-_SERVER_INSTANCE = _uuid.uuid4().hex[:12]
-
 # Git commit SHA baked into the image at build time (see Dockerfile /
 # .github/workflows/deploy-backend.yml). Falls back to "dev" for local runs.
 _GIT_SHA = os.environ.get("GIT_SHA", "dev")
@@ -123,15 +118,7 @@ app.add_middleware(
     allow_credentials=bool(settings.frontend_url),
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Server-Instance"],
 )
-
-
-@app.middleware("http")
-async def add_server_instance_header(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Server-Instance"] = _SERVER_INSTANCE
-    return response
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(facebook_router)

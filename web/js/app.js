@@ -17,11 +17,14 @@ if (typeof marked !== 'undefined') {
 }
 
 // ── Update detector ───────────────────────────────
+// Single source of truth: the service worker lifecycle (registered further
+// down, near checkAuth). sw.js activates a new version as soon as it's
+// installed, so this banner is purely informational — it gives the user a
+// moment to notice before the auto-reload below fires.
 const AppUpdater = (() => {
-  let _knownInstance = null;
   let _bannerShown = false;
 
-  function _showBanner() {
+  function showBanner() {
     if (_bannerShown) return;
     _bannerShown = true;
     const banner = document.createElement('div');
@@ -41,22 +44,11 @@ const AppUpdater = (() => {
     setTimeout(() => AppUpdater.reload(), 10000);
   }
 
-  function check(headers) {
-    const inst = headers?.get?.('X-Server-Instance');
-    if (!inst) return;
-    if (!_knownInstance) { _knownInstance = inst; return; }
-    if (_knownInstance !== inst) _showBanner();
-  }
-
   function reload() {
-    // Tell SW to activate immediately, then reload
-    navigator.serviceWorker?.getRegistration?.()?.then?.(reg => {
-      if (reg?.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-      else window.location.reload();
-    }) ?? window.location.reload();
+    window.location.reload();
   }
 
-  return { check, reload, showBanner: _showBanner };
+  return { reload, showBanner };
 })();
 
 // ── Offline banner ────────────────────────────────
@@ -128,10 +120,7 @@ function updateVersionInfo() {
 // time the user's first real API request lands.
 function wakeContainer() {
   fetch(Settings.api('/health'), { credentials: 'include' })
-    .then(r => {
-      AppUpdater.check(r.headers);
-      return r.json().catch(() => null);
-    })
+    .then(r => r.json().catch(() => null))
     .then(data => {
       if (data?.git_sha) {
         _backendVersion = data.git_sha;
@@ -509,7 +498,6 @@ const Backend = (() => {
         sender_id: 'web_user',
       })
     });
-    AppUpdater.check(res.headers);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -1566,10 +1554,11 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').then(reg => {
-      // Some browsers (Safari especially) are lazy about spontaneously
-      // re-checking sw.js for changes — force a check on every page load.
-      reg.update().catch(() => {});
-      // When a new SW is found, show update banner once it finishes installing
+      // Listen before triggering a check, so a fast-resolving update() can't
+      // fire 'updatefound' before anyone is listening for it.
+      // When a new SW is found, show the update banner once it finishes
+      // installing. Reload happens only from the banner (click or its own
+      // auto-reload timeout) — that's the single path that triggers a reload.
       reg.addEventListener('updatefound', () => {
         reg.installing?.addEventListener('statechange', e => {
           if (e.target.state === 'installed' && navigator.serviceWorker.controller) {
@@ -1577,12 +1566,10 @@ window.addEventListener('DOMContentLoaded', async () => {
           }
         });
       });
+      // Some browsers (Safari especially) are lazy about spontaneously
+      // re-checking sw.js for changes — force a check on every page load.
+      reg.update().catch(() => {});
     }).catch(() => {});
-    // After SKIP_WAITING the controller changes — reload to serve new assets
-    let _reloading = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (!_reloading) { _reloading = true; window.location.reload(); }
-    });
   }
 
   document.addEventListener('click', e => {
