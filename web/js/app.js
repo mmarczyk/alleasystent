@@ -702,12 +702,13 @@ const OrderMonitor = (() => {
       if (count > 0) {
         const label = count === 1 ? 'zamówienie' : count < 5 ? 'zamówienia' : 'zamówień';
         const msg = `Masz ${count} nowe ${label} do realizacji!`;
-        const prompt = count === 1
-          ? 'Podaj mi szczegóły ostatniego nowego zamówienia.'
-          : `Podaj mi szczegóły ${count} ostatnich nowych zamówień.`;
         console.log('[OrderMonitor] NEW ORDERS DETECTED:', count, data.new_orders);
+        // In-app toast only — no WebPush.sendNotification() here. The server-side
+        // Cloud Run Job (services/order_monitor.py) detects the same event and
+        // already sends the real push + inbox entry; also firing one from the
+        // client would duplicate both, especially since this poll's local
+        // baseline lags the job's and re-finds orders it already announced.
         UI.toast(`🛒 ${msg}`, 10000);
-        WebPush.sendNotification('AllEasystent — Nowe zamówienie!', msg, true, '/?open=notifications', prompt);
         Notifications.refresh();
       } else {
         console.log('[OrderMonitor] no new orders');
