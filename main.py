@@ -699,6 +699,38 @@ async def allegro_pending_invoices(request: Request):
     }
 
 
+@app.get("/allegro/unread-messages", tags=["Allegro"])
+async def allegro_unread_messages(request: Request):
+    """Return buyer message threads that currently have unread messages."""
+    from services.auth_service import get_current_user
+    from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
+
+    user = await get_current_user(request)
+    service = AllegroService.get_instance(user["sub"])
+    if service._tokens is None:
+        await service._load_tokens_from_redis()
+    if service._tokens is None:
+        raise HTTPException(401, "Not authenticated with Allegro")
+    try:
+        threads = await service.get_message_threads(limit=50)
+    except AllegroAuthError:
+        raise HTTPException(401, "Allegro auth error")
+    except AllegroAPIError as exc:
+        raise HTTPException(502, str(exc))
+    unread = [t for t in threads if t.get("hasUnreadMessages")]
+    return {
+        "threads": [
+            {
+                "thread_id": t.get("id"),
+                "subject": (t.get("subject") or {}).get("name"),
+                "last_message_at": t.get("lastMessageCreatedAt"),
+            }
+            for t in unread
+        ],
+        "count": len(unread),
+    }
+
+
 # ── Web Push ─────────────────────────────────────────────────────────────────
 
 @app.get("/push/status", tags=["Push"])

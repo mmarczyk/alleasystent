@@ -103,7 +103,7 @@ CI/CD skonfigurowany w `cloudbuild.yaml`. Sekrety pobierane z GCP Secret Manager
 
 ### GitHub Pages (frontend-only)
 
-Push do `main` automatycznie wdraża katalog `web/` na GitHub Pages (`.github/workflows/deploy-chat.yml`). Frontend wymaga ustawienia `backendUrl` w ustawieniach aplikacji.
+Push do `main` automatycznie wdraża katalog `web/` na GitHub Pages (`.github/workflows/deploy-chat.yml`). `backendUrl` jest wstrzykiwany automatycznie do `web/config.js` przez workflow (patrz `window.__BACKEND_URL__`) — nie wymaga ręcznej konfiguracji w aplikacji.
 
 ---
 
