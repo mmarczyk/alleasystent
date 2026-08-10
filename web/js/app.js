@@ -811,6 +811,9 @@ const InvoiceMonitor = (() => {
   async function enable() {
     const pushOk = await WebPush.subscribe();
     localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/invoice-monitor/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
     _startPolling(); // first check notifies about ALL currently pending invoices
     if (pushOk) {
       UI.toast('✓ Monitoring faktur włączony (co 15 minut)');
@@ -826,6 +829,9 @@ const InvoiceMonitor = (() => {
   function disable() {
     localStorage.removeItem(ENABLED_KEY);
     if (_timer) { clearInterval(_timer); _timer = null; }
+    fetch(Settings.api('/allegro/invoice-monitor/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
   }
 
   async function _check() {
@@ -894,6 +900,9 @@ const MessageMonitor = (() => {
   async function enable() {
     const pushOk = await WebPush.subscribe();
     localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/message-monitor/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
     _startPolling(); // first check notifies about ALL currently unread threads
     if (pushOk) {
       UI.toast('✓ Monitoring wiadomości włączony (co 10 minut)');
@@ -909,6 +918,9 @@ const MessageMonitor = (() => {
   function disable() {
     localStorage.removeItem(ENABLED_KEY);
     if (_timer) { clearInterval(_timer); _timer = null; }
+    fetch(Settings.api('/allegro/message-monitor/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
   }
 
   async function _check() {

@@ -699,6 +699,70 @@ async def allegro_pending_invoices(request: Request):
     }
 
 
+@app.get("/allegro/invoice-monitor/status", tags=["Allegro"])
+async def allegro_invoice_monitor_status(request: Request):
+    """Whether automatic invoice checking is currently enabled for the current user."""
+    from services.auth_service import get_current_user
+    from services.monitor_state import is_monitor_enabled
+
+    user = await get_current_user(request)
+    return {"enabled": await is_monitor_enabled("invoice", user["sub"])}
+
+
+@app.post("/allegro/invoice-monitor/enable", tags=["Allegro"])
+async def allegro_invoice_monitor_enable(request: Request):
+    """Turn on automatic background invoice checking for the current user."""
+    from services.auth_service import get_current_user
+    from services.monitor_state import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled("invoice", user["sub"], True)
+    return {"status": "enabled"}
+
+
+@app.post("/allegro/invoice-monitor/disable", tags=["Allegro"])
+async def allegro_invoice_monitor_disable(request: Request):
+    """Turn off automatic background invoice checking for the current user."""
+    from services.auth_service import get_current_user
+    from services.monitor_state import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled("invoice", user["sub"], False)
+    return {"status": "disabled"}
+
+
+@app.get("/allegro/message-monitor/status", tags=["Allegro"])
+async def allegro_message_monitor_status(request: Request):
+    """Whether automatic message checking is currently enabled for the current user."""
+    from services.auth_service import get_current_user
+    from services.monitor_state import is_monitor_enabled
+
+    user = await get_current_user(request)
+    return {"enabled": await is_monitor_enabled("message", user["sub"])}
+
+
+@app.post("/allegro/message-monitor/enable", tags=["Allegro"])
+async def allegro_message_monitor_enable(request: Request):
+    """Turn on automatic background message checking for the current user."""
+    from services.auth_service import get_current_user
+    from services.monitor_state import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled("message", user["sub"], True)
+    return {"status": "enabled"}
+
+
+@app.post("/allegro/message-monitor/disable", tags=["Allegro"])
+async def allegro_message_monitor_disable(request: Request):
+    """Turn off automatic background message checking for the current user."""
+    from services.auth_service import get_current_user
+    from services.monitor_state import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled("message", user["sub"], False)
+    return {"status": "disabled"}
+
+
 @app.get("/allegro/unread-messages", tags=["Allegro"])
 async def allegro_unread_messages(request: Request):
     """Return buyer message threads that currently have unread messages."""
