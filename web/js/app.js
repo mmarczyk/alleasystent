@@ -509,21 +509,33 @@ const Backend = (() => {
     return { text: data.response, format };
   }
 
+  // A couple of retries (with growing delay) covers the classic symptom of
+  // racing a Cloud Run cold start (container scaled to zero, min-instances=0)
+  // as well as a flaky mobile connection dropping a request outright.
+  const _RETRY_DELAYS_MS = [1500, 3000];
+
   async function query(message, sessionId) {
-    try {
-      return await _doQuery(message, sessionId);
-    } catch (err) {
-      // fetch() itself rejects with a TypeError ("Load failed" / "Failed to
-      // fetch") on network-level failures — as opposed to an HTTP error
-      // response, which is thrown as a plain Error above. This is the
-      // classic symptom of racing a Cloud Run cold start (container scaled
-      // to zero, min-instances=0): the very first request after opening the
-      // app can hit the instance before it's ready. One retry after a short
-      // delay is usually enough for the container to be warm.
-      if (!(err instanceof TypeError)) throw err;
-      await new Promise(r => setTimeout(r, 2500));
-      return await _doQuery(message, sessionId);
+    let lastErr;
+    for (let attempt = 0; attempt <= _RETRY_DELAYS_MS.length; attempt++) {
+      try {
+        return await _doQuery(message, sessionId);
+      } catch (err) {
+        // fetch() itself rejects with a TypeError ("Load failed" / "Failed to
+        // fetch") on network-level failures — as opposed to an HTTP error
+        // response, which is thrown as a plain Error above. Only that class
+        // of failure is worth retrying; a real HTTP error (4xx/5xx) would
+        // just fail again the same way.
+        if (!(err instanceof TypeError)) throw err;
+        lastErr = err;
+        if (attempt < _RETRY_DELAYS_MS.length) {
+          await new Promise(r => setTimeout(r, _RETRY_DELAYS_MS[attempt]));
+        }
+      }
     }
+    const netErr = new Error('Nie udało się połączyć z serwerem. Sprawdź internet i spróbuj ponownie.');
+    netErr.isNetworkError = true;
+    netErr.cause = lastErr;
+    throw netErr;
   }
   return { query };
 })();
@@ -1317,8 +1329,6 @@ const Chat = (() => {
     const msgText = (text || input.value).trim();
     if (!msgText) return;
 
-    const backendUrl = Settings.get('backendUrl');
-
     if (!Store.active()) Store.create();
     Store.addMessage('user', msgText);
     input.value = ''; input.style.height = 'auto';
@@ -1331,6 +1341,13 @@ const Chat = (() => {
     scrollBottom();
     renderSidebar();
 
+    await _dispatch(msgText);
+  }
+
+  // Runs the query and renders the reply. Shared by send() (user bubble
+  // already appended) and retryLast() (reuses the user bubble already on
+  // screen instead of appending a duplicate one).
+  async function _dispatch(msgText) {
     _waiting = true;
     document.getElementById('btn-send').disabled = true;
     appendBotBubble();
@@ -1339,6 +1356,7 @@ const Chat = (() => {
     const ts = Date.now();
     let fullText = '';
     let fullFormat = 'chat';
+    let isError = false;
 
     try {
       Store.addMessage('assistant', '');
@@ -1347,7 +1365,16 @@ const Chat = (() => {
       fullFormat = result.format;
       Store.updateLastMessage(fullText, fullFormat);
     } catch (err) {
-      fullText = `**Błąd:** ${err.message}`;
+      isError = true;
+      if (err.isNetworkError) {
+        // Backend.query already retried a few times — this only fires once
+        // those are exhausted, so tell the user plainly and let them retry
+        // by hand instead of silently failing.
+        fullText = `⚠️ **Problem z połączeniem.** ${err.message}\n\n` +
+          `<button class="btn-monitoring" style="background:#ef4444" onclick="Chat.retryLast()">🔄 Zapytaj ponownie</button>`;
+      } else {
+        fullText = `**Błąd:** ${err.message}`;
+      }
       const contentEl = document.getElementById('waiting-content');
       if (contentEl) contentEl.innerHTML = `<span style="color:#fca5a5">${escHtml(err.message)}</span>`;
       Store.updateLastMessage(fullText);
@@ -1361,10 +1388,26 @@ const Chat = (() => {
         document.querySelectorAll('#messages pre code').forEach(b => hljs.highlightElement(b));
       }
       // Notify if the tab was in the background when the response arrived
-      if (document.hidden && fullText && !fullText.startsWith('**Błąd:**')) {
+      if (document.hidden && fullText && !isError) {
         WebPush.sendNotification('AllEasystent', fullText);
       }
     }
+  }
+
+  // "Zapytaj ponownie" button on a failed-connection bubble: drop that error
+  // message and re-issue the same last user prompt, without re-adding a
+  // duplicate user bubble (unlike regenerate(), which is meant to re-ask).
+  function retryLast() {
+    if (_waiting) return;
+    const c = Store.active();
+    if (!c || !c.messages.length) return;
+    const last = c.messages[c.messages.length - 1];
+    if (last.role !== 'assistant') return;
+    c.messages.pop();
+    localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
+    renderMessages();
+    const lastUser = [...c.messages].reverse().find(m => m.role === 'user');
+    if (lastUser) _dispatch(lastUser.content);
   }
 
   function handleKey(e) {
@@ -1411,7 +1454,7 @@ const Chat = (() => {
     if (lastUser) await send(lastUser.content);
   }
 
-  return { send, handleKey, sendSuggestion, newConversation, loadConversation, deleteConversation, copyMessage, regenerate };
+  return { send, handleKey, sendSuggestion, newConversation, loadConversation, deleteConversation, copyMessage, regenerate, retryLast };
 })();
 
 // ── Boot ─────────────────────────────────────────
