@@ -76,6 +76,12 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "(bez statusu realizacji, bez linku, bez daty złożenia), chyba że user o nie "
         "poprosi osobno. Bez wstępu przed listą."
     ),
+    "get_new_orders:count_only": (
+        "[FORMAT ODPOWIEDZI: TYLKO LICZBA]\n"
+        "Użytkownik zapytał ILE jest nowych zamówień — odpowiedz JEDNYM krótkim zdaniem podającym "
+        "TYLKO liczbę z danych narzędzia powyżej (np. 'Masz 5 nowych zamówień.'). NIE wypisuj "
+        "poszczególnych zamówień ani ich szczegółów, chyba że user o to poprosi osobno."
+    ),
     "get_order_details": (
         "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]\n"
         "Odpowiedź MUSI składać się z dwóch części, w tej kolejności:\n"
@@ -122,7 +128,9 @@ class AllegroAgent(BaseAgent):
         "Respond in the same language as the user's question (Polish or English). "
         "Do not make up or guess any order IDs or prices — always retrieve them via tools. "
         "MANDATORY TOOL CALLS — these question types MUST trigger a tool, never be answered from memory:\n"
-        "• Order counts / 'ile zamówień' → get_new_orders\n"
+        "• Order counts / 'ile zamówień' / 'ile jest wszystkich nowych' / 'ile mam nowych' "
+        "(user wants a NUMBER, not the list) → get_new_orders with count_only=true. Do NOT return "
+        "the whole order list when the user only asked HOW MANY.\n"
         "• Last/newest new order, SINGULAR ('ostatnie zamówienie', 'ostatnie nowe zamówienie', "
         "'najnowsze zamówienie', 'ostatniego nowego zamówienia') → get_new_orders with limit=1. "
         "Do NOT return the whole list when the user asks about just ONE order — check singular vs "
@@ -257,6 +265,7 @@ class AllegroAgent(BaseAgent):
         MAX_TOOL_ROUNDS = 3
         tool_rounds = 0
         called_tools: list[str] = []
+        new_orders_count_only = False
 
         while tool_rounds < MAX_TOOL_ROUNDS:
             resp = await _call_with_retry(
@@ -288,6 +297,8 @@ class AllegroAgent(BaseAgent):
                     tool_input = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     tool_input = {}
+                if tool_name == "get_new_orders" and tool_input.get("count_only"):
+                    new_orders_count_only = True
                 logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
                 try:
                     result = await self._execute_tool(tool_name, tool_input)
@@ -313,8 +324,12 @@ class AllegroAgent(BaseAgent):
         # Deterministic — decided by WHICH TOOL ran, not guessed from the
         # user's wording (see TOOL_OUTPUT_FORMAT in allegro_tools.py for why).
         output_format = resolve_output_format(called_tools)
+        instruction_keys = [
+            "get_new_orders:count_only" if (t == "get_new_orders" and new_orders_count_only) else t
+            for t in called_tools
+        ]
         tool_instruction = next(
-            (_TOOL_SPECIFIC_INSTRUCTIONS[t] for t in called_tools if t in _TOOL_SPECIFIC_INSTRUCTIONS),
+            (_TOOL_SPECIFIC_INSTRUCTIONS[k] for k in instruction_keys if k in _TOOL_SPECIFIC_INSTRUCTIONS),
             None,
         )
         format_instruction = tool_instruction or _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
@@ -697,7 +712,10 @@ class AllegroAgent(BaseAgent):
                 buyer_login=tool_input.get("buyer_login"),
                 limit=min(int(tool_input.get("limit", 100)), 100),
             )
-            body = "Brak nowych zamówień." if not orders else "\n\n".join(self._new_order_bullet(o) for o in orders)
+            if tool_input.get("count_only"):
+                body = f"Liczba nowych zamówień: {len(orders)}."
+            else:
+                body = "Brak nowych zamówień." if not orders else "\n\n".join(self._new_order_bullet(o) for o in orders)
             return body + "\n\n" + await self._monitoring_status_block()
 
         if tool_name == "get_orders":

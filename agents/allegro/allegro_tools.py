@@ -15,6 +15,10 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'najnowsze zamówienie' / 'last order' (singular — asking about ONE order), "
                 "set limit=1. Only use the default (all orders) for plural phrasing like "
                 "'nowe zamówienia' / 'ostatnie zamówienia' / 'jakie zamówienia mam'. "
+                "COUNT-ONLY: for 'ile zamówień', 'ile mam nowych', 'ile jest wszystkich nowych', "
+                "'liczba nowych zamówień' (the user wants a NUMBER, not the order details) — set "
+                "count_only=true. Do NOT set count_only when the user also wants to see the orders "
+                "themselves (e.g. 'pokaż nowe zamówienia', 'jakie zamówienia mam' with no 'ile'). "
                 "Returns order IDs, buyer info, fulfillment status, and totals."
             ),
             "parameters": {
@@ -32,6 +36,15 @@ ALLEGRO_TOOLS: list[dict] = [
                             "'ostatnie nowe zamówienie'). Leave at default for plural questions."
                         ),
                         "default": 100,
+                    },
+                    "count_only": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the user only wants the NUMBER of new orders "
+                            "('ile zamówień', 'ile mam nowych', 'liczba nowych zamówień') — the "
+                            "reply will state just the count, not list individual orders."
+                        ),
+                        "default": False,
                     },
                 },
             },
