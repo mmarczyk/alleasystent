@@ -12,6 +12,17 @@ on:
       - '.github/workflows/deploy-jobs.yml'
   workflow_dispatch:
 
+# Only one deploy per branch may run at a time. Without this, two pushes to
+# main in quick succession build in parallel, and if the OLDER commit's build
+# happens to finish LAST (e.g. a cold Docker layer cache), its `gcloud run
+# deploy` step runs after the newer one and silently overwrites it — Cloud
+# Run ends up serving older code than what's on main. Cancelling the
+# in-progress run when a newer push arrives means only the latest commit's
+# deploy ever reaches the `gcloud run deploy` step.
+concurrency:
+  group: deploy-backend-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
