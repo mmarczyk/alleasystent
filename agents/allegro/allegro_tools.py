@@ -649,6 +649,30 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_message_monitoring",
+            "description": (
+                "Present the user with a button to enable automatic monitoring of new/unread buyer "
+                "messages. Call this AFTER get_message_threads when the user asks about messages, "
+                "unread messages, or wants to be notified when buyers write new messages. "
+                "Do NOT call multiple times in one conversation."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_message_monitoring",
+            "description": (
+                "Show a button to disable automatic message monitoring in the browser. "
+                "Call when the user asks to turn off, stop, or disable message monitoring/notifications."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -695,8 +719,10 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
     "suggest_invoice_monitoring": "action",
+    "suggest_message_monitoring": "action",
     "disable_order_monitoring": "action",
     "disable_invoice_monitoring": "action",
+    "disable_message_monitoring": "action",
 }
 
 # When several tools are called in the same turn, the most "structured" format

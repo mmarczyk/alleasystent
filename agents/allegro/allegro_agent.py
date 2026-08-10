@@ -201,15 +201,18 @@ class AllegroAgent(BaseAgent):
         "2) Period earnings/profit → get_sales_summary. "
         "3) Period billing only → get_billing_summary. "
         "NEVER use get_billing_summary for a specific order — it covers ALL orders in date range. "
-        "MONITORING — CRITICAL: You CANNOT monitor orders or invoices yourself. You have NO ability "
-        "to run background tasks, check anything automatically, or send proactive messages. "
+        "MONITORING — CRITICAL: You CANNOT monitor orders, invoices, or messages yourself. You have NO "
+        "ability to run background tasks, check anything automatically, or send proactive messages. "
         "get_new_orders ALREADY appends the current automatic-checking status and an enable/disable "
         "button to its own result — do NOT also call suggest_order_monitoring or disable_order_monitoring "
         "right after get_new_orders, that would show a duplicate button. Only call suggest_order_monitoring "
         "/ disable_order_monitoring when the user brings up monitoring/notifications OUTSIDE of an "
         "order query (e.g. general 'wyłącz monitoring', 'chcę powiadomienia o zamówieniach' with no "
         "get_new_orders call in this turn), or for INVOICE monitoring (suggest_invoice_monitoring / "
-        "disable_invoice_monitoring), which has no equivalent auto-status block. "
+        "disable_invoice_monitoring) or MESSAGE monitoring (suggest_message_monitoring / "
+        "disable_message_monitoring), neither of which has an equivalent auto-status block — call "
+        "suggest_message_monitoring after get_message_threads when the user asks about being notified "
+        "of new buyer messages. "
         "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
         "as a standalone promise — you cannot do this. Always call a tool and let it render the button. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
@@ -1385,6 +1388,20 @@ class AllegroAgent(BaseAgent):
                 "Kliknij poniższy przycisk, aby wyłączyć monitoring faktur w tej przeglądarce.\n\n"
                 '<button class="btn-invoice-monitoring" style="filter:grayscale(1)" '
                 'onclick="InvoiceMonitor.disable();this.outerHTML=\'<span>✓ Monitoring faktur wyłączony</span>\'">🔕 Wyłącz monitoring faktur</button>'
+            )
+
+        if tool_name == "suggest_message_monitoring":
+            return (
+                "Mogę co 10 minut sprawdzać, czy pojawiły się nowe wiadomości od kupujących, "
+                "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
+                '<button class="btn-message-monitoring" onclick="MessageMonitor.enable()">💬 Włącz monitoring wiadomości</button>'
+            )
+
+        if tool_name == "disable_message_monitoring":
+            return (
+                "Kliknij poniższy przycisk, aby wyłączyć monitoring wiadomości w tej przeglądarce.\n\n"
+                '<button class="btn-message-monitoring" style="filter:grayscale(1)" '
+                'onclick="MessageMonitor.disable();this.outerHTML=\'<span>✓ Monitoring wiadomości wyłączony</span>\'">🔕 Wyłącz monitoring wiadomości</button>'
             )
 
         return f"Unknown tool: {tool_name}"

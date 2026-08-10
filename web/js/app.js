@@ -862,6 +862,90 @@ const InvoiceMonitor = (() => {
   return { isEnabled, enable, disable, init };
 })();
 
+// ── Message monitor ───────────────────────────────
+const MessageMonitor = (() => {
+  const ENABLED_KEY  = 'ae_message_monitor_enabled';
+  const NOTIFIED_KEY = 'ae_message_notified_ids';
+  let _timer = null;
+
+  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
+
+  function _getNotified() {
+    try { return new Set(JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '[]')); }
+    catch { return new Set(); }
+  }
+
+  function _saveNotified(set) {
+    localStorage.setItem(NOTIFIED_KEY, JSON.stringify([...set].slice(-300)));
+  }
+
+  async function enable() {
+    const pushOk = await WebPush.subscribe();
+    localStorage.setItem(ENABLED_KEY, '1');
+    _startPolling(); // first check notifies about ALL currently unread threads
+    if (pushOk) {
+      UI.toast('✓ Monitoring wiadomości włączony (co 10 minut)');
+    } else {
+      UI.toast('⚠️ Monitoring włączony, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
+    }
+    document.querySelectorAll('.btn-message-monitoring').forEach(btn => {
+      btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring wiadomości aktywny</span>';
+    });
+    return true;
+  }
+
+  function disable() {
+    localStorage.removeItem(ENABLED_KEY);
+    if (_timer) { clearInterval(_timer); _timer = null; }
+  }
+
+  async function _check() {
+    try {
+      const res = await fetch(Settings.api('/allegro/unread-messages'), { credentials: 'include', headers: Auth.headers() });
+      if (!res.ok) return;
+      const data = await res.json();
+      const threads = data.threads || [];
+      if (threads.length === 0) return;
+
+      const notified = _getNotified();
+      const newOnes = threads.filter(t => !notified.has(t.thread_id));
+      if (newOnes.length === 0) return;
+
+      newOnes.forEach(t => notified.add(t.thread_id));
+      _saveNotified(notified);
+      const count = newOnes.length;
+      const msg = count === 1
+        ? '1 nowa nieprzeczytana wiadomość od kupującego.'
+        : `${count} nowych nieprzeczytanych wiadomości od kupujących.`;
+      const prompt = count === 1
+        ? 'Pokaż mi tę nową wiadomość od kupującego.'
+        : `Pokaż mi te ${count} nowe wiadomości od kupujących.`;
+      UI.toast(`💬 ${msg}`, 10000);
+      WebPush.sendNotification('AllEasystent — Nowa wiadomość!', msg, true, '/?open=notifications', prompt);
+      Notifications.refresh();
+    } catch (e) {}
+  }
+
+  function _startPolling(skipInitialCheck) {
+    if (_timer) clearInterval(_timer);
+    // Skip the immediate check when the app was just opened by tapping a
+    // notification — that notification IS the detection, so re-polling right
+    // away just finds the same thread again and fires a redundant duplicate.
+    if (!skipInitialCheck) _check();
+    _timer = setInterval(_check, 10 * 60 * 1000);
+  }
+
+  function init(skipInitialCheck) {
+    if (!isEnabled()) return;
+    if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      WebPush.subscribe().catch(() => {});
+    }
+    _startPolling(skipInitialCheck);
+  }
+
+  return { isEnabled, enable, disable, init };
+})();
+
 // ── Notifications (bell icon panel) ──────────────
 const Notifications = (() => {
   let _items = [];
@@ -995,7 +1079,9 @@ const UI = (() => {
   function openSettings() {
     document.getElementById('settings-overlay').classList.remove('hidden');
     document.getElementById('settings-panel').classList.remove('hidden');
-    document.getElementById('set-backend-url').value = Settings.get('backendUrl');
+    document.getElementById('set-toggle-orders').checked = OrderMonitor.isEnabled();
+    document.getElementById('set-toggle-invoices').checked = InvoiceMonitor.isEnabled();
+    document.getElementById('set-toggle-messages').checked = MessageMonitor.isEnabled();
     updateVersionInfo();
   }
 
@@ -1004,10 +1090,16 @@ const UI = (() => {
     document.getElementById('settings-panel').classList.add('hidden');
   }
 
-  function saveSettings() {
-    Settings.save({ backendUrl: document.getElementById('set-backend-url').value.trim() });
-    closeSettings();
-    toast('Ustawienia zapisane ✓');
+  function toggleOrderMonitoring(on) {
+    if (on) OrderMonitor.enable(); else OrderMonitor.disable();
+  }
+
+  function toggleInvoiceMonitoring(on) {
+    if (on) InvoiceMonitor.enable(); else InvoiceMonitor.disable();
+  }
+
+  function toggleMessageMonitoring(on) {
+    if (on) MessageMonitor.enable(); else MessageMonitor.disable();
   }
 
   function toggleSidebar() {
@@ -1033,7 +1125,10 @@ const UI = (() => {
     toast('Historia usunięta');
   }
 
-  return { toast, autoResize, openSettings, closeSettings, saveSettings, toggleSidebar, exportChat, clearAllHistory };
+  return {
+    toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
+    toggleOrderMonitoring, toggleInvoiceMonitoring, toggleMessageMonitoring,
+  };
 })();
 
 // ── Chat engine ──────────────────────────────────
@@ -1087,6 +1182,10 @@ const Chat = (() => {
       inner.innerHTML = inner.innerHTML.replace('[INVOICE_MONITORING_BTN]',
         '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>');
     }
+    if (inner.innerHTML.includes('[MESSAGE_MONITORING_BTN]')) {
+      inner.innerHTML = inner.innerHTML.replace('[MESSAGE_MONITORING_BTN]',
+        '<button class="btn-message-monitoring" onclick="MessageMonitor.enable()">💬 Włącz monitoring wiadomości</button>');
+    }
     // Replace enable-buttons with active badge if monitoring is already on.
     // Only touches actual "enable" buttons — get_new_orders' status block already
     // renders a "disable" button of its own when monitoring is on, and that one
@@ -1102,6 +1201,13 @@ const Chat = (() => {
       inner.querySelectorAll('.btn-invoice-monitoring').forEach(btn => {
         if (btn.getAttribute('onclick')?.includes('InvoiceMonitor.enable')) {
           btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
+        }
+      });
+    }
+    if (MessageMonitor.isEnabled()) {
+      inner.querySelectorAll('.btn-message-monitoring').forEach(btn => {
+        if (btn.getAttribute('onclick')?.includes('MessageMonitor.enable')) {
+          btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring wiadomości aktywny</span>';
         }
       });
     }
@@ -1630,6 +1736,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const _cameFromNotification = _startParams.get('open') === 'notifications';
   OrderMonitor.init(_cameFromNotification);
   InvoiceMonitor.init(_cameFromNotification);
+  MessageMonitor.init(_cameFromNotification);
 
   Notifications.init();
   // Tapping a system push notification opens straight into the Notifications
