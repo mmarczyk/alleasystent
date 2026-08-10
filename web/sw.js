@@ -66,8 +66,13 @@ self.addEventListener('notificationclick', e => {
   // Tapping the notification opens straight into the Notifications panel (app.js
   // reads ?open=notifications on load) — it does NOT re-fire the chat question or
   // re-poll for new orders/invoices; the notification itself IS the detection.
-  const url = e.notification.data?.url ?? '/';
-  const target = new URL(url, self.location.origin).href;
+  // Notification URLs from the backend are root-relative (e.g. "/?open=notifications"),
+  // which is correct for an all-in-one deployment but wrong on GitHub Pages, where the
+  // app lives under a subpath (e.g. /alleasystent/) — resolving "/x" against the origin
+  // drops that subpath entirely and 404s. Strip the leading slash and resolve against
+  // this SW's own registration scope instead, so both deployment modes land correctly.
+  const url = e.notification.data?.url ?? './';
+  const target = new URL(url.replace(/^\/+/, ''), self.registration.scope).href;
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
       const origin = self.location.origin;
