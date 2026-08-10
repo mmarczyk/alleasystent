@@ -82,6 +82,20 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "TYLKO liczbę z danych narzędzia powyżej (np. 'Masz 5 nowych zamówień.'). NIE wypisuj "
         "poszczególnych zamówień ani ich szczegółów, chyba że user o to poprosi osobno."
     ),
+    "get_message_threads": (
+        "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]\n"
+        "Przedstaw wątki z danych powyżej jako listę punktowaną — jeden wpis na wątek: "
+        "kupujący, status (przeczytany/nieprzeczytany), data ostatniej wiadomości. Bez wstępu "
+        "przed listą."
+    ),
+    "get_message_threads:count_only": (
+        "[FORMAT ODPOWIEDZI: TYLKO LICZBA]\n"
+        "Użytkownik zapytał CZY MA lub ILE MA nowych (nieprzeczytanych) wiadomości — odpowiedz "
+        "JEDNYM krótkim zdaniem z danych narzędzia powyżej, np. 'Nie masz nowych wiadomości.' "
+        "albo 'Masz 3 nowe wiadomości (od: jan_kowalski, anna92).'. NIE wypisuj pełnej listy "
+        "wątków ani szczegółów. Jeśli jest co najmniej jedna nowa wiadomość, zakończ pytaniem "
+        "czy pokazać szczegóły (np. 'Pokazać szczegóły?'). Jeśli nowych wiadomości nie ma, nie pytaj."
+    ),
     "get_order_details": (
         "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]\n"
         "Odpowiedź MUSI składać się z dwóch części, w tej kolejności:\n"
@@ -146,6 +160,12 @@ class AllegroAgent(BaseAgent):
         "• Offer list / 'lista ofert' / 'zestawienie ofert' / 'pokaż oferty' / 'moje oferty' → get_active_offers\n"
         "• Offer stock / 'stany magazynowe' / 'ile mam' / 'które kończą się' → query_offers_by_stock\n"
         "• Offer prices / 'ceny ofert' / 'drogie oferty' / 'najtańsze' → query_offers_by_price\n"
+        "• New/unread buyer messages — YES/NO or COUNT question ('czy mam nowe wiadomości', "
+        "'czy są jakieś nowe wiadomości', 'ile mam nowych wiadomości') → get_message_threads with "
+        "count_only=true. Do NOT return the whole thread list when the user only asked WHETHER or "
+        "HOW MANY. Only drop count_only when the user also wants to see the threads/messages "
+        "themselves ('pokaż wiadomości', 'jakie mam wiadomości', or a follow-up like 'pokaż "
+        "szczegóły'/'tak' right after you already told them the count).\n"
         "• Reorder/restock email to a SUPPLIER — 'wygeneruj mail z zamówieniem do dostawcy', "
         "'przygotuj zamówienie uzupełniające', 'lista produktów do zamówienia' — "
         "→ get_products_to_reorder (NOT get_orders_delivery — that tool is for couriers/shipping "
@@ -269,6 +289,7 @@ class AllegroAgent(BaseAgent):
         tool_rounds = 0
         called_tools: list[str] = []
         new_orders_count_only = False
+        message_threads_count_only = False
 
         while tool_rounds < MAX_TOOL_ROUNDS:
             resp = await _call_with_retry(
@@ -302,6 +323,8 @@ class AllegroAgent(BaseAgent):
                     tool_input = {}
                 if tool_name == "get_new_orders" and tool_input.get("count_only"):
                     new_orders_count_only = True
+                if tool_name == "get_message_threads" and tool_input.get("count_only"):
+                    message_threads_count_only = True
                 logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
                 try:
                     result = await self._execute_tool(tool_name, tool_input)
@@ -328,7 +351,9 @@ class AllegroAgent(BaseAgent):
         # user's wording (see TOOL_OUTPUT_FORMAT in allegro_tools.py for why).
         output_format = resolve_output_format(called_tools)
         instruction_keys = [
-            "get_new_orders:count_only" if (t == "get_new_orders" and new_orders_count_only) else t
+            "get_new_orders:count_only" if (t == "get_new_orders" and new_orders_count_only)
+            else "get_message_threads:count_only" if (t == "get_message_threads" and message_threads_count_only)
+            else t
             for t in called_tools
         ]
         tool_instruction = next(
@@ -1172,7 +1197,17 @@ class AllegroAgent(BaseAgent):
                 limit=min(int(tool_input.get("limit", 10)), 50)
             )
             if not threads:
-                return "No message threads found."
+                return "No message threads found." if not tool_input.get("count_only") else (
+                    "Unread count: 0. No message threads at all."
+                )
+            unread = [t for t in threads if not t.get("read", True)]
+            if tool_input.get("count_only"):
+                if not unread:
+                    return f"Unread count: 0. Checked the {len(threads)} most recent threads — all already read."
+                buyers = ", ".join(
+                    (t.get("interlocutor") or {}).get("login", "N/A") for t in unread[:5]
+                )
+                return f"Unread count: {len(unread)}. Buyers: {buyers}."
             lines = []
             for t in threads:
                 interlocutor = t.get("interlocutor") or {}

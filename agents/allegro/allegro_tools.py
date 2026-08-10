@@ -323,11 +323,27 @@ ALLEGRO_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "get_message_threads",
-            "description": "List recent buyer message threads with unread status.",
+            "description": (
+                "List recent buyer message threads with unread status. "
+                "Use for any question about 'wiadomości', 'nowe wiadomości', new/unread buyer messages. "
+                "COUNT-ONLY: for 'czy mam nowe wiadomości', 'czy są jakieś nowe wiadomości', "
+                "'ile mam nowych wiadomości' (the user wants YES/NO or a NUMBER, not the thread "
+                "list) — set count_only=true. Do NOT set count_only when the user also wants to see "
+                "the messages/threads themselves (e.g. 'pokaż wiadomości', 'jakie mam wiadomości', "
+                "'pokaż szczegóły' after being told the count)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "description": "Max threads to return (1–50).", "default": 10},
+                    "count_only": {
+                        "type": "boolean",
+                        "description": (
+                            "True when the user only wants to know WHETHER there are new messages "
+                            "or HOW MANY — not the list itself."
+                        ),
+                        "default": False,
+                    },
                 },
             },
         },
@@ -703,7 +719,11 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "update_offer_price": "action",
     "update_offer_stock": "action",
     # Wiadomości
-    "get_message_threads": "table",
+    # "chat" (not "table") — like get_new_orders, the list itself is small and
+    # often just a yes/no/count, so a fixed-shape conversational reply (see
+    # _TOOL_SPECIFIC_INSTRUCTIONS in allegro_agent.py) beats a markdown table
+    # that gets collapsed into a "zobacz pełną odpowiedź" link for short answers.
+    "get_message_threads": "chat",
     "send_message_to_buyer": "action",
     # Konto / rozliczenia / sprzedaż
     "get_account_info": "chat",
