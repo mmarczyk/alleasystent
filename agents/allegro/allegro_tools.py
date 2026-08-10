@@ -56,9 +56,16 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "get_orders",
             "description": (
                 "List Allegro orders with arbitrary filters. "
-                "For new/pending orders use get_new_orders instead. "
+                "For new/pending (unprocessed) orders use get_new_orders instead — that tool filters "
+                "by STATUS, not by date, so it is the WRONG tool for 'orders from a period' questions "
+                "(e.g. 'zamówienia z dzisiaj'): an order already processed today would be missing, and "
+                "an old unprocessed order would show up instead. For any 'zamówienia z <date/period>' "
+                "question, use THIS tool with a date filter. "
                 "TIME FILTERS: use bought_after/before_local for order PLACEMENT time; "
-                "use paid_after/before_local for PAYMENT time ('opłacone po X', 'zapłacone po X')."
+                "use paid_after/before_local for PAYMENT time ('opłacone po X', 'zapłacone po X'). "
+                "Default to paid_after/before_local (payment time) when the user just says a date/period "
+                "with no verb (e.g. 'zamówienia z dzisiaj') — that's what a store owner means by it. Use "
+                "bought_after/before_local only when they explicitly say 'złożone'/'zamówione' (placed)."
             ),
             "parameters": {
                 "type": "object",
