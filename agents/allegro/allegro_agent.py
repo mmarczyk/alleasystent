@@ -230,9 +230,11 @@ class AllegroAgent(BaseAgent):
         "order query (e.g. general 'wyłącz monitoring', 'chcę powiadomienia o zamówieniach' with no "
         "get_new_orders call in this turn), or for INVOICE monitoring (suggest_invoice_monitoring / "
         "disable_invoice_monitoring) or MESSAGE monitoring (suggest_message_monitoring / "
-        "disable_message_monitoring), neither of which has an equivalent auto-status block — call "
-        "suggest_message_monitoring after get_message_threads when the user asks about being notified "
-        "of new buyer messages. "
+        "disable_message_monitoring) — call suggest_message_monitoring after get_message_threads when "
+        "the user asks about being notified of new buyer messages. Whichever of the pair you call (suggest "
+        "or disable), the reply always reflects the REAL stored status, not your guess — never assert "
+        "in your own words whether monitoring is on/off ('nie jest włączone', 'jest aktywne'), always let "
+        "the tool result's text and button say it, verbatim. "
         "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
         "as a standalone promise — you cannot do this. Always call a tool and let it render the button. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
@@ -534,6 +536,46 @@ class AllegroAgent(BaseAgent):
             "nawet gdy ta karta jest w tle.\n\n"
             '<button class="btn-monitoring" onclick="OrderMonitor.enable()">'
             '🔔 Włącz automatyczne sprawdzanie</button>'
+        )
+
+    async def _invoice_monitoring_status_block(self) -> str:
+        """Deterministic (non-LLM) status + action button for automatic invoice
+        checking — same rationale as _monitoring_status_block above."""
+        from services.monitor_state import is_monitor_enabled
+
+        if await is_monitor_enabled("invoice", self._allegro._user_id):
+            return (
+                "🧾 Automatyczne sprawdzanie nowych faktur jest włączone — dam Ci znać, "
+                "gdy pojawi się zamówienie wymagające faktury VAT.\n\n"
+                '<button class="btn-invoice-monitoring" style="filter:grayscale(1)" '
+                'onclick="InvoiceMonitor.disable();this.outerHTML=\'<span>✓ Monitoring faktur wyłączony</span>\'">'
+                '🔕 Wyłącz monitoring faktur</button>'
+            )
+        return (
+            "💡 Mogę co 15 minut sprawdzać, czy pojawiły się nowe zamówienia wymagające faktury VAT, "
+            "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
+            '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">'
+            '🧾 Włącz monitoring faktur</button>'
+        )
+
+    async def _message_monitoring_status_block(self) -> str:
+        """Deterministic (non-LLM) status + action button for automatic message
+        checking — same rationale as _monitoring_status_block above."""
+        from services.monitor_state import is_monitor_enabled
+
+        if await is_monitor_enabled("message", self._allegro._user_id):
+            return (
+                "💬 Automatyczne sprawdzanie nowych wiadomości jest włączone — dam Ci znać, "
+                "gdy kupujący napisze coś nowego.\n\n"
+                '<button class="btn-message-monitoring" style="filter:grayscale(1)" '
+                'onclick="MessageMonitor.disable();this.outerHTML=\'<span>✓ Monitoring wiadomości wyłączony</span>\'">'
+                '🔕 Wyłącz monitoring wiadomości</button>'
+            )
+        return (
+            "💡 Mogę co 10 minut sprawdzać, czy pojawiły się nowe wiadomości od kupujących, "
+            "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
+            '<button class="btn-message-monitoring" onclick="MessageMonitor.enable()">'
+            '💬 Włącz monitoring wiadomości</button>'
         )
 
     @classmethod
@@ -1398,46 +1440,19 @@ class AllegroAgent(BaseAgent):
         if tool_name == "send_invoice_to_ksef":
             return await self._send_invoice_to_ksef(tool_input["invoice_uuid"])
 
-        if tool_name == "suggest_order_monitoring":
-            return (
-                "Mogę automatycznie sprawdzać nowe zamówienia co 5 minut i wysyłać Ci powiadomienia "
-                "w przeglądarce — nawet gdy ta zakładka jest w tle.\n\n"
-                '<button class="btn-monitoring" onclick="OrderMonitor.enable()">🔔 Włącz monitoring zamówień</button>'
-            )
+        # Both the "suggest" and "disable" tool for each monitor type resolve to the
+        # same deterministic status block — the model only picks WHICH tool to call
+        # based on user intent, but the actual reply/button always reflects the real
+        # stored flag, never the model's guess of the current state (see
+        # _monitoring_status_block's docstring for why: a model guess here caused a
+        # reply/button contradiction identical to the earlier invoice-issuance bug).
+        if tool_name in ("suggest_order_monitoring", "disable_order_monitoring"):
+            return await self._monitoring_status_block()
 
-        if tool_name == "suggest_invoice_monitoring":
-            return (
-                "Mogę co 15 minut sprawdzać, czy pojawiły się nowe zamówienia wymagające faktury VAT, "
-                "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
-                '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>'
-            )
+        if tool_name in ("suggest_invoice_monitoring", "disable_invoice_monitoring"):
+            return await self._invoice_monitoring_status_block()
 
-        if tool_name == "disable_order_monitoring":
-            return (
-                "Kliknij poniższy przycisk, aby wyłączyć monitoring zamówień w tej przeglądarce.\n\n"
-                '<button class="btn-monitoring" style="background:#6b7280" '
-                'onclick="OrderMonitor.disable();this.outerHTML=\'<span>✓ Monitoring zamówień wyłączony</span>\'">🔕 Wyłącz monitoring zamówień</button>'
-            )
-
-        if tool_name == "disable_invoice_monitoring":
-            return (
-                "Kliknij poniższy przycisk, aby wyłączyć monitoring faktur w tej przeglądarce.\n\n"
-                '<button class="btn-invoice-monitoring" style="filter:grayscale(1)" '
-                'onclick="InvoiceMonitor.disable();this.outerHTML=\'<span>✓ Monitoring faktur wyłączony</span>\'">🔕 Wyłącz monitoring faktur</button>'
-            )
-
-        if tool_name == "suggest_message_monitoring":
-            return (
-                "Mogę co 10 minut sprawdzać, czy pojawiły się nowe wiadomości od kupujących, "
-                "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
-                '<button class="btn-message-monitoring" onclick="MessageMonitor.enable()">💬 Włącz monitoring wiadomości</button>'
-            )
-
-        if tool_name == "disable_message_monitoring":
-            return (
-                "Kliknij poniższy przycisk, aby wyłączyć monitoring wiadomości w tej przeglądarce.\n\n"
-                '<button class="btn-message-monitoring" style="filter:grayscale(1)" '
-                'onclick="MessageMonitor.disable();this.outerHTML=\'<span>✓ Monitoring wiadomości wyłączony</span>\'">🔕 Wyłącz monitoring wiadomości</button>'
-            )
+        if tool_name in ("suggest_message_monitoring", "disable_message_monitoring"):
+            return await self._message_monitoring_status_block()
 
         return f"Unknown tool: {tool_name}"
