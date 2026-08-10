@@ -1352,6 +1352,16 @@ const Chat = (() => {
     document.getElementById('btn-send').disabled = true;
     appendBotBubble();
 
+    // Long queries (big report, cold-start backend) can leave the typing
+    // dots spinning with no feedback — after 10s, let the user know we're
+    // still working on it instead of leaving them guessing.
+    const slowTimer = setTimeout(() => {
+      const contentEl = document.getElementById('waiting-content');
+      if (!contentEl) return;
+      contentEl.insertAdjacentHTML('beforeend',
+        `<p style="margin:.5rem 0 0;color:var(--muted);font-size:.85rem">⏳ Pobieram informacje, daj mi jeszcze chwilkę…</p>`);
+    }, 10000);
+
     const sessionId = Store.active().id;
     const ts = Date.now();
     let fullText = '';
@@ -1380,6 +1390,7 @@ const Chat = (() => {
       Store.updateLastMessage(fullText);
       UI.toast(`Błąd: ${err.message}`, 5000);
     } finally {
+      clearTimeout(slowTimer);
       _waiting = false;
       document.getElementById('btn-send').disabled = false;
       finalizeWaitingBubble(fullText, ts, fullFormat);
