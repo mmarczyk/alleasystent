@@ -1175,10 +1175,11 @@ class AllegroAgent(BaseAgent):
                 return "No message threads found."
             lines = []
             for t in threads:
+                interlocutor = t.get("interlocutor") or {}
                 lines.append(
-                    f"Thread {t.get('id')} | Subject: {(t.get('subject') or {}).get('name', 'N/A')} | "
-                    f"Unread: {t.get('hasUnreadMessages', False)} | "
-                    f"Last message: {t.get('lastMessageCreatedAt', 'N/A')}"
+                    f"Thread {t.get('id')} | Buyer: {interlocutor.get('login', 'N/A')} | "
+                    f"Unread: {not t.get('read', True)} | "
+                    f"Last message: {t.get('lastMessageDateTime', 'N/A')}"
                 )
             return "\n".join(lines)
 
