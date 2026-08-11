@@ -10,6 +10,7 @@ to fetch/update data, and returns structured responses.
 import asyncio
 import json
 import logging
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,26 @@ from models.conversation import AgentResponse
 from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
 
 logger = logging.getLogger(__name__)
+
+# Deterministic override for get_message_threads' count_only flag — prompt-only
+# judgement has repeatedly proven unreliable for this exact yes/no-vs-list
+# distinction (see the get_new_orders count_only fix and the order-monitoring
+# status block), so the user's own wording decides, not the model's tool-call
+# guess. A "show me" word always wins (user explicitly wants the list/content);
+# otherwise a question word next to "wiadomo..." means they just want yes/no or
+# a number.
+_MESSAGE_LIST_OVERRIDE_RE = re.compile(
+    r"poka[żz]|wyświetl|wypisz|\blista\b|jakie\s+(są|mam)|zobacz|przeczytaj|treść",
+    re.IGNORECASE,
+)
+_MESSAGE_QUESTION_WORD_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
+_MESSAGE_TOPIC_WORD_RE = re.compile(r"wiadomo", re.IGNORECASE)
+
+
+def _wants_message_count_only(query: str) -> bool:
+    if _MESSAGE_LIST_OVERRIDE_RE.search(query):
+        return False
+    return bool(_MESSAGE_QUESTION_WORD_RE.search(query) and _MESSAGE_TOPIC_WORD_RE.search(query))
 
 # Injected as a user-turn message right before the final "interpret" call, once
 # the output format is known from which tool(s) were just called (see
@@ -95,6 +116,12 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "albo 'Masz 3 nowe wiadomości (od: jan_kowalski, anna92).'. NIE wypisuj pełnej listy "
         "wątków ani szczegółów. Jeśli jest co najmniej jedna nowa wiadomość, zakończ pytaniem "
         "czy pokazać szczegóły (np. 'Pokazać szczegóły?'). Jeśli nowych wiadomości nie ma, nie pytaj."
+    ),
+    "get_thread_messages": (
+        "[FORMAT ODPOWIEDZI: TREŚĆ WIADOMOŚCI]\n"
+        "Przedstaw wiadomości z danych powyżej w kolejności chronologicznej — dla każdej: "
+        "nadawca pogrubiony (**Kupujący**/**Sprzedawca**), data i godzina, treść w cudzysłowie, "
+        "dokładnie jak w danych narzędzia. NIE skracaj, nie streszczaj i nie parafrazuj treści."
     ),
     "get_order_details": (
         "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]\n"
@@ -174,6 +201,13 @@ class AllegroAgent(BaseAgent):
         "HOW MANY. Only drop count_only when the user also wants to see the threads/messages "
         "themselves ('pokaż wiadomości', 'jakie mam wiadomości', or a follow-up like 'pokaż "
         "szczegóły'/'tak' right after you already told them the count).\n"
+        "• Reading the actual TEXT/content of a message ('pokaż mi wiadomość od X', 'co napisał "
+        "kupujący', 'wiadomość z dzisiaj', 'treść wiadomości', 'przeczytaj wiadomość') → "
+        "get_thread_messages — NEVER get_message_threads for this, that tool only returns metadata "
+        "(buyer, read status, last-message date), never the message text. Pass buyer_login and/or "
+        "date ('dzisiaj'/'today' or 'YYYY-MM-DD') if you don't already have a thread_id from earlier "
+        "in this conversation — the tool finds the matching thread for you, no need to call "
+        "get_message_threads first.\n"
         "• Reorder/restock email to a SUPPLIER — 'wygeneruj mail z zamówieniem do dostawcy', "
         "'przygotuj zamówienie uzupełniające', 'lista produktów do zamówienia' — "
         "→ get_products_to_reorder (NOT get_orders_delivery — that tool is for couriers/shipping "
@@ -245,15 +279,6 @@ class AllegroAgent(BaseAgent):
         "the tool result's text and button say it, verbatim. "
         "NEVER say 'I will monitor', 'I am monitoring', 'będę sprawdzać', 'będę Cię powiadamiał' "
         "as a standalone promise — you cannot do this. Always call a tool and let it render the button. "
-        "INVOICE/MESSAGE MONITORING STATUS — CRITICAL: unlike order monitoring (get_new_orders reads "
-        "a real server-side flag via _monitoring_status_block), invoice and message monitoring run "
-        "ENTIRELY client-side in the user's browser (localStorage, no backend record) — you have NO "
-        "way to know whether they are currently on or off. When asked 'czy mam włączone automatyczne "
-        "sprawdzanie faktur/wiadomości', 'czy monitoring faktur jest aktywny' or similar, NEVER answer "
-        "'tak' or 'nie' — you would be guessing, and guessing wrong contradicts the button below your "
-        "own reply, which DOES show the real state. Instead say you can't check that directly since it "
-        "lives in the browser, then call suggest_invoice_monitoring / suggest_message_monitoring so the "
-        "button renders the actual status. "
         "HTML — CRITICAL: When a tool result contains HTML tags (e.g. <button ...>), you MUST include them VERBATIM "
         "in your response, character-for-character, without translating, paraphrasing, or modifying them in any way. "
         "JSON PREVIEWS — CRITICAL: When a tool result contains ```json code blocks (e.g. from preview_pending_invoices), "
@@ -342,8 +367,15 @@ class AllegroAgent(BaseAgent):
                     tool_input = {}
                 if tool_name == "get_new_orders" and tool_input.get("count_only"):
                     new_orders_count_only = True
-                if tool_name == "get_message_threads" and tool_input.get("count_only"):
-                    message_threads_count_only = True
+                if tool_name == "get_message_threads":
+                    # The user's wording overrides whatever the model decided for
+                    # count_only (see _wants_message_count_only above).
+                    if _MESSAGE_LIST_OVERRIDE_RE.search(query):
+                        tool_input["count_only"] = False
+                    elif _wants_message_count_only(query):
+                        tool_input["count_only"] = True
+                    if tool_input.get("count_only"):
+                        message_threads_count_only = True
                 logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
                 try:
                     result = await self._execute_tool(tool_name, tool_input)
@@ -616,6 +648,29 @@ class AllegroAgent(BaseAgent):
             return dt.astimezone(cls._WARSAW).strftime("%d.%m.%Y, %H:%M")
         except ValueError:
             return iso_str
+
+    @classmethod
+    def _to_warsaw_date(cls, iso_str: str) -> str:
+        """ISO 8601 (UTC) → 'YYYY-MM-DD' in Warsaw local time, for date matching."""
+        if not iso_str:
+            return ""
+        try:
+            dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+            return dt.astimezone(cls._WARSAW).date().isoformat()
+        except ValueError:
+            return ""
+
+    @classmethod
+    def _today_warsaw(cls) -> str:
+        """Today's date ('YYYY-MM-DD') in Warsaw local time.
+
+        Kept as its own classmethod rather than called inline from _dispatch —
+        a local `from datetime import datetime, ...` elsewhere in that method
+        makes `datetime` a local name for the whole function in Python's
+        scoping, so a bare `datetime.now(...)` there raises UnboundLocalError
+        on any branch that runs before that import line.
+        """
+        return datetime.now(cls._WARSAW).date().isoformat()
 
     @classmethod
     def _new_order_bullet(cls, o: Any) -> str:
@@ -1299,6 +1354,47 @@ class AllegroAgent(BaseAgent):
                     f"Thread {t.get('id')} | Buyer: {interlocutor.get('login', 'N/A')} | "
                     f"Unread: {not t.get('read', True)} | "
                     f"Last message: {t.get('lastMessageDateTime', 'N/A')}"
+                )
+            return "\n".join(lines)
+
+        if tool_name == "get_thread_messages":
+            thread_id = tool_input.get("thread_id")
+            matched_buyer = None
+            if not thread_id:
+                threads = await self._allegro.get_message_threads(limit=50)
+                candidates = threads
+                buyer_login = tool_input.get("buyer_login")
+                if buyer_login:
+                    candidates = [
+                        t for t in candidates
+                        if (t.get("interlocutor") or {}).get("login", "").lower() == buyer_login.lower()
+                    ]
+                date_filter = tool_input.get("date")
+                if date_filter:
+                    target_date = (
+                        self._today_warsaw()
+                        if date_filter.strip().lower() in ("dzisiaj", "today")
+                        else date_filter[:10]
+                    )
+                    candidates = [
+                        t for t in candidates
+                        if self._to_warsaw_date(t.get("lastMessageDateTime", "")) == target_date
+                    ]
+                if not candidates:
+                    return "No thread found matching the given buyer_login/date filters."
+                thread_id = candidates[0].get("id")
+                matched_buyer = (candidates[0].get("interlocutor") or {}).get("login", "N/A")
+            messages = await self._allegro.get_thread_messages(
+                thread_id, limit=min(int(tool_input.get("limit", 10)), 50)
+            )
+            if not messages:
+                return f"Thread {thread_id} has no messages."
+            lines = [f"Thread {thread_id}" + (f" | Buyer: {matched_buyer}" if matched_buyer else "")]
+            for m in messages:
+                author = m.get("author") or {}
+                who = "Kupujący" if author.get("isInterlocutor") else "Sprzedawca"
+                lines.append(
+                    f"[{m.get('createdAt', 'N/A')}] {who} ({author.get('login', 'N/A')}): {m.get('text', '')}"
                 )
             return "\n".join(lines)
 

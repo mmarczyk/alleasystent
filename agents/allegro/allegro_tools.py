@@ -351,6 +351,37 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_thread_messages",
+            "description": (
+                "Get the actual TEXT content of a buyer message thread — use when the user wants to "
+                "READ what a message says ('pokaż mi wiadomość od X', 'co napisał kupujący', "
+                "'wiadomość z dzisiaj', 'treść wiadomości', 'przeczytaj wiadomość'), not just "
+                "metadata. get_message_threads does NOT include message text, only buyer/read-status/"
+                "date — use this tool instead whenever the user wants to read a message. "
+                "If thread_id isn't already known from earlier in the conversation, provide "
+                "buyer_login and/or date to find the matching thread automatically — no need to call "
+                "get_message_threads first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string", "description": "Allegro messaging thread ID, if already known."},
+                    "buyer_login": {"type": "string", "description": "Buyer's Allegro login, to find their thread."},
+                    "date": {
+                        "type": "string",
+                        "description": (
+                            "Find the thread whose last message is on this date. "
+                            "'dzisiaj'/'today' for today, or 'YYYY-MM-DD' for a specific date."
+                        ),
+                    },
+                    "limit": {"type": "integer", "description": "Max messages to return (1–50).", "default": 10},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_account_info",
             "description": "Get basic profile information about the seller's Allegro account (login, rating, subscription). Do NOT use for questions about orders, delivery, or couriers — use get_orders_delivery for those.",
             "parameters": {"type": "object", "properties": {}},
@@ -727,6 +758,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # _TOOL_SPECIFIC_INSTRUCTIONS in allegro_agent.py) beats a markdown table
     # that gets collapsed into a "zobacz pełną odpowiedź" link for short answers.
     "get_message_threads": "chat",
+    "get_thread_messages": "chat",
     "send_message_to_buyer": "action",
     # Konto / rozliczenia / sprzedaż
     "get_account_info": "chat",
