@@ -335,7 +335,7 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max threads to return (1–50).", "default": 10},
+                    "limit": {"type": "integer", "description": "Max threads to return (1–20).", "default": 10},
                     "count_only": {
                         "type": "boolean",
                         "description": (
@@ -374,7 +374,7 @@ ALLEGRO_TOOLS: list[dict] = [
                             "'dzisiaj'/'today' for today, or 'YYYY-MM-DD' for a specific date."
                         ),
                     },
-                    "limit": {"type": "integer", "description": "Max messages to return (1–50).", "default": 10},
+                    "limit": {"type": "integer", "description": "Max messages to return (1–20).", "default": 10},
                 },
             },
         },
