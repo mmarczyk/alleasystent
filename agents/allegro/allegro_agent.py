@@ -424,6 +424,17 @@ class AllegroAgent(BaseAgent):
         return f"{amount:.2f}".replace(".", ",") + f" {currency}"
 
     @staticmethod
+    def _is_balance_transfer_entry(entry: dict) -> bool:
+        """PAD ("Pobranie opłat z wpływów") entries record Allegro sweeping money from
+        the seller's Allegro Finanse proceeds to settle their account balance — an
+        internal transfer, not a new charge or credit. The fee it settles is already
+        its own billing entry, so counting PAD too double-counts that same money.
+        It also carries no order.id (account-level, not order-level)."""
+        type_desc = ((entry.get("type") or {}).get("description") or "").lower()
+        type_id = (entry.get("type") or {}).get("id") or ""
+        return type_id == "PAD" or "pobranie opłat z wpływów" in type_desc or "pobranie opłaty z wpływów" in type_desc
+
+    @staticmethod
     def _offer_fields(offer: dict) -> tuple[str, str, float, str, int]:
         """Extract (id, name, price, currency, stock) from raw offer dict."""
         oid = offer.get("id", "?")
@@ -1127,6 +1138,8 @@ class AllegroAgent(BaseAgent):
                 total_fees = 0.0
                 total_refunds = 0.0
                 for e in billing_entries:
+                    if self._is_balance_transfer_entry(e):
+                        continue
                     amount = float((e.get("value") or {}).get("amount", 0) or 0)
                     type_desc = (e.get("type") or {}).get("description", "Inne")
                     order_id = (e.get("order") or {}).get("id", "")
@@ -1318,9 +1331,13 @@ class AllegroAgent(BaseAgent):
                 order_id = (e.get("order") or {}).get("id", "")
                 order_ref = f" | zamówienie {order_id}" if order_id else ""
                 sign = "+" if amount_val > 0 else ""
+                is_transfer = self._is_balance_transfer_entry(e)
                 detail_lines.append(
                     f"{occurred} | {type_desc}{order_ref} | {sign}{amount_val:.2f} {currency}"
+                    + (" (transfer wewnętrzny, pominięty w sumach)" if is_transfer else "")
                 )
+                if is_transfer:
+                    continue
                 if amount_val < 0:
                     total_fees += abs(amount_val)
                     fee_by_type[type_desc] = fee_by_type.get(type_desc, 0) + abs(amount_val)
