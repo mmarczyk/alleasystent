@@ -34,6 +34,10 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "get_orders",
             "description": (
                 "List Allegro orders with arbitrary filters. "
+                "USE THIS for a plain LIST of orders, incl. for a date range — 'lista zamówień', "
+                "'pokaż wszystkie zamówienia z tego miesiąca/tygodnia', 'zamówienia z okresu X'. "
+                "Do NOT use get_sales_summary for these — that tool is only for earnings/profit/fee "
+                "questions ('ile zarobiłem', 'jakie opłaty'), not for listing orders. "
                 "For new/pending orders use get_new_orders instead. "
                 "TIME FILTERS: use bought_after/before_local for order PLACEMENT time; "
                 "use paid_after/before_local for PAYMENT time ('opłacone po X', 'zapłacone po X')."
