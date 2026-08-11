@@ -94,7 +94,9 @@ self.addEventListener('fetch', e => {
     url.pathname.startsWith('/api/') ||
     url.pathname.startsWith('/allegro/') ||
     url.pathname.startsWith('/auth/') ||
-    url.pathname.startsWith('/chat')
+    url.pathname.startsWith('/chat') ||
+    url.pathname.startsWith('/notifications') ||
+    url.pathname.startsWith('/push/')
   ) return;
 
   // App shell HTML — network-first so auth state stays fresh;
