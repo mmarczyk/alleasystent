@@ -1153,7 +1153,11 @@ class AllegroAgent(BaseAgent):
                         refund_by_type[type_desc] = refund_by_type.get(type_desc, 0) + amount
                         if order_id:
                             by_order[order_id]["refunds"] += amount
-                net_profit = total_revenue - total_fees + total_refunds
+                # Revenue minus what Allegro charged, plus what it credited back. This is
+                # NOT net profit — there's no data anywhere in this app about the seller's
+                # own cost of goods, packaging, or other expenses, so it can't be computed.
+                # Keep the name honest about what it actually is: revenue net of marketplace fees.
+                revenue_after_fees = total_revenue - total_fees + total_refunds
                 # Fees/refunds not tied to any single order (account subscriptions, listing
                 # fees) are still real costs and belong in the total above, but they can't
                 # appear in any order's row below — track them so the per-order table's sum
@@ -1175,7 +1179,7 @@ class AllegroAgent(BaseAgent):
                     rev = o.total_price
                     fees = by_order[oid]["fees"] if oid in by_order else 0.0
                     refunds = by_order[oid]["refunds"] if oid in by_order else 0.0
-                    net = rev - fees + refunds
+                    after_fees = rev - fees + refunds
                     date_str = (o.paid_at or o.created_at)[:10]
                     buyer = o.buyer_login[:15] if o.buyer_login else "—"
                     items_short = ", ".join(
@@ -1183,7 +1187,7 @@ class AllegroAgent(BaseAgent):
                     ) + ("…" if len(o.line_items) > 2 else "")
                     order_rows.append(
                         f"  {date_str} | {buyer:<15} | przychód: {self._format_price(rev)} | "
-                        f"opłaty: {self._format_price(fees)} | zysk: {self._format_price(net)}"
+                        f"opłaty: {self._format_price(fees)} | po opłatach: {self._format_price(after_fees)}"
                         + (f"\n    {items_short}" if items_short else "")
                     )
                 per_order_section = ""
@@ -1195,8 +1199,8 @@ class AllegroAgent(BaseAgent):
                     if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
                         per_order_section += (
                             f"\n\n  Uwaga: suma opłat/zwrotów z powyższej tabeli nie zsumuje się do "
-                            f"\"Zysk netto\" powyżej — brakującą różnicę stanowią opłaty/zwroty "
-                            f"nieprzypisane do żadnego zamówienia, patrz niżej "
+                            f"\"Przychód po opłatach Allegro\" powyżej — brakującą różnicę stanowią "
+                            f"opłaty/zwroty nieprzypisane do żadnego zamówienia, patrz niżej "
                             f"(opłaty {self._format_price(unattributed_fees)}"
                             + (f", zwroty +{self._format_price(unattributed_refunds)}" if unattributed_refunds > 0.01 else "")
                             + ")."
@@ -1214,7 +1218,9 @@ class AllegroAgent(BaseAgent):
                         + "\n"
                         if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01 else ""
                     )
-                    + f"\n**Zysk netto (przychód − opłaty): {self._format_price(net_profit)}**"
+                    + f"\n**Przychód po opłatach Allegro (przychód − opłaty + zwroty): {self._format_price(revenue_after_fees)}**\n"
+                    + "*To NIE jest zysk netto — nie obejmuje kosztu zakupu towaru ani innych kosztów własnych, "
+                    + "których ta aplikacja nie zna.*"
                     + per_order_section
                 )
             elif billing_error:
