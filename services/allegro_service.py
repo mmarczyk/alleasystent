@@ -753,11 +753,11 @@ class AllegroService:
     # ── Messaging ─────────────────────────────────────────────────────────────
 
     async def get_message_threads(self, limit: int = 20) -> list[dict[str, Any]]:
-        data = await self._get("/messaging/threads", params={"limit": limit})
+        data = await self._get("/messaging/threads", params={"limit": min(limit, 20)})
         return data.get("threads", [])
 
     async def get_thread_messages(self, thread_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        data = await self._get(f"/messaging/threads/{thread_id}/messages", params={"limit": limit})
+        data = await self._get(f"/messaging/threads/{thread_id}/messages", params={"limit": min(limit, 20)})
         return data.get("messages", [])
 
     async def send_message(self, thread_id: str, text: str) -> dict[str, Any]:

@@ -1333,7 +1333,7 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_message_threads":
             threads = await self._allegro.get_message_threads(
-                limit=min(int(tool_input.get("limit", 10)), 50)
+                limit=min(int(tool_input.get("limit", 10)), 20)
             )
             if not threads:
                 return "No message threads found." if not tool_input.get("count_only") else (
@@ -1361,7 +1361,7 @@ class AllegroAgent(BaseAgent):
             thread_id = tool_input.get("thread_id")
             matched_buyer = None
             if not thread_id:
-                threads = await self._allegro.get_message_threads(limit=50)
+                threads = await self._allegro.get_message_threads(limit=20)
                 candidates = threads
                 buyer_login = tool_input.get("buyer_login")
                 if buyer_login:
@@ -1385,7 +1385,7 @@ class AllegroAgent(BaseAgent):
                 thread_id = candidates[0].get("id")
                 matched_buyer = (candidates[0].get("interlocutor") or {}).get("login", "N/A")
             messages = await self._allegro.get_thread_messages(
-                thread_id, limit=min(int(tool_input.get("limit", 10)), 50)
+                thread_id, limit=min(int(tool_input.get("limit", 10)), 20)
             )
             if not messages:
                 return f"Thread {thread_id} has no messages."
