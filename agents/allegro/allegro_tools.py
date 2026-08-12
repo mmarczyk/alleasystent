@@ -62,7 +62,12 @@ ALLEGRO_TOOLS: list[dict] = [
                 "questions ('ile zarobiłem', 'jakie opłaty'), not for listing orders. "
                 "For new/pending orders use get_new_orders instead. "
                 "TIME FILTERS: use bought_after/before_local for order PLACEMENT time; "
-                "use paid_after/before_local for PAYMENT time ('opłacone po X', 'zapłacone po X')."
+                "use paid_after/before_local for PAYMENT time ('opłacone po X', 'zapłacone po X'). "
+                "NEVER use this tool when the user names or already gave a SPECIFIC order_id "
+                "(a UUID, e.g. '0c4854a0-9646-11f1-8028-338c43adc37a') — this tool has NO order_id "
+                "parameter and cannot filter to a single order; it will silently ignore the ID and "
+                "return an unrelated list of unrelated orders. Use get_order_details instead for any "
+                "question (status, contents, invoice, cost) about one already-identified order."
             ),
             "parameters": {
                 "type": "object",
@@ -131,13 +136,18 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_order_details",
             "description": (
-                "Get full details of a specific Allegro order: items, buyer address, "
+                "Get full details of a specific Allegro order: status, items, buyer address, "
                 "delivery info, payment status, AND all Allegro billing entries for that order "
                 "(individual commission per item, delivery fees, any credits). "
-                "USE THIS for any question about costs/fees/profit of a SPECIFIC order — "
-                "e.g. 'jakie koszty miałem przy tym zamówieniu', 'podaj wpisy billing dla zamówienia X', "
-                "'ile prowizji zapłaciłem za to zamówienie'. "
-                "Uses order.id filter so results are exact — never mixes entries from other orders."
+                "USE THIS for ANY question about ONE already-identified order — not just costs: "
+                "'jaki jest status tego zamówienia', 'co się dzieje z zamówieniem X', 'sprawdź "
+                "zamówienie <id>', 'jakie koszty miałem przy tym zamówieniu', 'podaj wpisy billing "
+                "dla zamówienia X', 'ile prowizji zapłaciłem za to zamówienie'. The order_id may be "
+                "given directly in the message (a UUID) or already established earlier in the "
+                "conversation (e.g. the assistant just listed/described this exact order) — reuse "
+                "that ID, do not ask the user to repeat it if it's already in context. "
+                "Uses order.id filter so results are exact — never mixes entries from other orders. "
+                "get_orders CANNOT do this — it has no order_id filter."
             ),
             "parameters": {
                 "type": "object",
