@@ -94,22 +94,33 @@ for SECRET in \
     --project="$PROJECT_ID" 2>/dev/null || echo "  $SECRET already exists"
 done
 
-# ── Cloud Scheduler: trigger the order-monitor Cloud Run Job ──────────────────
+# ── Cloud Scheduler: trigger the order-monitor Cloud Run service ──────────────
+# order-monitor runs as a small always-deployed Cloud Run *service* (POST
+# /run), not a Cloud Run Job — Jobs cold-start a brand-new container on every
+# single execution (no warm-instance reuse between runs), which at a 2-minute
+# schedule made cold-start overhead the dominant cost. A service can keep a
+# warm instance across back-to-back scheduler ticks like any other Cloud Run
+# traffic, so the same 2-minute cadence costs a fraction as much.
+#
 # Run this AFTER deploy-jobs.yml has run at least once (push to main touching
-# jobs/**), since gcloud run jobs describe needs the job to already exist.
-JOB_NAME="alleasystent-order-monitor"
-if gcloud run jobs describe "$JOB_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
-  echo "▶ Creating Cloud Scheduler trigger for $JOB_NAME (every 2 minutes)..."
-  JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
-  gcloud scheduler jobs create http "${JOB_NAME}-trigger" \
+# jobs/**), since gcloud run services describe needs the service to already
+# exist. Auth is OIDC (--oidc-service-account-email), not OAuth — SA_EMAIL
+# already holds roles/run.invoker project-wide (granted above), which covers
+# invoking this service; no extra per-service IAM binding needed.
+SERVICE_NAME="alleasystent-order-monitor"
+SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)" 2>/dev/null || true)"
+if [ -n "$SERVICE_URL" ]; then
+  echo "▶ Creating Cloud Scheduler trigger for $SERVICE_NAME (every 2 minutes)..."
+  gcloud scheduler jobs create http "${SERVICE_NAME}-trigger" \
     --location="$REGION" \
     --schedule="*/2 * * * *" \
-    --uri="$JOB_URI" \
+    --uri="${SERVICE_URL}/run" \
     --http-method=POST \
-    --oauth-service-account-email="$SA_EMAIL" \
-    --project="$PROJECT_ID" || echo "  (already exists — edit schedule with 'gcloud scheduler jobs update http')"
+    --oidc-service-account-email="$SA_EMAIL" \
+    --oidc-token-audience="$SERVICE_URL" \
+    --project="$PROJECT_ID" || echo "  (already exists — edit with 'gcloud scheduler jobs update http')"
 else
-  echo "▶ Skipping Cloud Scheduler trigger — $JOB_NAME doesn't exist yet."
+  echo "▶ Skipping Cloud Scheduler trigger — $SERVICE_NAME doesn't exist yet."
   echo "  Push to main (or run 'gh workflow run deploy-jobs.yml') to create it, then re-run this script."
 fi
 
@@ -126,7 +137,7 @@ echo "       printf '%s' \"\$VAPID_PUBLIC_KEY\"       | gcloud secrets versions 
 echo "     Then add VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=vapid-public-key:latest"
 echo "     to --update-secrets, and VAPID_EMAIL=mailto:you@example.com to --update-env-vars,"
 echo "     on BOTH the 'alleasystent' service (deploy-backend.yml) and the"
-echo "     'alleasystent-order-monitor' job (deploy-jobs.yml)."
+echo "     'alleasystent-order-monitor' service (deploy-jobs.yml)."
 echo "  3. Set up the analytics dashboard (now in the alleasystent-analytics repo,"
 echo "     Google Sign-In instead of a secret URL token):"
 echo "       - Create an OAuth 2.0 Client ID (Web application) in GCP Console →"
@@ -142,4 +153,4 @@ echo "           BACKEND_URL       = <this Cloud Run URL>"
 echo "           GOOGLE_CLIENT_ID  = <the same OAuth Client ID>"
 echo "  4. Build & deploy:     push to main (deploy-backend.yml / deploy-jobs.yml via GitHub Actions)"
 echo "  5. Set FB webhook URL: https://YOUR_CLOUD_RUN_URL/webhook/facebook"
-echo "  6. Re-run this script once the order-monitor job exists, to create its Scheduler trigger"
+echo "  6. Re-run this script once the order-monitor service exists, to create its Scheduler trigger"
