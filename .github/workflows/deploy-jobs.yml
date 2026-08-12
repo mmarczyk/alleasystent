@@ -75,7 +75,7 @@ jobs:
           gcloud run jobs deploy ${{ env.JOB_NAME }} \
             --image=${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:${{ github.sha }} \
             --region=${{ env.REGION }} \
-            --memory=512Mi \
+            --memory=256Mi \
             --cpu=1 \
             --max-retries=1 \
             --task-timeout=120s \

@@ -99,11 +99,14 @@ done
 # jobs/**), since gcloud run jobs describe needs the job to already exist.
 JOB_NAME="alleasystent-order-monitor"
 if gcloud run jobs describe "$JOB_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
-  echo "▶ Creating Cloud Scheduler trigger for $JOB_NAME (every 2 minutes)..."
+  echo "▶ Creating Cloud Scheduler trigger for $JOB_NAME (every 10 minutes)..."
+  # 10 min instead of 2 min: a handful of minutes' delay in noticing a new
+  # order is not business-critical here, and cuts executions (and thus
+  # billed Cloud Run Job time) to a fifth.
   JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run"
   gcloud scheduler jobs create http "${JOB_NAME}-trigger" \
     --location="$REGION" \
-    --schedule="*/2 * * * *" \
+    --schedule="*/10 * * * *" \
     --uri="$JOB_URI" \
     --http-method=POST \
     --oauth-service-account-email="$SA_EMAIL" \
