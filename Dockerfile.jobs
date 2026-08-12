@@ -1,4 +1,6 @@
-# ── Slim image for scheduled background jobs (Cloud Run Jobs) ────────────────
+# ── Slim image for scheduled background jobs (deployed as small Cloud Run
+# services hit by Cloud Scheduler, not Cloud Run Jobs — see
+# jobs/order_monitor_service.py for why) ────────────────────────────────────
 # Separate from the main Dockerfile: no fastapi/uvicorn, no RAG deps
 # (chromadb/sentence-transformers/torch, ~1.5GB+), no baked-in embedding
 # model. Order monitor today; a home for other periodic jobs as they're added
@@ -35,4 +37,6 @@ USER appuser
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-CMD ["python", "-m", "jobs.order_monitor_job"]
+EXPOSE 8080
+
+CMD ["python", "-m", "jobs.order_monitor_service"]

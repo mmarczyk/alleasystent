@@ -4,13 +4,14 @@ from __future__ import annotations
 Order monitor — polls Allegro via event API and pushes notifications to all
 subscribed devices when new READY_FOR_PROCESSING orders arrive.
 
-Runs as a one-shot pass (run_once) invoked by the alleasystent-order-monitor
-Cloud Run Job on a Cloud Scheduler cron (see jobs/order_monitor_job.py) — NOT
-as a long-lived task inside the web app. That used to run as an infinite
-asyncio loop in the FastAPI process, but Cloud Run only allocates CPU while a
-request is in flight and can scale instances to zero, so the loop could go
-silently idle or die; a scheduled one-shot job is deterministic regardless of
-web traffic and works even when iOS PWA is backgrounded (JS can't poll then).
+Runs as a one-shot pass (run_once) invoked over HTTP (POST /run) by the
+alleasystent-order-monitor Cloud Run service on a Cloud Scheduler cron (see
+jobs/order_monitor_service.py) — NOT as a long-lived task inside the web app.
+That used to run as an infinite asyncio loop in the FastAPI process, but
+Cloud Run only allocates CPU while a request is in flight and can scale
+instances to zero, so the loop could go silently idle or die; a scheduled
+one-shot pass is deterministic regardless of web traffic and works even when
+iOS PWA is backgrounded (JS can't poll then).
 """
 
 import logging

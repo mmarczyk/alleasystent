@@ -1,5 +1,13 @@
 name: Deploy AllEasystent Background Jobs to Cloud Run
 
+# order-monitor deploys as a Cloud Run *service* (small always-there HTTP
+# endpoint hit by Cloud Scheduler), not a Cloud Run Job — Jobs cold-start a
+# fresh container on every single execution, which at a 2-minute schedule
+# made cold-start overhead the dominant cost. A service can reuse a warm
+# instance across scheduler ticks the same way it would for any other
+# traffic, so this workflow name ("Jobs") now refers to the jobs/ directory
+# of scheduled background tasks, not the Cloud Run Jobs product.
+
 on:
   push:
     branches: [main]
@@ -20,12 +28,12 @@ permissions:
 
 env:
   REGION: europe-central2
-  JOB_NAME: alleasystent-order-monitor
+  SERVICE_NAME: alleasystent-order-monitor
   REGISTRY: europe-central2-docker.pkg.dev
 
 jobs:
   deploy:
-    name: Build & Deploy Cloud Run Job
+    name: Build & Deploy Cloud Run service
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -59,26 +67,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # `gcloud run jobs deploy` creates the job if it doesn't exist yet and
+      # `gcloud run deploy` creates the service if it doesn't exist yet and
       # updates it otherwise — but deployment/setup_gcp.sh should still be run
       # once first to create the Cloud Scheduler trigger that invokes it.
+      # --no-allow-unauthenticated: only Cloud Scheduler (via OIDC, see
+      # setup_gcp.sh) may call this; --min-instances=0 keeps idle cost at
+      # zero, --max-instances=1 since one instance easily keeps up with a
+      # 2-minute poll cadence for a single-seller workload.
       #
       # Deliberately no --service-account: deploy-backend.yml doesn't set one
-      # either, so the main service runs as the default compute service
-      # account — which already has working access to the secrets below.
-      # Pinning this Job to alleasystent-sa would need github-actions@... to
-      # hold iam.serviceAccounts.actAs on it (a one-time IAM grant that isn't
-      # in place), so it fails with a "does not have permission to access
+      # either, so the service runs as the default compute service account —
+      # which already has working access to the secrets below. Pinning it to
+      # alleasystent-sa would need github-actions@... to hold
+      # iam.serviceAccounts.actAs on it (a one-time IAM grant that isn't in
+      # place), so it fails with a "does not have permission to access
       # namespaces... Permission 'iam.serviceaccounts.actAs' denied" error.
-      - name: Deploy order-monitor Cloud Run Job
+      - name: Deploy order-monitor Cloud Run service
         run: |
-          gcloud run jobs deploy ${{ env.JOB_NAME }} \
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
             --image=${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:${{ github.sha }} \
             --region=${{ env.REGION }} \
             --memory=256Mi \
             --cpu=1 \
-            --max-retries=1 \
-            --task-timeout=120s \
+            --min-instances=0 \
+            --max-instances=1 \
+            --concurrency=1 \
+            --timeout=120s \
+            --no-allow-unauthenticated \
             --update-secrets=GOOGLE_API_KEY=google-api-key:latest,ALLEGRO_CLIENT_ID=allegro-client-id:latest,ALLEGRO_CLIENT_SECRET=allegro-client-secret:latest,REDIS_URL=redis-url:latest,VAPID_PRIVATE_KEY=vapid-private-key:latest,VAPID_PUBLIC_KEY=vapid-public-key:latest \
             --update-env-vars=APP_ENV=production,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},VAPID_EMAIL=${{ vars.VAPID_EMAIL }} \
             --quiet
