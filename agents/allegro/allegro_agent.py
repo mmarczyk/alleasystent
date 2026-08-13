@@ -584,6 +584,24 @@ class AllegroAgent(BaseAgent):
         return local_dt.astimezone(cls._UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @classmethod
+    def _local_day_bounds_to_utc(cls, date_from_local: str, date_to_local: str) -> tuple[str, str]:
+        """Convert a Warsaw-local calendar date range ('YYYY-MM-DD', inclusive) to UTC ISO 8601 bounds.
+
+        Allegro filters by UTC instant, but the seller thinks in Warsaw calendar days — an order
+        placed at 00:30 local time is "today" to them even though it's still "yesterday" in UTC
+        for part of the year. Anchoring the boundaries to Warsaw midnight (not UTC midnight) keeps
+        those orders in the day the seller actually means.
+        """
+        start_local = datetime.strptime(date_from_local, "%Y-%m-%d").replace(tzinfo=cls._WARSAW)
+        end_local = datetime.strptime(date_to_local, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=cls._WARSAW
+        )
+        return (
+            start_local.astimezone(cls._UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end_local.astimezone(cls._UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+
+    @classmethod
     def _tracking_url(cls, carrier_id: str, code: str) -> str | None:
         """Return tracking URL for a carrier+code pair, or None if unknown carrier."""
         if not code or code == "—":
@@ -1158,8 +1176,10 @@ class AllegroAgent(BaseAgent):
             return "\n".join(lines)
 
         if tool_name == "get_sales_summary":
-            date_from = tool_input["date_from"]
-            date_to = tool_input["date_to"]
+            date_from, date_to = self._local_day_bounds_to_utc(
+                tool_input["date_from_local"], tool_input["date_to_local"]
+            )
+            period_label = f"{tool_input['date_from_local']} – {tool_input['date_to_local']}"
             logger.info("get_sales_summary: fetching orders and billing %s → %s", date_from, date_to)
             # Every fee/rebate type except account subscriptions is tied to an order.id, and
             # matching happens by that ID — not by the entry's own date — so the date window
@@ -1205,7 +1225,7 @@ class AllegroAgent(BaseAgent):
                 len(orders), len(billing_entries), len(billing_entries_with_order), len(billing_entries_no_order),
             )
             if not orders:
-                return f"Brak opłaconych zamówień w okresie {date_from[:10]} – {date_to[:10]}."
+                return f"Brak opłaconych zamówień w okresie {period_label}."
             total_revenue = sum(o.total_price for o in orders)
             order_count = len(orders)
             avg_value = total_revenue / order_count if order_count else 0
@@ -1298,7 +1318,7 @@ class AllegroAgent(BaseAgent):
                             + ")."
                         )
                 billing_section = (
-                    f"\n\n**Koszty Allegro** ({date_from[:10]} – {date_to[:10]})\n"
+                    f"\n\n**Koszty Allegro** ({period_label})\n"
                     f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
                     + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
@@ -1321,7 +1341,7 @@ class AllegroAgent(BaseAgent):
                     "Zaloguj się ponownie przez /allegro/login, aby uzyskać dostęp do billing."
                 )
             return (
-                f"**Podsumowanie sprzedaży** ({date_from[:10]} – {date_to[:10]})\n\n"
+                f"**Podsumowanie sprzedaży** ({period_label})\n\n"
                 f"- Liczba zamówień: **{order_count}**\n"
                 f"- Łączny przychód: **{self._format_price(total_revenue)}**\n"
                 f"- Średnia wartość zamówienia: **{self._format_price(avg_value)}**\n\n"
@@ -1428,8 +1448,13 @@ class AllegroAgent(BaseAgent):
             )
 
         if tool_name == "get_billing_summary":
-            date_from = tool_input.get("date_from")
-            date_to = tool_input.get("date_to")
+            date_from_local = tool_input.get("date_from_local")
+            date_to_local = tool_input.get("date_to_local")
+            date_from, date_to = (
+                self._local_day_bounds_to_utc(date_from_local, date_to_local)
+                if date_from_local and date_to_local
+                else (None, None)
+            )
             try:
                 if date_from and date_to:
                     from datetime import datetime, timedelta
@@ -1442,7 +1467,7 @@ class AllegroAgent(BaseAgent):
                         if (e.get("order") or {}).get("id")
                         or date_from <= e.get("occurredAt", "") <= date_to
                     ]
-                    period_label = f"{date_from[:10]} – {date_to[:10]}"
+                    period_label = f"{date_from_local} – {date_to_local}"
                 else:
                     entries = await self._allegro.get_billing_entries(
                         limit=min(int(tool_input.get("limit", 50)), 100)
