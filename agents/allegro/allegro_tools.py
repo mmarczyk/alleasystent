@@ -411,19 +411,32 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'ile prowizji zapłaciłem w czerwcu', 'ostatnie opłaty na koncie'. "
                 "DO NOT use for a specific order — use get_order_details instead "
                 "(it filters by order.id and shows exact per-item entries). "
-                "When a period is given, pass date_from/date_to. Without dates, returns recent entries. "
+                "When a period is given, pass date_from_local/date_to_local as Warsaw-local calendar "
+                "dates — do NOT convert to UTC yourself, that conversion happens automatically and "
+                "getting it wrong drops entries near local midnight. Without dates, returns recent entries. "
                 "Returns: total fees, refunds/credits, net cost, breakdown by fee type, individual entries."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "date_from": {
+                    "date_from_local": {
                         "type": "string",
-                        "description": "Start of period in UTC ISO 8601, e.g. '2026-06-01T00:00:00Z'. Optional.",
+                        "description": (
+                            "Start of period as a Warsaw-local calendar date, 'YYYY-MM-DD'. Optional. "
+                            "'dziś/today' → today's date; 'wczoraj/yesterday' → yesterday's date; "
+                            "'ten tydzień/this week' → Monday of current week; "
+                            "'ten miesiąc/this month' → 1st of current month; "
+                            "'ostatni miesiąc/last month' → 1st of previous month."
+                        ),
                     },
-                    "date_to": {
+                    "date_to_local": {
                         "type": "string",
-                        "description": "End of period in UTC ISO 8601, e.g. '2026-06-30T23:59:59Z'. Optional.",
+                        "description": (
+                            "End of period as a Warsaw-local calendar date, 'YYYY-MM-DD' (inclusive). Optional. "
+                            "'dziś/today' or 'ten tydzień/ten miesiąc' → today's date; "
+                            "'wczoraj/yesterday' → yesterday's date; "
+                            "'ostatni miesiąc/last month' → last day of previous month."
+                        ),
                     },
                     "limit": {
                         "type": "integer",
@@ -512,31 +525,34 @@ ALLEGRO_TOOLS: list[dict] = [
                 "reply, only 'przychód po opłatach Allegro'), order count, average order value, top-selling "
                 "products, breakdown of fee types (commission, listing, etc.), AND a per-order table showing "
                 "revenue + Allegro cost + revenue-after-fees for each individual order. "
-                "Uses payment.finishedAt (actual payment date) for order filtering — Allegro operates on UTC. "
+                "Uses payment.finishedAt (actual payment date) for order filtering — Allegro operates on UTC, "
+                "but date_from_local/date_to_local are Warsaw-local calendar dates converted to the correct "
+                "UTC window automatically; do NOT build the UTC boundaries yourself, that has previously "
+                "caused orders placed near local midnight to be dropped from the wrong day's period. "
                 "ALWAYS resolve common time expressions automatically — do NOT ask the user for clarification: "
-                "'dziś/today' → today 00:00:00Z–23:59:59Z; "
-                "'wczoraj/yesterday' → yesterday 00:00:00Z–23:59:59Z; "
-                "'przedwczoraj/day before yesterday' → two days ago 00:00:00Z–23:59:59Z; "
-                "'ostatni tydzień/last week/last 7 days' → 7 days ago 00:00:00Z to today 23:59:59Z; "
-                "'ten tydzień/this week' → Monday of current week 00:00:00Z to today 23:59:59Z; "
-                "'ten miesiąc/this month' → first day of current month 00:00:00Z to last day 23:59:59Z; "
-                "'ostatni miesiąc/last month' → first day of previous calendar month 00:00:00Z to last day 23:59:59Z. "
+                "'dziś/today' → today's date for both; "
+                "'wczoraj/yesterday' → yesterday's date for both; "
+                "'przedwczoraj/day before yesterday' → two days ago for both; "
+                "'ostatni tydzień/last week/last 7 days' → 7 days ago to today; "
+                "'ten tydzień/this week' → Monday of current week to today; "
+                "'ten miesiąc/this month' → first day of current month to today; "
+                "'ostatni miesiąc/last month' → first day of previous calendar month to last day of that month. "
                 "Only ask the user if the period is truly ambiguous (e.g. no period mentioned at all). "
-                "date_from and date_to must be ISO 8601 UTC strings, e.g. '2026-06-01T00:00:00Z'."
+                "date_from_local and date_to_local must be 'YYYY-MM-DD' Warsaw-local calendar dates."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "date_from": {
+                    "date_from_local": {
                         "type": "string",
-                        "description": "Start of period in UTC, ISO 8601, e.g. '2026-06-01T00:00:00Z'.",
+                        "description": "Start of period as a Warsaw-local calendar date, 'YYYY-MM-DD'.",
                     },
-                    "date_to": {
+                    "date_to_local": {
                         "type": "string",
-                        "description": "End of period in UTC, ISO 8601, e.g. '2026-06-30T23:59:59Z'.",
+                        "description": "End of period as a Warsaw-local calendar date, 'YYYY-MM-DD' (inclusive).",
                     },
                 },
-                "required": ["date_from", "date_to"],
+                "required": ["date_from_local", "date_to_local"],
             },
         },
     },
