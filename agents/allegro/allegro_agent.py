@@ -181,6 +181,28 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "Użyj WYŁĄCZNIE danych zwróconych przez narzędzie powyżej — nigdy nie zmyślaj "
         "produktów, cen ani statusu faktury."
     ),
+    "get_active_offers": (
+        "[FORMAT ODPOWIEDZI: TABELA]\n"
+        "Zbuduj tabelę markdown z danych zwróconych przez narzędzie powyżej, zachowując "
+        "DOKŁADNIE tę kolejność wierszy — dane są już posortowane rosnąco wg stanu "
+        "magazynowego (od najmniejszej ilości szt.) i zagregowane po nazwie produktu (stan "
+        "zsumowany dla tego samego produktu). NIE sortuj ponownie, NIE grupuj inaczej, NIE "
+        "pomijaj wierszy oznaczonych jako „(zakończona — wyprzedana)” — to wyprzedane, "
+        "zakończone oferty wymagające wznowienia i też mają się znaleźć w tabeli. Kolumny: "
+        "Nazwa, Stan (szt.), Cena, ID ofert. Bez wstępu ani potwierdzenia przed tabelą. "
+        "Maksymalnie 1-2 zdania podsumowania PO tabeli."
+    ),
+    "query_offers_by_stock": (
+        "[FORMAT ODPOWIEDZI: TABELA]\n"
+        "Zbuduj tabelę markdown z danych zwróconych przez narzędzie powyżej, zachowując "
+        "DOKŁADNIE tę kolejność wierszy — dane są już posortowane rosnąco wg stanu "
+        "magazynowego (od najmniejszej ilości szt.) i zagregowane po nazwie produktu (stan "
+        "zsumowany dla tego samego produktu). NIE sortuj ponownie, NIE grupuj inaczej, NIE "
+        "pomijaj wierszy oznaczonych jako „(zakończona — wyprzedana)” — to wyprzedane, "
+        "zakończone oferty wymagające wznowienia i też mają się znaleźć w tabeli. Kolumny: "
+        "Nazwa, Stan łącznie (szt.), Cena, ID ofert. Bez wstępu ani potwierdzenia przed "
+        "tabelą. Maksymalnie 1-2 zdania podsumowania PO tabeli."
+    ),
 }
 
 
@@ -565,8 +587,13 @@ class AllegroAgent(BaseAgent):
 
     @classmethod
     def _aggregate_offers_by_name(cls, offers: list[dict]) -> list[dict]:
-        """Group offers by name (case-insensitive), summing stock. Returns list of aggregated dicts."""
-        groups: dict[str, dict] = defaultdict(lambda: {"ids": [], "name": "", "price": 0.0, "currency": "PLN", "total_stock": 0})
+        """Group offers by name (case-insensitive), summing stock, sorted ascending by stock
+        (lowest/most urgent first). Returns list of aggregated dicts. Tracks whether every
+        listing behind a name is an ended/sold-out one (see _get_stock_relevant_offers) so
+        callers can flag it."""
+        groups: dict[str, dict] = defaultdict(
+            lambda: {"ids": [], "name": "", "price": 0.0, "currency": "PLN", "total_stock": 0, "ended_only": True}
+        )
         for offer in offers:
             oid, name, price, currency, stock = cls._offer_fields(offer)
             key = name.strip().lower()
@@ -576,7 +603,47 @@ class AllegroAgent(BaseAgent):
             g["price"] = price
             g["currency"] = currency
             g["total_stock"] += stock
+            if not offer.get("_ended"):
+                g["ended_only"] = False
         return sorted(groups.values(), key=lambda g: g["total_stock"])
+
+    async def _get_stock_relevant_offers(self, name: str | None = None) -> list[dict]:
+        """Active offers plus ended offers that sold out to zero stock.
+
+        Allegro auto-ends an offer once its stock hits zero, so a sold-out product has no
+        ACTIVE listing left even though it's exactly what needs reordering. An offer ended
+        for any other reason (still has stock left) was stopped deliberately, so it's left
+        out. Ended offers are tagged with _ended=True (on a copy, so the shared offers cache
+        is never mutated) for _aggregate_offers_by_name to flag.
+
+        The ENDED fetch is best-effort: if it fails, active offers are still returned rather
+        than the whole query blowing up over a list that's a nice-to-have addition.
+        """
+        if name:
+            active_result, ended_result = await asyncio.gather(
+                self._allegro.get_offers(publication_status="ACTIVE", name=name, limit=100),
+                self._allegro.get_offers(publication_status="ENDED", name=name, limit=100),
+                return_exceptions=True,
+            )
+        else:
+            active_result, ended_result = await asyncio.gather(
+                self._allegro.get_all_offers("ACTIVE"),
+                self._allegro.get_all_offers("ENDED"),
+                return_exceptions=True,
+            )
+        if isinstance(active_result, BaseException):
+            raise active_result
+        active = active_result[0] if name else active_result
+        if isinstance(ended_result, BaseException):
+            logger.warning("_get_stock_relevant_offers: ENDED fetch failed, continuing with active only: %s", ended_result)
+            ended = []
+        else:
+            ended = ended_result[0] if name else ended_result
+        ended_sold_out = [
+            dict(o, _ended=True) for o in ended
+            if int((o.get("stock") or {}).get("available") or 0) == 0
+        ]
+        return active + ended_sold_out
 
     _FULFILLMENT_PL: dict[str, str] = {
         "NEW":                "Nowe",
@@ -1071,21 +1138,19 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_active_offers":
             name_filter = tool_input.get("name")
-            if name_filter:
-                raw, _ = await self._allegro.get_offers(name=name_filter, limit=50)
-            else:
-                raw = await self._allegro.get_all_offers()
+            raw = await self._get_stock_relevant_offers(name_filter)
             logger.info("get_active_offers: %d raw offers fetched", len(raw))
             if not raw:
                 return "Brak aktywnych ofert."
             aggregated = self._aggregate_offers_by_name(raw)
             logger.info("get_active_offers: %d unique products after name aggregation", len(aggregated))
-            lines = [f"Łącznie **{len(raw)}** ofert / **{len(aggregated)}** unikalnych produktów:\n"]
-            for g in sorted(aggregated, key=lambda x: x["name"].lower()):
+            lines = [f"Łącznie **{len(raw)}** ofert / **{len(aggregated)}** unikalnych produktów, posortowane rosnąco wg stanu:\n"]
+            for g in aggregated:  # already sorted ascending by stock
                 ids_str = ", ".join(f"`{i}`" for i in g["ids"])
                 price_str = self._format_price(g["price"], g["currency"])
+                ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
                 lines.append(
-                    f"- **{g['name']}** — {price_str} — "
+                    f"- **{g['name']}**{ended_marker} — {price_str} — "
                     f"stan: **{g['total_stock']} szt.** — ID: {ids_str}"
                 )
             return "\n".join(lines)
@@ -1133,12 +1198,12 @@ class AllegroAgent(BaseAgent):
         if tool_name == "query_offers_by_stock":
             max_stock = tool_input.get("max_stock")
             min_stock = tool_input.get("min_stock")
-            offers = await self._allegro.get_all_offers()
+            offers = await self._get_stock_relevant_offers()
             logger.info("query_offers_by_stock: %d raw offers, max_stock=%s min_stock=%s", len(offers), max_stock, min_stock)
             aggregated = self._aggregate_offers_by_name(offers)
             logger.info("query_offers_by_stock: %d unique products after aggregation", len(aggregated))
             results = []
-            for g in aggregated:
+            for g in aggregated:  # already sorted ascending by stock
                 s = g["total_stock"]
                 if max_stock is not None and s > max_stock:
                     continue
@@ -1153,13 +1218,14 @@ class AllegroAgent(BaseAgent):
                 label.append(f"≤ {max_stock} szt.")
             if min_stock is not None:
                 label.append(f"≥ {min_stock} szt.")
-            header = f"Znaleziono **{len(results)}** produktów ({', '.join(label) or 'wszystkie'}):\n"
+            header = f"Znaleziono **{len(results)}** produktów ({', '.join(label) or 'wszystkie'}), posortowane rosnąco wg stanu:\n"
             lines = [header]
             for g in results:
                 ids_str = ", ".join(f"`{i}`" for i in g["ids"])
                 ofert_str = f"({len(g['ids'])} {'oferta' if len(g['ids']) == 1 else 'ofert'})" if len(g["ids"]) > 1 else ""
+                ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
                 lines.append(
-                    f"- **{g['name']}** {ofert_str}— "
+                    f"- **{g['name']}**{ended_marker} {ofert_str}— "
                     f"stan łącznie: **{g['total_stock']} szt.** — "
                     f"{self._format_price(g['price'], g['currency'])} — "
                     f"ID: {ids_str}"
@@ -1198,17 +1264,13 @@ class AllegroAgent(BaseAgent):
         if tool_name == "get_products_to_reorder":
             assortment = tool_input.get("assortment")
             max_stock = tool_input.get("max_stock", 5)
-            if assortment:
-                offers, _ = await self._allegro.get_offers(name=assortment, limit=100)
-            else:
-                offers = await self._allegro.get_all_offers()
+            offers = await self._get_stock_relevant_offers(assortment)
             logger.info(
                 "get_products_to_reorder: %d raw offers (assortment=%r, max_stock=%s)",
                 len(offers), assortment, max_stock,
             )
             aggregated = self._aggregate_offers_by_name(offers)
-            results = [g for g in aggregated if g["total_stock"] <= max_stock]
-            results.sort(key=lambda g: g["total_stock"])
+            results = [g for g in aggregated if g["total_stock"] <= max_stock]  # already sorted ascending by stock
             logger.info("get_products_to_reorder: %d products at or below threshold", len(results))
             if not results:
                 scope = f" w asortymencie „{assortment}”" if assortment else ""
@@ -1218,8 +1280,9 @@ class AllegroAgent(BaseAgent):
             lines = [header]
             for g in results:
                 ids_str = ", ".join(f"`{i}`" for i in g["ids"])
+                ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
                 lines.append(
-                    f"- **{g['name']}** — stan obecny: **{g['total_stock']} szt.** — "
+                    f"- **{g['name']}**{ended_marker} — stan obecny: **{g['total_stock']} szt.** — "
                     f"cena sprzedaży: {self._format_price(g['price'], g['currency'])} — ID: {ids_str}"
                 )
             return "\n".join(lines)
