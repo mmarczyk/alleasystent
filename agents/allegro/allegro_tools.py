@@ -163,7 +163,11 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_active_offers",
             "description": (
-                "List ALL active Allegro offers (paginated, no limit). "
+                "List ALL active Allegro offers (paginated, no limit), plus any ended offer that "
+                "sold out to zero stock (Allegro auto-ends offers once stock hits zero, so those "
+                "are still relevant — an ended offer that still has stock left was stopped "
+                "deliberately and is excluded). Offers with the same name are aggregated — stock "
+                "summed, sorted ascending by stock (lowest/most urgent first). "
                 "Use for general 'show me my offers' questions. "
                 "For stock or price filtering use query_offers_by_stock / query_offers_by_price instead."
             ),
@@ -192,8 +196,11 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "query_offers_by_stock",
             "description": (
-                "Filter active offers by stock quantity. "
-                "Offers with the same name are aggregated — stock is summed across all listings of the same product. "
+                "Filter offers by stock quantity — active offers plus any ended offer that sold "
+                "out to zero stock (Allegro auto-ends offers once stock hits zero; an ended offer "
+                "that still has stock left was stopped deliberately and is excluded). "
+                "Offers with the same name are aggregated — stock is summed across all listings of the same product, "
+                "and results are sorted ascending by stock (lowest first). "
                 "Use for questions like 'offers with less than 10 items', 'out of stock offers', 'high stock offers'."
             ),
             "parameters": {
@@ -201,11 +208,21 @@ ALLEGRO_TOOLS: list[dict] = [
                 "properties": {
                     "max_stock": {
                         "type": "integer",
-                        "description": "Return products with total stock ≤ this value (inclusive).",
+                        "description": (
+                            "Return products with total stock ≤ this value (inclusive). "
+                            "Convert the user's wording to the correct boundary number: "
+                            "'poniżej N' / 'mniej niż N' / 'less than N' is EXCLUSIVE of N → pass N-1. "
+                            "'do N' / 'maksymalnie N' / 'N lub mniej' / 'at most N' is inclusive → pass N as-is."
+                        ),
                     },
                     "min_stock": {
                         "type": "integer",
-                        "description": "Return products with total stock ≥ this value (inclusive).",
+                        "description": (
+                            "Return products with total stock ≥ this value (inclusive). "
+                            "Convert the user's wording to the correct boundary number: "
+                            "'powyżej N' / 'więcej niż N' / 'more than N' is EXCLUSIVE of N → pass N+1. "
+                            "'od N' / 'co najmniej N' / 'minimum N' / 'at least N' is inclusive → pass N as-is."
+                        ),
                     },
                 },
             },
@@ -241,9 +258,13 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Find products that are low on stock and need reordering/restocking from a "
                 "supplier, optionally narrowed to one assortment/category by partial name "
-                "match (e.g. 'włóczka', 'guziki', 'tkanina'). Returns each matching product's "
-                "name, current total stock, and price, aggregated across all listings of the "
-                "same product, sorted by stock ascending (lowest stock — most urgent — first). "
+                "match (e.g. 'włóczka', 'guziki', 'tkanina'). Considers active offers plus any "
+                "ended offer that sold out to zero stock (Allegro auto-ends offers once stock "
+                "hits zero, so those are exactly what needs reordering; an ended offer that "
+                "still has stock left was stopped deliberately and is excluded). Returns each "
+                "matching product's name, current total stock, and price, aggregated across all "
+                "listings of the same product, sorted by stock ascending (lowest stock — most "
+                "urgent — first). "
                 "USE THIS TOOL when the user asks to prepare a reorder/restock email or list "
                 "to send to a supplier: 'wygeneruj mail z zamówieniem do dostawcy', "
                 "'przygotuj zamówienie uzupełniające', 'napisz do dostawcy o brakujące "
@@ -265,8 +286,11 @@ ALLEGRO_TOOLS: list[dict] = [
                         "type": "integer",
                         "description": (
                             "Only include products with total stock at or below this level "
-                            "(i.e. needing restock). Defaults to 5 unless the user specifies "
-                            "a different threshold (e.g. 'poniżej 10 sztuk')."
+                            "(i.e. needing restock), inclusive. Defaults to 5 unless the user "
+                            "specifies a different threshold. Convert the user's wording to the "
+                            "correct boundary number: 'poniżej N szt.' / 'mniej niż N' is EXCLUSIVE "
+                            "of N → pass N-1 (e.g. 'poniżej 10 sztuk' → pass 9). 'do N' / "
+                            "'maksymalnie N' / 'N lub mniej' is inclusive → pass N as-is."
                         ),
                         "default": 5,
                     },
