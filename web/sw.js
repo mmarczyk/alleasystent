@@ -53,7 +53,17 @@ self.addEventListener('push', e => {
       body: data.body ?? '',
       icon: './icons/icon-192.svg',
       badge: './icons/icon-192.svg',
-      data: { url: data.url ?? '/' },
+      // Carry the full payload through to notificationclick (not just the url) so
+      // the app can paint this notification into the inbox instantly on launch,
+      // instead of waiting on a round-trip to the server to find out it exists.
+      data: {
+        url: data.url ?? '/',
+        id: data.id ?? null,
+        title: data.title ?? null,
+        body: data.body ?? null,
+        prompt: data.prompt ?? null,
+        created_at: data.created_at ?? null,
+      },
       vibrate: [200, 100, 200],
       tag: 'alleasystent-monitor',  // replaces any direct Notification on same device silently
       renotify: false,
@@ -71,16 +81,26 @@ self.addEventListener('notificationclick', e => {
   // app lives under a subpath (e.g. /alleasystent/) — resolving "/x" against the origin
   // drops that subpath entirely and 404s. Strip the leading slash and resolve against
   // this SW's own registration scope instead, so both deployment modes land correctly.
-  const url = e.notification.data?.url ?? './';
-  const target = new URL(url.replace(/^\/+/, ''), self.registration.scope).href;
+  const d = e.notification.data || {};
+  const url = d.url ?? './';
+  const target = new URL(url.replace(/^\/+/, ''), self.registration.scope);
+  // Tack the notification's own title/body/prompt onto the launch URL so app.js
+  // can render it immediately, before its background refresh() reaches the server
+  // — the notification data IS already known, no need to wait to display it.
+  if (d.id) target.searchParams.set('nid', d.id);
+  if (d.title) target.searchParams.set('ntitle', d.title);
+  if (d.body) target.searchParams.set('nbody', d.body);
+  if (d.prompt) target.searchParams.set('nprompt', d.prompt);
+  if (d.created_at) target.searchParams.set('ncreated', d.created_at);
+  const href = target.href;
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
       const origin = self.location.origin;
       const existing = cs.find(c => c.url.startsWith(origin));
       if (existing) {
-        return (existing.navigate ? existing.navigate(target) : Promise.resolve(existing)).then(c => c.focus());
+        return (existing.navigate ? existing.navigate(href) : Promise.resolve(existing)).then(c => c.focus());
       }
-      return clients.openWindow(target);
+      return clients.openWindow(href);
     })
   );
 });

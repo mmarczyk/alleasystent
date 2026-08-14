@@ -1081,7 +1081,23 @@ const Notifications = (() => {
     refresh();
   }
 
-  return { open, close, refresh, activate, init };
+  // Paint a notification straight from the OS push's own payload (carried in via
+  // launch URL params — see sw.js's notificationclick) instead of waiting for the
+  // background refresh() to round-trip to the server and confirm it exists. That
+  // refresh() still runs right after and replaces `_items` with the server's
+  // authoritative list — the same entry is already there by the time it lands,
+  // since the backend persists it before sending the push — so this is purely a
+  // "show it now" shortcut, not a second source of truth.
+  function applyPending(entry) {
+    if (!entry?.id || _items.some(i => i.id === entry.id)) return;
+    _items = [entry, ..._items];
+    const unread = _items.filter(i => !i.read).length;
+    _renderBadge(unread);
+    _render();
+    _saveCache({ items: _items, unread_count: unread });
+  }
+
+  return { open, close, refresh, activate, init, applyPending };
 })();
 
 // ── UI helpers ───────────────────────────────────
@@ -1810,6 +1826,21 @@ window.addEventListener('DOMContentLoaded', async () => {
   // notification IS the detection; re-polling on arrival would just find the
   // same order/invoice again and fire a redundant duplicate.
   if (_cameFromNotification) {
+    // The tapped notification's own title/body/prompt travel in as launch params
+    // (see sw.js) — paint it into the inbox right away instead of leaving the
+    // panel showing stale/empty state until Notifications.open()'s refresh()
+    // reaches the server.
+    const nid = _startParams.get('nid');
+    if (nid) {
+      Notifications.applyPending({
+        id: nid,
+        title: _startParams.get('ntitle') || '',
+        body: _startParams.get('nbody') || '',
+        prompt: _startParams.get('nprompt') || null,
+        created_at: _startParams.get('ncreated') || new Date().toISOString(),
+        read: false,
+      });
+    }
     Notifications.open();
     history.replaceState(null, '', location.pathname);
   }
