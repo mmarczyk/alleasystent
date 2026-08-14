@@ -27,11 +27,13 @@ logger = logging.getLogger(__name__)
 # judgement has repeatedly proven unreliable for this exact yes/no-vs-list
 # distinction (see the get_new_orders count_only fix and the order-monitoring
 # status block), so the user's own wording decides, not the model's tool-call
-# guess. A "show me" word always wins (user explicitly wants the list/content);
-# otherwise a question word next to "wiadomo..." means they just want yes/no or
-# a number.
+# guess. A "show me [the list]" word always wins (user explicitly wants the
+# thread list); otherwise a question word next to "wiadomo..." means they just
+# want yes/no or a number. Content-intent words ("treść", "przeczytaj", ...)
+# live in _MESSAGE_CONTENT_INTENT_RE below, not here — those mean the user
+# wants a specific message's TEXT, which get_message_threads never has.
 _MESSAGE_LIST_OVERRIDE_RE = re.compile(
-    r"poka[żz]|wyświetl|wypisz|\blista\b|jakie\s+(są|mam)|zobacz|przeczytaj|treść",
+    r"poka[żz]|wyświetl|wypisz|\blista\b|jakie\s+(są|mam)|zobacz",
     re.IGNORECASE,
 )
 _MESSAGE_QUESTION_WORD_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
@@ -42,6 +44,40 @@ def _wants_message_count_only(query: str) -> bool:
     if _MESSAGE_LIST_OVERRIDE_RE.search(query):
         return False
     return bool(_MESSAGE_QUESTION_WORD_RE.search(query) and _MESSAGE_TOPIC_WORD_RE.search(query))
+
+
+# Deterministic nudge toward get_thread_messages (actual message TEXT) instead
+# of get_message_threads (metadata only) — same rationale as above. Two ways
+# to signal this:
+#   1. The current message itself asks to read/see the content of ONE message
+#      ('treść wiadomości', 'przeczytaj', 'co napisał', 'tę/tą wiadomość',
+#      'wiadomość z dzisiaj/od X').
+#   2. A short follow-up ('jeszcze raz', 'ponownie', 'spróbuj', 'pokaż to')
+#      right after a turn that was itself about messages — conversation
+#      history only carries the rendered text (see
+#      ConversationSession.to_anthropic_messages), never the tool args, so
+#      this is the only way to tell "jeszcze raz" meant "show that message's
+#      content again" rather than some unrelated repeat request.
+_MESSAGE_CONTENT_INTENT_RE = re.compile(
+    r"treść|co\s+napisał|co\s+pisze|przeczytaj|t[eę]\s+wiadomo|ta\s+wiadomo|"
+    r"wiadomo\w*\s+(z\s+dzisiaj|z\s+wczoraj|od\s+\w+)",
+    re.IGNORECASE,
+)
+_MESSAGE_FOLLOWUP_REPEAT_RE = re.compile(
+    r"jeszcze\s+raz|ponownie|spróbuj|pokaż\s+to|raz\s+jeszcze",
+    re.IGNORECASE,
+)
+
+
+def _wants_message_content(query: str, conversation_history: list[dict[str, str]] | None) -> bool:
+    if _MESSAGE_CONTENT_INTENT_RE.search(query):
+        return True
+    if _MESSAGE_FOLLOWUP_REPEAT_RE.search(query) and conversation_history:
+        for turn in reversed(conversation_history):
+            if turn.get("role") == "assistant":
+                return bool(_MESSAGE_TOPIC_WORD_RE.search(turn.get("content", "")))
+    return False
+
 
 # Injected as a user-turn message right before the final "interpret" call, once
 # the output format is known from which tool(s) were just called (see
@@ -343,6 +379,19 @@ class AllegroAgent(BaseAgent):
             *list(conversation_history or []),
             {"role": "user", "content": query},
         ]
+
+        if _wants_message_content(query, conversation_history):
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[WYMAGANE NARZĘDZIE: get_thread_messages]\n"
+                    "Użytkownik prosi o TREŚĆ konkretnej wiadomości (albo o pokazanie jej ponownie). "
+                    "Użyj get_thread_messages — NIGDY get_message_threads, ta druga zwraca tylko "
+                    "metadane (kupujący/status/data), nigdy samej treści. Jeśli w tej rozmowie był już "
+                    "wcześniej wskazany kupujący/data/wątek, użyj tych samych wartości ponownie "
+                    "(buyer_login/date/thread_id)."
+                ),
+            })
 
         # ── Step 1: force tool call(s) ────────────────────────────────────────
         # The LLM MUST pick a real tool — it cannot answer from memory.
