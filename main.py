@@ -867,9 +867,14 @@ async def push_notify(request: Request):
     notify_body = body.get("body", "")
     url = body.get("url", "/")
     prompt = body.get("prompt")
+    entry = None
     if body.get("notify"):
-        await add_notification(user["sub"], title=title, body=notify_body, url=url, prompt=prompt)
-    await send_push(user_id=user["sub"], title=title, body=notify_body, url=url, prompt=prompt)
+        entry = await add_notification(user["sub"], title=title, body=notify_body, url=url, prompt=prompt)
+    await send_push(
+        user_id=user["sub"], title=title, body=notify_body, url=url, prompt=prompt,
+        notif_id=entry["id"] if entry else None,
+        created_at=entry["created_at"] if entry else None,
+    )
     return {"status": "sent"}
 
 

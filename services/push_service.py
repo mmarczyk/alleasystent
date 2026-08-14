@@ -187,12 +187,26 @@ async def _get_subscriptions(user_id: str) -> list[dict]:
         await r.aclose()
 
 
-async def send_push(user_id: str, title: str, body: str, url: str = "/", prompt: str | None = None) -> None:
+async def send_push(
+    user_id: str,
+    title: str,
+    body: str,
+    url: str = "/",
+    prompt: str | None = None,
+    notif_id: str | None = None,
+    created_at: str | None = None,
+) -> None:
     """Send a Web Push notification to all subscribed devices for a user.
 
     `prompt`, if set, travels in the push payload so the service worker can
     attach it to the notification's click target — tapping the OS notification
     then fires that chat question automatically instead of just opening the app.
+
+    `notif_id`/`created_at`, if set, should be the `id`/`created_at` of the
+    matching entry already written to the Notifications inbox (see
+    `add_notification`). The service worker forwards them to the app on launch
+    so it can paint the notification into the inbox instantly — before its
+    background refresh() has a chance to round-trip to the server.
     """
     from config.settings import get_settings
     settings = get_settings()
@@ -223,7 +237,10 @@ async def send_push(user_id: str, title: str, body: str, url: str = "/", prompt:
         logger.error("Invalid VAPID private key, cannot send push: %s", exc)
         return
 
-    payload = json.dumps({"title": title, "body": body, "url": url, "prompt": prompt}).encode()
+    payload = json.dumps({
+        "title": title, "body": body, "url": url, "prompt": prompt,
+        "id": notif_id, "created_at": created_at,
+    }).encode()
     loop = asyncio.get_event_loop()
     stale: list[str] = []
 
