@@ -271,6 +271,13 @@ class AllegroAgent(BaseAgent):
         "• Offer list / 'lista ofert' / 'zestawienie ofert' / 'pokaż oferty' / 'moje oferty' → get_active_offers\n"
         "• Offer stock / 'stany magazynowe' / 'ile mam' / 'które kończą się' → query_offers_by_stock\n"
         "• Offer prices / 'ceny ofert' / 'drogie oferty' / 'najtańsze' → query_offers_by_price\n"
+        "• Whenever the user's offer/stock question names a specific product, brand, model or "
+        "collection ('kolekcja X', 'produkty Y', 'włóczka Z') — you MUST pass that term through "
+        "the tool's name/assortment argument (get_active_offers: name, query_offers_by_stock: "
+        "name, get_products_to_reorder: assortment). NEVER omit it and dump the full unfiltered "
+        "list — that answers a different, broader question than the one asked. If two or more "
+        "collections are named ('kolekcja X i Y'), call the tool once per name and merge the "
+        "results into a single reply.\n"
         "• New/unread buyer messages — YES/NO or COUNT question ('czy mam nowe wiadomości', "
         "'czy są jakieś nowe wiadomości', 'ile mam nowych wiadomości') → get_message_threads with "
         "count_only=true. Do NOT return the whole thread list when the user only asked WHETHER or "
@@ -1196,10 +1203,14 @@ class AllegroAgent(BaseAgent):
             )
 
         if tool_name == "query_offers_by_stock":
+            name_filter = tool_input.get("name")
             max_stock = tool_input.get("max_stock")
             min_stock = tool_input.get("min_stock")
-            offers = await self._get_stock_relevant_offers()
-            logger.info("query_offers_by_stock: %d raw offers, max_stock=%s min_stock=%s", len(offers), max_stock, min_stock)
+            offers = await self._get_stock_relevant_offers(name_filter)
+            logger.info(
+                "query_offers_by_stock: %d raw offers, name=%r, max_stock=%s min_stock=%s",
+                len(offers), name_filter, max_stock, min_stock,
+            )
             aggregated = self._aggregate_offers_by_name(offers)
             logger.info("query_offers_by_stock: %d unique products after aggregation", len(aggregated))
             results = []
@@ -1212,13 +1223,15 @@ class AllegroAgent(BaseAgent):
                 results.append(g)
             logger.info("query_offers_by_stock: %d products match the stock filter", len(results))
             if not results:
-                return "Brak produktów spełniających podane kryteria stanów magazynowych."
+                scope = f" w „{name_filter}”" if name_filter else ""
+                return f"Brak produktów{scope} spełniających podane kryteria stanów magazynowych."
             label = []
             if max_stock is not None:
                 label.append(f"≤ {max_stock} szt.")
             if min_stock is not None:
                 label.append(f"≥ {min_stock} szt.")
-            header = f"Znaleziono **{len(results)}** produktów ({', '.join(label) or 'wszystkie'}), posortowane rosnąco wg stanu:\n"
+            scope = f" — „{name_filter}”" if name_filter else ""
+            header = f"Znaleziono **{len(results)}** produktów ({', '.join(label) or 'wszystkie'}){scope}, posortowane rosnąco wg stanu:\n"
             lines = [header]
             for g in results:
                 ids_str = ", ".join(f"`{i}`" for i in g["ids"])

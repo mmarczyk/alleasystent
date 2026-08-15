@@ -174,7 +174,15 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Optional: filter by offer name (partial match)."},
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Optional: filter by offer name (partial match, e.g. 'Himalaya "
+                            "Dolphin', 'YarnArt Jeans'). Set this whenever the user names a "
+                            "specific product, brand or collection — never leave it empty and "
+                            "return the whole catalogue when only one was asked about."
+                        ),
+                    },
                 },
             },
         },
@@ -206,6 +214,15 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Optional: filter to one product/brand/collection by partial name "
+                            "match (e.g. 'Himalaya Dolphin', 'YarnArt Jeans'). Set this whenever "
+                            "the user names a specific product, brand or collection — never leave "
+                            "it empty and return every product's stock when only one was asked about."
+                        ),
+                    },
                     "max_stock": {
                         "type": "integer",
                         "description": (
