@@ -1078,6 +1078,7 @@ const Notifications = (() => {
 
   function init() {
     _loadCache();  // instant paint from last known state, then refresh from network
+    _consumePending();
     refresh();
   }
 
@@ -1095,6 +1096,26 @@ const Notifications = (() => {
     _renderBadge(unread);
     _render();
     _saveCache({ items: _items, unread_count: unread });
+  }
+
+  // Covers the other launch path: the user saw the OS notification but opened
+  // the app itself (icon/app-switcher) instead of tapping it, so notificationclick
+  // never ran and no payload arrived via URL params. The notification the SW
+  // showed is still sitting in the OS tray/notification-center with its own data
+  // attached (sw.js's showNotification sets `data`) — read it back directly via
+  // the Notifications API instead of waiting on refresh()'s round-trip to learn
+  // the same thing. Tapped notifications are excluded automatically: sw.js's
+  // notificationclick already closes them before the app even loads.
+  async function _consumePending() {
+    if (!('serviceWorker' in navigator)) return;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const notifs = await reg.getNotifications({ tag: 'alleasystent-monitor' });
+      notifs.forEach(n => {
+        if (n.data?.id) applyPending({ ...n.data, read: false });
+        n.close();
+      });
+    } catch {}
   }
 
   return { open, close, refresh, activate, init, applyPending };
