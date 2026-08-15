@@ -528,9 +528,14 @@ class AllegroAgent(BaseAgent):
         return AgentResponse(text=final_text, agent_type=self.agent_name, metadata={"output_format": output_format})
 
     def _request_auth(self) -> AgentResponse:
+        # [ALLEGRO_LOGIN_BTN] is replaced client-side with a button that fetches
+        # a signed auth URL from the backend and redirects there. A plain
+        # "/allegro/login" markdown link would resolve against the frontend's
+        # own origin on the split GitHub Pages / Cloud Run deployment (no such
+        # route there) and 404 instead of reaching Allegro's login page.
         text = (
             "Aby uzyskać dostęp do Twojego sklepu Allegro, potrzebuję autoryzacji.\n\n"
-            "[➡ Zaloguj się przez Allegro](/allegro/login)\n\n"
+            "[ALLEGRO_LOGIN_BTN]\n\n"
             "Po zalogowaniu wróć tutaj i zadaj swoje pytanie ponownie."
         )
         return AgentResponse(text=text, agent_type=self.agent_name, metadata={"output_format": "chat"})
