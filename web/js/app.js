@@ -1234,6 +1234,14 @@ const Chat = (() => {
   function _applyMonitoringState(bubbleEl) {
     const inner = bubbleEl.querySelector('.msg-bubble');
     if (!inner) return;
+    // Re-auth prompt from the Allegro agent — must go through startAllegroLogin()
+    // (fetches a signed backend auth URL) rather than a plain href, since a bare
+    // "/allegro/login" link resolves against the wrong origin on the split
+    // GitHub Pages / Cloud Run deployment and 404s.
+    if (inner.innerHTML.includes('[ALLEGRO_LOGIN_BTN]')) {
+      inner.innerHTML = inner.innerHTML.replace('[ALLEGRO_LOGIN_BTN]',
+        '<button class="btn-monitoring" onclick="AllegroAuth.start(this)">➡ Zaloguj się przez Allegro</button>');
+    }
     // Fallback for old text markers (LLM paraphrasing)
     if (inner.innerHTML.includes('[ORDER_MONITORING_BTN]')) {
       inner.innerHTML = inner.innerHTML.replace('[ORDER_MONITORING_BTN]',
@@ -1623,6 +1631,89 @@ const Chat = (() => {
   return { send, handleKey, sendSuggestion, newConversation, loadConversation, deleteConversation, copyMessage, regenerate, retryLast };
 })();
 
+// ── Allegro OAuth login ──────────────────────────────────────────────────
+// Shared by the login-overlay button AND by [ALLEGRO_LOGIN_BTN] buttons the
+// chat agent injects when it needs re-auth mid-conversation. Both must go
+// through the backend for a signed auth URL and redirect there — a bare
+// href like "/allegro/login" is wrong on the GitHub Pages / Cloud Run split
+// deployment, where that path resolves against the frontend's own origin
+// (which doesn't have the route) instead of the backend's.
+//
+// Cache the OAuth URL in localStorage (20-minute TTL) so the button
+// redirects instantly even on a cold-start — the prefetch fires immediately
+// on page load to wake the container, and the result is cached for the next
+// time the user visits. The HMAC-signed state has no server-side expiry so
+// caching for a few minutes is safe.
+const _AUTH_URL_LS_KEY = 'ae_allegro_auth_url';
+const _AUTH_URL_TTL_MS = 20 * 60 * 1000; // 20 min — state is stateless HMAC, safe to cache longer
+
+function _getCachedAllegroAuthUrl() {
+  try {
+    const raw = localStorage.getItem(_AUTH_URL_LS_KEY);
+    if (!raw) return null;
+    const { url, ts } = JSON.parse(raw);
+    if (Date.now() - ts > _AUTH_URL_TTL_MS) { localStorage.removeItem(_AUTH_URL_LS_KEY); return null; }
+    return url;
+  } catch { return null; }
+}
+
+function _setCachedAllegroAuthUrl(url) {
+  try { localStorage.setItem(_AUTH_URL_LS_KEY, JSON.stringify({ url, ts: Date.now() })); } catch {}
+}
+
+// Seed the promise from cache so first click is instant; prefetch always
+// fires to wake the container and refresh the cached URL for next time.
+let _allegroAuthUrlPromise = Promise.resolve(_getCachedAllegroAuthUrl());
+
+function _prefetchAllegroAuthUrl() {
+  _allegroAuthUrlPromise = fetch(Settings.api('/allegro/auth-url'), { credentials: 'include' })
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(d => { _setCachedAllegroAuthUrl(d.auth_url); return d.auth_url; })
+    .catch(() => _getCachedAllegroAuthUrl()); // fall back to stale cache on network error
+}
+
+let _allegroLoginInProgress = false;
+async function startAllegroLogin(btn) {
+  if (_allegroLoginInProgress) return;
+  _allegroLoginInProgress = true;
+
+  // Fast path: cached URL → fire wake-up ping + redirect immediately (no spinner)
+  const cachedUrl = _getCachedAllegroAuthUrl();
+  if (cachedUrl) {
+    wakeContainer(); // start warming the container while user is on Allegro's page
+    window.location.href = cachedUrl;
+    return;
+  }
+
+  // Slow path: still waiting for backend
+  const origHTML = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.innerHTML = '⏳ Łączenie…';
+    btn.style.opacity = '0.65';
+    btn.style.pointerEvents = 'none';
+  }
+
+  try {
+    const auth_url = await _allegroAuthUrlPromise;
+    if (!auth_url) throw new Error('no url');
+    window.location.href = auth_url;
+    // don't restore — page is navigating away
+  } catch {
+    if (btn) {
+      btn.innerHTML = origHTML;
+      btn.style.opacity = '';
+      btn.style.pointerEvents = '';
+    }
+    _allegroLoginInProgress = false;
+    _prefetchAllegroAuthUrl(); // refresh so user can retry
+    UI.toast('Błąd połączenia z backendem', 'error');
+  }
+}
+
+// Exposed for [ALLEGRO_LOGIN_BTN] buttons injected into chat messages (see
+// _applyMonitoringState), same pattern as OrderMonitor/InvoiceMonitor/MessageMonitor.
+window.AllegroAuth = { start: startAllegroLogin };
+
 // ── Boot ─────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   OfflineBanner.init();
@@ -1630,77 +1721,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   Store.load();
   updateVersionInfo();
 
-  // ── Allegro auth URL cache ────────────────────────────────────────────────
-  // Cache the OAuth URL in localStorage (4-minute TTL) so the Login button
-  // redirects instantly even on a cold-start — the prefetch fires immediately
-  // on page load to wake the container, and the result is cached for the next
-  // time the user visits.  The HMAC-signed state has no server-side expiry so
-  // caching for a few minutes is safe.
-  const _AUTH_URL_LS_KEY = 'ae_allegro_auth_url';
-  const _AUTH_URL_TTL_MS = 20 * 60 * 1000; // 20 min — state is stateless HMAC, safe to cache longer
-
-  function _getCachedAuthUrl() {
-    try {
-      const raw = localStorage.getItem(_AUTH_URL_LS_KEY);
-      if (!raw) return null;
-      const { url, ts } = JSON.parse(raw);
-      if (Date.now() - ts > _AUTH_URL_TTL_MS) { localStorage.removeItem(_AUTH_URL_LS_KEY); return null; }
-      return url;
-    } catch { return null; }
-  }
-
-  function _setCachedAuthUrl(url) {
-    try { localStorage.setItem(_AUTH_URL_LS_KEY, JSON.stringify({ url, ts: Date.now() })); } catch {}
-  }
-
-  // Seed the promise from cache so first click is instant; prefetch always
-  // fires to wake the container and refresh the cached URL for next time.
-  let _allegroAuthUrlPromise = Promise.resolve(_getCachedAuthUrl());
-
-  function _prefetchAllegroAuthUrl() {
-    _allegroAuthUrlPromise = fetch(Settings.api('/allegro/auth-url'), { credentials: 'include' })
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then(d => { _setCachedAuthUrl(d.auth_url); return d.auth_url; })
-      .catch(() => _getCachedAuthUrl()); // fall back to stale cache on network error
-  }
   _prefetchAllegroAuthUrl();
 
   const loginBtn = document.getElementById('login-btn');
   if (loginBtn) {
     loginBtn.removeAttribute('href');
-    let _loginInProgress = false;
-    loginBtn.addEventListener('click', async (e) => {
+    loginBtn.addEventListener('click', (e) => {
       e.preventDefault();
-      if (_loginInProgress) return;
-      _loginInProgress = true;
-
-      // Fast path: cached URL → fire wake-up ping + redirect immediately (no spinner)
-      const cachedUrl = _getCachedAuthUrl();
-      if (cachedUrl) {
-        wakeContainer(); // start warming the container while user is on Allegro's page
-        window.location.href = cachedUrl;
-        return;
-      }
-
-      // Slow path: still waiting for backend
-      const origHTML = loginBtn.innerHTML;
-      loginBtn.innerHTML = '⏳ Łączenie…';
-      loginBtn.style.opacity = '0.65';
-      loginBtn.style.pointerEvents = 'none';
-
-      try {
-        const auth_url = await _allegroAuthUrlPromise;
-        if (!auth_url) throw new Error('no url');
-        window.location.href = auth_url;
-        // don't restore — page is navigating away
-      } catch {
-        loginBtn.innerHTML = origHTML;
-        loginBtn.style.opacity = '';
-        loginBtn.style.pointerEvents = '';
-        _loginInProgress = false;
-        _prefetchAllegroAuthUrl(); // refresh so user can retry
-        UI.toast('Błąd połączenia z backendem', 'error');
-      }
+      startAllegroLogin(loginBtn);
     });
   }
 
