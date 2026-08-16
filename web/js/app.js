@@ -1111,10 +1111,14 @@ const Notifications = (() => {
     try {
       const reg = await navigator.serviceWorker.ready;
       const notifs = await reg.getNotifications({ tag: 'alleasystent-monitor' });
-      notifs.forEach(n => {
-        if (n.data?.id) applyPending({ ...n.data, read: false });
-        n.close();
-      });
+      // getNotifications() doesn't guarantee any particular order — applyPending()
+      // unshifts each entry to the front, so feeding it newest-last (oldest first)
+      // is what leaves the newest one at the very top once every entry has landed.
+      notifs
+        .slice()
+        .sort((a, b) => new Date(a.data?.created_at || 0) - new Date(b.data?.created_at || 0))
+        .forEach(n => { if (n.data?.id) applyPending({ ...n.data, read: false }); });
+      notifs.forEach(n => n.close());
     } catch {}
   }
 
