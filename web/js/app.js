@@ -975,11 +975,21 @@ const Notifications = (() => {
   let _items = [];
   const CACHE_KEY = 'ae_notifications_cache';
 
+  // Entries can land in `_items` from several independent sources — the cached
+  // snapshot, the server's refresh(), a tapped notification's URL params, a
+  // still-pending OS tray notification — each trusting its own idea of "goes on
+  // top". Re-sorting by created_at on every mutation, instead of relying on each
+  // source to insert in the right relative position, is what keeps the list
+  // correct newest-first regardless of which sources have (or haven't yet) run.
+  function _sortByNewest(items) {
+    return [...items].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }
+
   function _loadCache() {
     try {
       const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
       if (!cached) return false;
-      _items = cached.items || [];
+      _items = _sortByNewest(cached.items || []);
       _renderBadge(cached.unread_count || 0);
       _render();
       return true;
@@ -1040,7 +1050,7 @@ const Notifications = (() => {
       const res = await fetch(Settings.api('/notifications'), { credentials: 'include', headers: Auth.headers() });
       if (!res.ok) return;
       const data = await res.json();
-      _items = data.items || [];
+      _items = _sortByNewest(data.items || []);
       _renderBadge(data.unread_count || 0);
       _render();
       _saveCache(data);
@@ -1091,7 +1101,7 @@ const Notifications = (() => {
   // "show it now" shortcut, not a second source of truth.
   function applyPending(entry) {
     if (!entry?.id || _items.some(i => i.id === entry.id)) return;
-    _items = [entry, ..._items];
+    _items = _sortByNewest([entry, ..._items]);
     const unread = _items.filter(i => !i.read).length;
     _renderBadge(unread);
     _render();
@@ -1111,14 +1121,13 @@ const Notifications = (() => {
     try {
       const reg = await navigator.serviceWorker.ready;
       const notifs = await reg.getNotifications({ tag: 'alleasystent-monitor' });
-      // getNotifications() doesn't guarantee any particular order — applyPending()
-      // unshifts each entry to the front, so feeding it newest-last (oldest first)
-      // is what leaves the newest one at the very top once every entry has landed.
-      notifs
-        .slice()
-        .sort((a, b) => new Date(a.data?.created_at || 0) - new Date(b.data?.created_at || 0))
-        .forEach(n => { if (n.data?.id) applyPending({ ...n.data, read: false }); });
-      notifs.forEach(n => n.close());
+      // Order doesn't matter here — applyPending() re-sorts the whole list by
+      // created_at on every call, so it lands correctly regardless of the order
+      // getNotifications() (which makes no ordering guarantee) hands them back in.
+      notifs.forEach(n => {
+        if (n.data?.id) applyPending({ ...n.data, read: false });
+        n.close();
+      });
     } catch {}
   }
 
