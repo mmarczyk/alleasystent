@@ -226,6 +226,15 @@ class AllegroAgent(BaseAgent):
         "When showing prices, always include the PLN currency. "
         "Respond in the same language as the user's question (Polish or English). "
         "Do not make up or guess any order IDs or prices — always retrieve them via tools. "
+        "CLARIFYING QUESTIONS — CRITICAL: You MUST call a tool every turn, but that tool does not "
+        "have to be a data tool. If the message plus conversation history does not give you enough "
+        "to pick the right tool OR to fill one of its REQUIRED parameters (order_id, invoice_uuid, "
+        "buyer_login, a date/period, a product/assortment name, a price, ...) without inventing or "
+        "guessing it, call ask_clarifying_question instead — never fabricate a value just to satisfy "
+        "a tool call, and never silently pick between two plausible tools when the wording is truly "
+        "ambiguous. Do not overuse it: if the value is already in this conversation (given earlier "
+        "by the user or by you), or the MANDATORY TOOL CALLS rules below already resolve which tool "
+        "and arguments to use, call that tool directly — do not ask for information you already have.\n"
         "MANDATORY TOOL CALLS — these question types MUST trigger a tool, never be answered from memory:\n"
         "• Order LIST for a period, no cost/profit/earnings wording — 'lista zamówień', 'pokaż "
         "wszystkie zamówienia z tego miesiąca', 'zamówienia z ostatniego tygodnia' → get_orders "
@@ -259,7 +268,8 @@ class AllegroAgent(BaseAgent):
         "one named order returned a 50-row table of unrelated orders). Only fall back to get_orders "
         "if you genuinely have no order_id at all (e.g. you'd have to search by buyer name/company, "
         "which get_orders can't do either — buyer_login is the Allegro login, not a company or "
-        "person's name — in that case tell the user you need the order_id or the buyer's Allegro login).\n"
+        "person's name — in that case call ask_clarifying_question asking for the order_id or the "
+        "buyer's Allegro login).\n"
         "• Whether/how many orders were PLACED in a specific TIME WINDOW ('czy dzisiaj po 8 rano były "
         "jakieś zamówienia', 'ile zamówień wpłynęło wczoraj', 'zamówienia złożone po godzinie X', "
         "'zamówienia z ostatniej godziny') → get_orders with bought_after_local/bought_before_local. "
@@ -316,7 +326,8 @@ class AllegroAgent(BaseAgent):
         "'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X'):\n"
         "  - ONE specific order named (a concrete order_id from context or given directly by the "
         "user) → issue_invoice_for_order. This is REAL — it actually creates the invoice in inFakt. "
-        "Never invent or guess an order_id; if you don't have one, ask the user or look it up first.\n"
+        "Never invent or guess an order_id; if you don't have one, call ask_clarifying_question or "
+        "look it up first.\n"
         "  - Batch / whole month, no single order named ('wystaw wszystkie faktury', 'wystaw brakujące "
         "faktury za ten miesiąc') → preview_pending_invoices. This does NOT send anything — bulk "
         "issuance is preview-only by design. Tell the user clearly that nothing was actually issued and "
@@ -328,9 +339,9 @@ class AllegroAgent(BaseAgent):
         "  - attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
         "Allegro order, so the buyer sees it on their order page. Needs order_id + invoice_uuid "
         "(invoice_uuid comes from the issue_invoice_for_order result earlier in this conversation — "
-        "never guess it, ask if it's not in context).\n"
+        "never guess it, call ask_clarifying_question if it's not in context).\n"
         "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
-        "invoice_uuid, same rule — never guess it.\n"
+        "invoice_uuid, same rule — never guess it, call ask_clarifying_question instead.\n"
         "  - If the user's ORIGINAL request already named the channel(s) ('wystaw i wyślij do KSeF i "
         "Allegro', 'wystaw i dodaj do Allegro') — just call the matching tool(s) directly, no need to ask.\n"
         "  - Otherwise: once the user confirms the issued invoice looks fine ('ok', 'faktura jest ok', "
@@ -449,6 +460,23 @@ class AllegroAgent(BaseAgent):
                 # model ignored tool_choice — interpret whatever it said
                 logger.warning("AllegroAgent: model skipped tool_choice=required (round %d)", tool_rounds + 1)
                 return AgentResponse(text=msg.content or "", agent_type=self.agent_name, metadata={"output_format": "chat"})
+
+            # The model couldn't determine the right tool or a required parameter
+            # from the query — it asked instead of guessing/hallucinating an ID.
+            # Short-circuit here: no real Allegro call, no interpret step, and any
+            # other tool call the model bundled into the same round is dropped
+            # rather than executed against guessed arguments.
+            clarify_call = next(
+                (tc for tc in msg.tool_calls if tc.function.name == "ask_clarifying_question"), None
+            )
+            if clarify_call:
+                try:
+                    clarify_args = json.loads(clarify_call.function.arguments)
+                except json.JSONDecodeError:
+                    clarify_args = {}
+                question = clarify_args.get("question") or "Czy możesz doprecyzować, o co dokładnie chodzi?"
+                logger.info("[allegro] ask_clarifying_question: %r | query=%.80r", question, query)
+                return AgentResponse(text=question, agent_type=self.agent_name, metadata={"output_format": "chat"})
 
             messages.append({
                 "role": "assistant",

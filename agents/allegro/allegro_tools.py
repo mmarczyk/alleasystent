@@ -794,6 +794,35 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_clarifying_question",
+            "description": (
+                "Call this INSTEAD of any data tool when the user's message (plus conversation "
+                "history) does NOT give you enough information to pick the right tool or to fill "
+                "one of its REQUIRED parameters — e.g. you would have to invent/guess an order_id, "
+                "invoice_uuid, buyer_login, date, product name, or price that was never given "
+                "directly and was never established earlier in this conversation. Also use this "
+                "when the request is genuinely ambiguous between two different tools/intents and "
+                "the wording alone doesn't tell you which one the user means. "
+                "Ask ONE short, specific question, in the same language as the user's message, "
+                "naming exactly what you need (e.g. which order — ID or buyer login; which date "
+                "or period; which product). Do NOT call any other tool in the same turn — this is "
+                "a stop-and-ask, not a guess-and-verify."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The clarifying question to show the user, in their language.",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
 ]
 
 
@@ -849,6 +878,8 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "disable_order_monitoring": "action",
     "disable_invoice_monitoring": "action",
     "disable_message_monitoring": "action",
+    # Dopytanie użytkownika, gdy brak narzędzia/parametru da się jednoznacznie ustalić
+    "ask_clarifying_question": "chat",
 }
 
 # When several tools are called in the same turn, the most "structured" format
