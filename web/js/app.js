@@ -633,7 +633,26 @@ const Sidebar = (() => {
     document.getElementById('sidebar').classList.remove('open');
   }
 
-  return { render, ask, openDoc };
+  const TAB_KEY = 'ae_sidebar_tab';
+
+  function switchTab(name) {
+    const panels = { faq: 'sidebar-faq', docs: 'sidebar-docs' };
+    Object.keys(panels).forEach(key => {
+      document.getElementById(panels[key])?.classList.toggle('hidden', key !== name);
+      const tab = document.getElementById(`sidebar-tab-${key}`);
+      if (!tab) return;
+      tab.classList.toggle('active', key === name);
+      tab.setAttribute('aria-selected', key === name ? 'true' : 'false');
+    });
+    try { localStorage.setItem(TAB_KEY, name); } catch {}
+  }
+
+  function initTab() {
+    const saved = (() => { try { return localStorage.getItem(TAB_KEY); } catch { return null; } })();
+    switchTab(saved === 'docs' ? 'docs' : 'faq');
+  }
+
+  return { render, ask, openDoc, switchTab, initTab };
 })();
 
 // ── Backend API ──────────────────────────────────
@@ -1976,6 +1995,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const convs = Store.all();
   if (!convs.length) Store.create('Nowa rozmowa');
 
+  Sidebar.initTab();
   Sidebar.render();
 
   const active = Store.active();
