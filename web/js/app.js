@@ -485,6 +485,157 @@ const Store = (() => {
   return { load, create, active, setActive, addMessage, updateLastMessage, deleteConv, clearAll, all: () => convs };
 })();
 
+// ── Sidebar (FAQ + Documents) ─────────────────────
+// Replaces the old chat-history list: surfaces the most common questions
+// (aggregated across all conversations, so several phrasings of "new orders?"
+// collapse into one entry) and every document/summary the assistant has
+// generated, instead of making the user hunt through past threads.
+const Sidebar = (() => {
+  const STOPWORDS = new Set([
+    'moje','moich','moja','mam','jakie','jakich','jaka','jaki','czy','o','w','na','z','ze','do','po',
+    'dla','i','a','to','są','sa','jest','mi','mnie','mój','moim','ostatnie','ostatnich','pokaż','pokaz',
+    'pokazać','pokazac','podaj','sprawdź','sprawdz','proszę','prosze','te','ten','ta','jak','ile','czym',
+    'wszystkie','aktualne','aktywne','nowe','nowych','wygląda','wyglada','żeby','zeby','się','sie',
+  ]);
+  const PL_MAP = { ą:'a', ć:'c', ę:'e', ł:'l', ń:'n', ó:'o', ś:'s', ź:'z', ż:'z' };
+  const SIM_THRESHOLD = 0.34;
+  const MAX_FAQ = 8;
+  const MAX_DOCS = 30;
+
+  function _sigWords(text) {
+    const norm = text.toLowerCase()
+      .replace(/[ąćęłńóśźż]/g, c => PL_MAP[c])
+      .replace(/[^a-z0-9\s]/g, ' ');
+    return new Set(norm.split(/\s+/).filter(w => w.length > 2 && !STOPWORDS.has(w)));
+  }
+
+  function _jaccard(a, b) {
+    if (!a.size && !b.size) return 1;
+    let inter = 0;
+    a.forEach(w => { if (b.has(w)) inter++; });
+    const union = a.size + b.size - inter;
+    return union === 0 ? 0 : inter / union;
+  }
+
+  // Groups differently-worded user questions into one aggregated entry (e.g.
+  // "pokaż nowe zamówienia" / "czy są nowe zamówienia?" / "sprawdź zamówienia"
+  // → one card) by clustering on shared significant words, then ranks
+  // clusters by how often something in that cluster was asked.
+  function _aggregateQuestions() {
+    const clusters = [];
+    Store.all().forEach(c => c.messages.forEach(m => {
+      if (m.role !== 'user') return;
+      const text = m.content.trim();
+      if (!text || text.length > 200) return;
+      const words = _sigWords(text);
+      let best = null, bestSim = 0;
+      clusters.forEach(cl => {
+        const sim = _jaccard(words, cl.words);
+        if (sim > bestSim) { bestSim = sim; best = cl; }
+      });
+      if (best && bestSim >= SIM_THRESHOLD) {
+        best.count++;
+        best.examples.set(text, (best.examples.get(text) || 0) + 1);
+      } else {
+        clusters.push({ words, count: 1, examples: new Map([[text, 1]]) });
+      }
+    }));
+    return clusters
+      .sort((a, b) => b.count - a.count)
+      .slice(0, MAX_FAQ)
+      .map(cl => {
+        let rep = null, repCount = -1;
+        cl.examples.forEach((cnt, text) => {
+          if (cnt > repCount || (cnt === repCount && (!rep || text.length < rep.length))) {
+            rep = text; repCount = cnt;
+          }
+        });
+        return { text: rep, count: cl.count };
+      });
+  }
+
+  // Mirrors Chat.buildBubble's isArtifact rule: a table only counts once it
+  // has real data rows, document/dashboard replies always do.
+  function _isDoc(content, format) {
+    if (format === 'document' || format === 'dashboard') return true;
+    if (format !== 'table') return false;
+    const rows = content.split('\n').filter(l =>
+      /^\s*\|.*\|\s*$/.test(l) && !/^\s*\|[\s:|-]+\|\s*$/.test(l));
+    return rows.length > 1; // header row + at least one data row
+  }
+
+  function _docTitle(content, format) {
+    const heading = content.match(/^#{1,3}\s+(.+)/m);
+    if (heading) return heading[1].replace(/[*`_]/g, '').trim().slice(0, 70);
+    const clean = content.replace(/[#*`_[\]|]/g, ' ').replace(/\s+/g, ' ').trim();
+    return clean.slice(0, 70) || (format === 'dashboard' ? 'Analiza' : 'Dokument');
+  }
+
+  function _collectDocs() {
+    const docs = [];
+    Store.all().forEach(c => c.messages.forEach(m => {
+      if (m.role !== 'assistant' || !m.content) return;
+      const format = m.format || 'chat';
+      if (!_isDoc(m.content, format)) return;
+      docs.push({ ts: m.ts || 0, format, title: _docTitle(m.content, format), content: m.content });
+    }));
+    return docs.sort((a, b) => b.ts - a.ts).slice(0, MAX_DOCS);
+  }
+
+  let _faqCache = [];
+  let _docsCache = [];
+
+  function _renderFaq() {
+    const el = document.getElementById('sidebar-faq');
+    if (!el) return;
+    _faqCache = _aggregateQuestions();
+    el.innerHTML = _faqCache.length ? _faqCache.map((q, i) => `
+      <button class="sidebar-list-item" onclick="Sidebar.ask(${i})" title="${escHtml(q.text)}">
+        <span class="sli-icon">💡</span>
+        <span class="sli-text">${escHtml(q.text)}</span>
+        ${q.count > 1 ? `<span class="sli-count">${q.count}×</span>` : ''}
+      </button>`).join('')
+      : '<p class="sidebar-empty">Zadaj pytanie na czacie, aby zobaczyć tu najczęstsze tematy.</p>';
+  }
+
+  const DOC_ICON = { document: '📄', dashboard: '📊', table: '🗂️' };
+
+  function _renderDocs() {
+    const el = document.getElementById('sidebar-docs');
+    if (!el) return;
+    _docsCache = _collectDocs();
+    el.innerHTML = _docsCache.length ? _docsCache.map((d, i) => `
+      <button class="sidebar-list-item" onclick="Sidebar.openDoc(${i})" title="${escHtml(d.title)}">
+        <span class="sli-icon">${DOC_ICON[d.format] || '📄'}</span>
+        <span class="sli-text">${escHtml(d.title)}</span>
+      </button>`).join('')
+      : '<p class="sidebar-empty">Tu pojawią się dokumenty i podsumowania wygenerowane po zapytaniach.</p>';
+  }
+
+  function render() {
+    _renderFaq();
+    _renderDocs();
+  }
+
+  // Clicking a common question starts a fresh conversation with it, rather
+  // than appending onto whatever thread happens to be active right now.
+  function ask(i) {
+    const q = _faqCache[i];
+    if (!q) return;
+    Chat.newConversation();
+    Chat.send(q.text);
+  }
+
+  function openDoc(i) {
+    const d = _docsCache[i];
+    if (!d) return;
+    DocViewer.open(d.title, d.content, d.format);
+    document.getElementById('sidebar').classList.remove('open');
+  }
+
+  return { render, ask, openDoc };
+})();
+
 // ── Backend API ──────────────────────────────────
 const Backend = (() => {
   async function _doQuery(message, sessionId) {
@@ -1211,16 +1362,7 @@ const Chat = (() => {
   let _welcomeEl = null;  // persistent ref so GC never collects the node
 
   function renderSidebar() {
-    const list = document.getElementById('sidebar-history');
-    const convs = Store.all();
-    const active = Store.active();
-    list.innerHTML = convs.length ? convs.map(c => `
-      <div class="history-item ${c.id === active?.id ? 'active' : ''}" onclick="Chat.loadConversation('${c.id}')">
-        <span class="hi-icon">💬</span>
-        <span style="overflow:hidden;text-overflow:ellipsis;flex:1">${escHtml(c.title)}</span>
-        <button class="hi-del" onclick="event.stopPropagation();Chat.deleteConversation('${c.id}')" title="Usuń">✕</button>
-      </div>`).join('')
-    : '<p style="color:var(--muted);font-size:.8rem;padding:.5rem .75rem">Brak rozmów</p>';
+    Sidebar.render();
   }
 
   function renderMessages() {
@@ -1834,18 +1976,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const convs = Store.all();
   if (!convs.length) Store.create('Nowa rozmowa');
 
-  (() => {
-    const list = document.getElementById('sidebar-history');
-    const all = Store.all();
-    const active = Store.active();
-    list.innerHTML = all.length ? all.map(c => `
-      <div class="history-item ${c.id === active?.id ? 'active' : ''}" onclick="Chat.loadConversation('${c.id}')">
-        <span class="hi-icon">💬</span>
-        <span style="overflow:hidden;text-overflow:ellipsis;flex:1">${c.title}</span>
-        <button class="hi-del" onclick="event.stopPropagation();Chat.deleteConversation('${c.id}')" title="Usuń">✕</button>
-      </div>`).join('')
-    : '<p style="color:var(--muted);font-size:.8rem;padding:.5rem .75rem">Brak rozmów</p>';
-  })();
+  Sidebar.render();
 
   const active = Store.active();
   if (!active || !active.messages.length) {
