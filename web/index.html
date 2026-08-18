@@ -135,12 +135,20 @@
         <span class="logo-icon">🛒</span>
         <span class="logo-text">AllEasystent</span>
       </div>
-      <button class="btn btn-new-chat" onclick="Chat.newConversation()">
-        + Nowa rozmowa
-      </button>
     </div>
-    <div class="sidebar-history" id="sidebar-history">
-      <!-- conversation list injected by JS -->
+    <div class="sidebar-sections">
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">💡 Najczęstsze pytania</div>
+        <div class="sidebar-section-list" id="sidebar-faq">
+          <!-- aggregated question list injected by JS -->
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">📄 Dokumenty</div>
+        <div class="sidebar-section-list" id="sidebar-docs">
+          <!-- generated documents/summaries injected by JS -->
+        </div>
+      </div>
     </div>
     <div class="sidebar-bottom">
       <div id="user-info" style="display:flex; align-items:center; gap:8px; padding:.5rem .75rem; font-size:.85rem; color:var(--text-muted,#888); overflow:hidden;"></div>
