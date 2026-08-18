@@ -137,17 +137,19 @@
       </div>
     </div>
     <div class="sidebar-sections">
-      <div class="sidebar-section">
-        <div class="sidebar-section-title">💡 Najczęstsze pytania</div>
-        <div class="sidebar-section-list" id="sidebar-faq">
-          <!-- aggregated question list injected by JS -->
-        </div>
+      <div class="sidebar-tabs" role="tablist">
+        <button class="sidebar-tab active" id="sidebar-tab-faq" role="tab" aria-selected="true" onclick="Sidebar.switchTab('faq')">
+          <span class="stab-icon">💡</span><span class="stab-label">Pytania</span>
+        </button>
+        <button class="sidebar-tab" id="sidebar-tab-docs" role="tab" aria-selected="false" onclick="Sidebar.switchTab('docs')">
+          <span class="stab-icon">📄</span><span class="stab-label">Dokumenty</span>
+        </button>
       </div>
-      <div class="sidebar-section">
-        <div class="sidebar-section-title">📄 Dokumenty</div>
-        <div class="sidebar-section-list" id="sidebar-docs">
-          <!-- generated documents/summaries injected by JS -->
-        </div>
+      <div class="sidebar-section-list" id="sidebar-faq" role="tabpanel">
+        <!-- aggregated question list injected by JS -->
+      </div>
+      <div class="sidebar-section-list hidden" id="sidebar-docs" role="tabpanel">
+        <!-- generated documents/summaries injected by JS -->
       </div>
     </div>
     <div class="sidebar-bottom">
