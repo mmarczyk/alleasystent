@@ -1185,6 +1185,52 @@ const ReturnsMonitor = (() => {
   return { isEnabled, enable, disable, init };
 })();
 
+// ── Invoice reminder ──────────────────────────────
+// Unlike InvoiceMonitor above (a plain "new order needs an invoice"
+// notifier), this one actively asks in chat whether to issue pending
+// invoices and adapts to the reply. Detection AND the follow-up
+// conversation run entirely server-side (services/invoice_reminder.py, the
+// same Cloud Run Job cadence as OrderMonitor/ReturnsMonitor) — this object
+// only handles the toggle (push subscribe + enable/disable).
+const InvoiceReminder = (() => {
+  const ENABLED_KEY = 'ae_invoice_reminder_enabled';
+
+  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
+
+  async function enable() {
+    const pushOk = await WebPush.subscribe();
+    localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/invoice-reminder/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+    if (pushOk) {
+      UI.toast('✓ Przypomnienia o fakturach włączone (co 2h, 7:00-20:00)');
+    } else {
+      UI.toast('⚠️ Przypomnienia włączone, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
+    }
+    document.querySelectorAll('.btn-invoice-reminder').forEach(btn => {
+      btn.outerHTML = '<span class="monitoring-badge">✓ Przypomnienia o fakturach aktywne</span>';
+    });
+    return true;
+  }
+
+  function disable() {
+    localStorage.removeItem(ENABLED_KEY);
+    fetch(Settings.api('/allegro/invoice-reminder/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+  }
+
+  function init() {
+    if (!isEnabled()) return;
+    if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      WebPush.subscribe().catch(() => {});
+    }
+  }
+
+  return { isEnabled, enable, disable, init };
+})();
+
 // ── Notifications (bell icon panel) ──────────────
 const Notifications = (() => {
   let _items = [];
@@ -1372,6 +1418,7 @@ const UI = (() => {
     document.getElementById('set-toggle-invoices').checked = InvoiceMonitor.isEnabled();
     document.getElementById('set-toggle-messages').checked = MessageMonitor.isEnabled();
     document.getElementById('set-toggle-returns').checked = ReturnsMonitor.isEnabled();
+    document.getElementById('set-toggle-invoice-reminder').checked = InvoiceReminder.isEnabled();
     updateVersionInfo();
   }
 
@@ -1394,6 +1441,10 @@ const UI = (() => {
 
   function toggleReturnsMonitoring(on) {
     if (on) ReturnsMonitor.enable(); else ReturnsMonitor.disable();
+  }
+
+  function toggleInvoiceReminder(on) {
+    if (on) InvoiceReminder.enable(); else InvoiceReminder.disable();
   }
 
   function toggleSidebar() {
@@ -1422,6 +1473,7 @@ const UI = (() => {
   return {
     toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
     toggleOrderMonitoring, toggleInvoiceMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
+    toggleInvoiceReminder,
   };
 })();
 
@@ -2094,6 +2146,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   InvoiceMonitor.init(_cameFromNotification);
   MessageMonitor.init(_cameFromNotification);
   ReturnsMonitor.init();
+  InvoiceReminder.init();
 
   Notifications.init();
   // Tapping a system push notification opens straight into the Notifications

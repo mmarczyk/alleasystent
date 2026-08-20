@@ -167,6 +167,33 @@ class Orchestrator:
 
     async def handle(self, message: IncomingMessage, user_id: str | None = None) -> AgentResponse:
         """Main entry point — classify, route, persist, return."""
+        # Give the invoice reminder first look at every incoming message: if it
+        # has an open "wystawić faktury?" ask outstanding for this user, this
+        # interprets the reply (issue now / snooze / snooze-for-how-long /
+        # turn reminders off) and answers directly — it never relies on the
+        # normal Firestore conversation history, since the seller may reply
+        # from a different chat thread than the one the reminder was written
+        # into (see services/invoice_reminder.py's module docstring). A
+        # message unrelated to an open reminder falls through unchanged.
+        if user_id:
+            try:
+                from services.invoice_reminder import handle_reply as _handle_invoice_reminder_reply
+                reminder_text = await _handle_invoice_reminder_reply(user_id, message.text)
+            except Exception as exc:
+                logger.warning("Invoice reminder reply handling failed: %s", exc)
+                reminder_text = None
+            if reminder_text is not None:
+                session = await self._firestore.get_or_create_session(
+                    session_id=message.session_id,
+                    channel=message.channel,
+                    sender_id=message.sender_id,
+                )
+                response = AgentResponse(text=reminder_text, agent_type="invoice_reminder")
+                session.add_message(MessageRole.USER, message.text)
+                session.add_message(MessageRole.ASSISTANT, response.text)
+                await self._firestore.save_session(session)
+                return response
+
         session = await self._firestore.get_or_create_session(
             session_id=message.session_id,
             channel=message.channel,

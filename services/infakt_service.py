@@ -246,3 +246,38 @@ def _delivery_service(cost: float, is_production: bool) -> dict[str, Any]:
     if is_production:
         svc["flat_rate_tax_symbol"] = _FLAT_RATE_TAX_SYMBOL
     return svc
+
+
+# ── Single-order issuance ─────────────────────────────────────────────────────
+# Shared by the chat tool (AllegroAgent._issue_invoice_for_order) and the
+# invoice reminder's "issue now" action (services/invoice_reminder.py) —
+# both issue one concrete order at a time through this same path, see the
+# module docstring above for why bulk issuance stays preview-only.
+
+async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -> str:
+    """Create ONE real VAT invoice in inFakt for a single named Allegro order."""
+    order = await allegro.get_order(order_id)
+    if not order.invoice_required:
+        return f"Zamówienie `{order_id}`: kupujący nie poprosił o fakturę VAT — nic nie wystawiono."
+
+    existing = await allegro.get_order_invoices(order_id)
+    if existing:
+        return f"Zamówienie `{order_id}`: faktura już istnieje w Allegro — nie wystawiono kolejnej."
+
+    try:
+        address = await allegro.get_order_invoice_data(order_id)
+        payload = build_invoice_payload(order, address, is_production)
+        infakt = InfaktService.get_instance()
+        status = await infakt.create_invoice(payload)
+        invoice_uuid = status["invoice_uuid"]
+        link = await infakt.get_share_link(invoice_uuid)
+        buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
+        return (
+            f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt: {link}\n"
+            f"ID faktury w inFakt: `{invoice_uuid}`\n"
+            f"Nabywca: {buyer_kind}.\n"
+            "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
+        )
+    except (InfaktAPIError, InfaktTaskError, TimeoutError) as exc:
+        logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
+        return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
