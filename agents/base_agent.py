@@ -25,6 +25,7 @@ from openai import (
     RateLimitError,
 )
 
+from agents.perf import StageTimer
 from agents.tool_gap_analyzer import analyze_for_tool_gap
 from config.settings import get_settings
 from models.conversation import AgentResponse
@@ -128,6 +129,7 @@ class BaseAgent(ABC):
 
         tools = self._get_tools()
         model_pool = self._get_model_pool()
+        perf = StageTimer(f"{self.agent_name}_agent.run")
 
         for iteration in range(MAX_ITERATIONS):
             logger.info("[%s] Iteration %d, pool=%s", self.agent_name, iteration + 1, model_pool)
@@ -135,16 +137,26 @@ class BaseAgent(ABC):
             api_kwargs: dict[str, Any] = {
                 "messages": messages,
                 "max_tokens": self._settings.gemini_max_tokens,
+                # Tool selection and result formatting are both deterministic,
+                # data-driven tasks here — no extended reasoning needed. Thinking-
+                # capable models (gemini-3.5-flash, 2.5-flash) otherwise spend part
+                # of max_tokens on invisible reasoning before the visible answer,
+                # which against a large max_tokens budget can add many seconds per
+                # call (see agents/orchestrator.py._classify_with_llm for the same
+                # fix, and agents/allegro/allegro_agent.py.run for where this was
+                # traced as the main cause of slow replies).
+                "reasoning_effort": "none",
             }
             if tools:
                 api_kwargs["tools"] = tools
 
-            response = await _call_with_retry(
-                self._client,
-                model_pool,
-                f"{self.agent_name}/iter{iteration+1}",
-                **api_kwargs,
-            )
+            with perf.stage(f"llm_iter{iteration+1}"):
+                response = await _call_with_retry(
+                    self._client,
+                    model_pool,
+                    f"{self.agent_name}/iter{iteration+1}",
+                    **api_kwargs,
+                )
             choice = response.choices[0]
             msg = choice.message
 
@@ -162,6 +174,7 @@ class BaseAgent(ABC):
                             ],
                         )
                     )
+                perf.log(iterations=iteration + 1)
                 return AgentResponse(
                     text=final_text,
                     agent_type=self.agent_name,
@@ -184,7 +197,8 @@ class BaseAgent(ABC):
                     tool_input = {}
                 logger.info("[%s] Calling tool: %s(%s)", self.agent_name, tool_name, tool_input)
                 try:
-                    result_text = await self._execute_tool(tool_name, tool_input)
+                    with perf.stage(f"tool:{tool_name}"):
+                        result_text = await self._execute_tool(tool_name, tool_input)
                 except Exception as exc:
                     logger.exception("[%s] Tool %s failed: %s", self.agent_name, tool_name, exc)
                     result_text = "An internal error occurred. Please try again."
@@ -195,6 +209,7 @@ class BaseAgent(ABC):
                 })
 
         logger.warning("[%s] Reached max iterations (%d)", self.agent_name, MAX_ITERATIONS)
+        perf.log(iterations=MAX_ITERATIONS, result="max_iterations")
         return AgentResponse(
             text="I'm sorry, I couldn't complete the request within the allowed steps.",
             agent_type=self.agent_name,

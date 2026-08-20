@@ -39,6 +39,7 @@ from agents.base_agent import _call_with_retry
 
 from agents.allegro.allegro_agent import AllegroAgent
 from agents.base_agent import BaseAgent
+from agents.perf import StageTimer
 from agents.rag.rag_agent import RAGAgent
 from config.settings import get_settings
 from models.conversation import AgentResponse, IncomingMessage, MessageRole
@@ -167,19 +168,22 @@ class Orchestrator:
 
     async def handle(self, message: IncomingMessage, user_id: str | None = None) -> AgentResponse:
         """Main entry point — classify, route, persist, return."""
-        session = await self._firestore.get_or_create_session(
-            session_id=message.session_id,
-            channel=message.channel,
-            sender_id=message.sender_id,
-        )
+        perf = StageTimer("orchestrator.handle")
+        with perf.stage("firestore_load"):
+            session = await self._firestore.get_or_create_session(
+                session_id=message.session_id,
+                channel=message.channel,
+                sender_id=message.sender_id,
+            )
 
         # Classify the data source
         try:
-            data_source = await self._classify(
-                message.text,
-                session.to_anthropic_messages(),
-                last_source=session.metadata.get("last_data_source"),
-            )
+            with perf.stage("classify"):
+                data_source = await self._classify(
+                    message.text,
+                    session.to_anthropic_messages(),
+                    last_source=session.metadata.get("last_data_source"),
+                )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during classification: %s", exc)
             response = AgentResponse(
@@ -189,13 +193,15 @@ class Orchestrator:
             session.add_message(MessageRole.USER, message.text)
             session.add_message(MessageRole.ASSISTANT, response.text)
             await self._firestore.save_session(session)
+            perf.log(source="error", channel=message.channel)
             return response
 
         logger.info("Routing: source=%s | %.60s…", data_source, message.text)
 
         # Route to the right agent
         try:
-            response = await self._route(data_source, message, session.to_anthropic_messages(), user_id)
+            with perf.stage("route"):
+                response = await self._route(data_source, message, session.to_anthropic_messages(), user_id)
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
             response = AgentResponse(
@@ -220,10 +226,12 @@ class Orchestrator:
         session.metadata["last_data_source"] = data_source
 
         # Persist conversation
-        session.add_message(MessageRole.USER, message.text)
-        session.add_message(MessageRole.ASSISTANT, response.text)
-        await self._firestore.save_session(session)
+        with perf.stage("firestore_save"):
+            session.add_message(MessageRole.USER, message.text)
+            session.add_message(MessageRole.ASSISTANT, response.text)
+            await self._firestore.save_session(session)
 
+        perf.log(source=data_source, channel=message.channel)
         return response
 
     # ── Classification ─────────────────────────────────────────────────────────
