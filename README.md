@@ -13,6 +13,7 @@ Obsługuje wielokanałowy dostęp: **interfejs webowy (PWA)** oraz **Facebook Me
 - Baza wiedzy sklepu (RAG) — odpowiedzi na pytania o polityki, FAQ, produkty
 - PWA z historią rozmów, trybem offline i eksportem do pliku
 - Integracja z Facebook Messengerem przez webhook
+- Automatyczne sprawdzanie nowych zamówień, faktur, wiadomości oraz zwrotów i reklamacji — powiadomienia w tle, nawet gdy karta jest zamknięta
 - Powiadomienia push (VAPID — iOS 16.4+, Android, desktop)
 - Obsługa języka polskiego i angielskiego
 

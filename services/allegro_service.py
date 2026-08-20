@@ -369,8 +369,10 @@ class AllegroService:
             "Content-Type": "application/vnd.allegro.public.v1+json",
         }
 
-    async def _get(self, path: str, params: dict | list | None = None) -> dict[str, Any]:
+    async def _get(self, path: str, params: dict | list | None = None, accept: str | None = None) -> dict[str, Any]:
         headers = await self._get_headers()
+        if accept:
+            headers["Accept"] = accept
         try:
             resp = await self._client.get(path, headers=headers, params=params)
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
@@ -892,6 +894,39 @@ class AllegroService:
             "last_event_id": last_event_id,
             "count": len(candidates),
         }
+
+    # ── Returns & complaints ─────────────────────────────────────────────────
+
+    async def get_customer_returns(self, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
+        """Return recent customer returns (zwroty) — GET /order/customer-returns.
+
+        `status`, if given, filters server-side (e.g. status="DELIVERED" for
+        returns whose parcel has arrived back and is awaiting a seller
+        decision — accept/refund or reject).
+
+        Newest first isn't guaranteed by the API, so callers that need "most
+        recent" should sort client-side by whatever date field is present.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        data = await self._get("/order/customer-returns", params=params)
+        return data.get("customerReturns", [])
+
+    async def get_customer_return(self, return_id: str) -> dict[str, Any]:
+        return await self._get(f"/order/customer-returns/{return_id}")
+
+    # /sale/issues is the beta.v1 successor to the removed /sale/disputes —
+    # covers both buyer disputes and formal claims (reklamacje).
+    _ISSUES_ACCEPT = "application/vnd.allegro.beta.v1+json"
+
+    async def get_issues(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return open disputes/claims (reklamacje) — GET /sale/issues."""
+        data = await self._get("/sale/issues", params={"limit": limit}, accept=self._ISSUES_ACCEPT)
+        return data.get("issues", [])
+
+    async def get_issue(self, issue_id: str) -> dict[str, Any]:
+        return await self._get(f"/sale/issues/{issue_id}", accept=self._ISSUES_ACCEPT)
 
     async def close(self) -> None:
         await self._client.aclose()

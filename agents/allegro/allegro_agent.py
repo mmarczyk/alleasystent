@@ -291,6 +291,20 @@ class AllegroAgent(BaseAgent):
         "date ('dzisiaj'/'today' or 'YYYY-MM-DD') if you don't already have a thread_id from earlier "
         "in this conversation — the tool finds the matching thread for you, no need to call "
         "get_message_threads first.\n"
+        "• New/recent customer returns, ANY status — 'nowe zwroty', 'jakie mam zwroty', 'czy są "
+        "jakieś zwroty', 'ile zwrotów' → get_new_returns (count_only=true for a plain number "
+        "question). NEVER confuse this with complaints/disputes even if the user's wording is loose.\n"
+        "• Returns that need SELLER ACTION right now (parcel already physically back, status "
+        "DELIVERED, awaiting accept/refund or reject) — 'zwroty do obsłużenia', 'zwroty do "
+        "rozpatrzenia', 'czy mam jakieś zwroty do obsłużenia', 'zwroty czekające na decyzję', "
+        "'ile zwrotów do obsłużenia' → get_returns_to_process, NEVER get_new_returns. A return can "
+        "exist (buyer requested it) long before the parcel arrives, so 'nowe zwroty' and 'zwroty do "
+        "obsłużenia' are DIFFERENT questions with different answers — pick the tool matching what "
+        "the user actually asked: existence/count of ANY recent return vs. ones needing action now.\n"
+        "• New/recent complaints or disputes — 'nowe reklamacje', 'reklamacje kupujących', 'czy są "
+        "jakieś spory', 'ile reklamacji' → get_new_complaints (count_only=true for a plain number "
+        "question). A 'zwrot' (return, no dispute) and a 'reklamacja'/'spór' (complaint/dispute) are "
+        "different Allegro processes — pick the tool matching the word actually used.\n"
         "• Reorder/restock email to a SUPPLIER — 'wygeneruj mail z zamówieniem do dostawcy', "
         "'przygotuj zamówienie uzupełniające', 'lista produktów do zamówienia' — "
         "→ get_products_to_reorder (NOT get_orders_delivery — that tool is for couriers/shipping "
@@ -348,17 +362,24 @@ class AllegroAgent(BaseAgent):
         "4) Plain order LIST for a period, no cost/profit wording → get_orders, NOT get_sales_summary "
         "(see the order-list rule above). "
         "NEVER use get_billing_summary for a specific order — it covers ALL orders in date range. "
-        "MONITORING — CRITICAL: You CANNOT monitor orders, invoices, or messages yourself. You have NO "
-        "ability to run background tasks, check anything automatically, or send proactive messages. "
+        "MONITORING — CRITICAL: You CANNOT monitor orders, invoices, messages, returns, or complaints "
+        "yourself. You have NO ability to run background tasks, check anything automatically, or send "
+        "proactive messages. "
         "get_new_orders ALREADY appends the current automatic-checking status and an enable/disable "
         "button to its own result — do NOT also call suggest_order_monitoring or disable_order_monitoring "
         "right after get_new_orders, that would show a duplicate button. Only call suggest_order_monitoring "
         "/ disable_order_monitoring when the user brings up monitoring/notifications OUTSIDE of an "
         "order query (e.g. general 'wyłącz monitoring', 'chcę powiadomienia o zamówieniach' with no "
         "get_new_orders call in this turn), or for INVOICE monitoring (suggest_invoice_monitoring / "
-        "disable_invoice_monitoring) or MESSAGE monitoring (suggest_message_monitoring / "
-        "disable_message_monitoring) — call suggest_message_monitoring after get_message_threads when "
-        "the user asks about being notified of new buyer messages. Whichever of the pair you call (suggest "
+        "disable_invoice_monitoring), MESSAGE monitoring (suggest_message_monitoring / "
+        "disable_message_monitoring), or RETURNS/COMPLAINTS monitoring (suggest_returns_monitoring / "
+        "disable_returns_monitoring — a single shared toggle covering BOTH zwroty and reklamacje, "
+        "there is no separate tool for each) — call suggest_message_monitoring after get_message_threads "
+        "when the user asks about being notified of new buyer messages, and likewise "
+        "suggest_returns_monitoring after get_new_returns/get_returns_to_process/get_new_complaints "
+        "(though all three ALREADY append the status block themselves, same as get_new_orders — "
+        "don't double-call). "
+        "Whichever of the pair you call (suggest "
         "or disable), the reply always reflects the REAL stored status, not your guess — never assert "
         "in your own words whether monitoring is on/off ('nie jest włączone', 'jest aktywne'), always let "
         "the tool result's text and button say it, verbatim. "
@@ -804,6 +825,26 @@ class AllegroAgent(BaseAgent):
             '💬 Włącz monitoring wiadomości</button>'
         )
 
+    async def _returns_monitoring_status_block(self) -> str:
+        """Deterministic (non-LLM) status + action button for automatic returns/
+        complaints checking — same rationale as _monitoring_status_block above."""
+        from services.return_complaint_monitor import is_monitor_enabled
+
+        if await is_monitor_enabled(self._allegro._user_id):
+            return (
+                "↩️ Automatyczne sprawdzanie nowych zwrotów i reklamacji jest włączone — dam Ci "
+                "znać, gdy pojawi się coś nowego.\n\n"
+                '<button class="btn-returns-monitoring" style="filter:grayscale(1)" '
+                'onclick="ReturnsMonitor.disable();this.outerHTML=\'<span>✓ Monitoring zwrotów i reklamacji wyłączony</span>\'">'
+                '🔕 Wyłącz monitoring zwrotów i reklamacji</button>'
+            )
+        return (
+            "💡 Mogę automatycznie sprawdzać nowe zwroty i reklamacje i wysyłać Ci powiadomienia, "
+            "nawet gdy ta karta jest w tle.\n\n"
+            '<button class="btn-returns-monitoring" onclick="ReturnsMonitor.enable()">'
+            '↩️ Włącz monitoring zwrotów i reklamacji</button>'
+        )
+
     @classmethod
     def _format_dt_pl(cls, iso_str: str) -> str:
         """ISO 8601 (UTC) → 'DD.MM.RRRR, HH:MM' in Warsaw local time."""
@@ -856,6 +897,57 @@ class AllegroAgent(BaseAgent):
             f"- Wartość: **{price}**\n"
             f"- Opłacone: {cls._format_dt_pl(o.paid_at)}"
         )
+
+    @classmethod
+    def _return_bullet(cls, item: dict) -> str:
+        """Render one customer return (zwrot) from /order/customer-returns as a
+        bullet block. Field names are read defensively (several candidate keys
+        per field) since the exact response shape isn't publicly documented in
+        full — Allegro's own convention elsewhere pairs id/status/createdAt."""
+        return_id = item.get("id", "—")
+        order_id = (
+            cls._dig(item, "order", "id")
+            or cls._dig(item, "checkoutForm", "id")
+            or item.get("orderId")
+            or "—"
+        )
+        buyer = cls._dig(item, "buyer", "login") or cls._dig(item, "buyer", "email") or "—"
+        status = item.get("status") or cls._dig(item, "reception", "status") or "—"
+        created = (
+            item.get("createdAt")
+            or item.get("receivedAt")
+            or cls._dig(item, "reception", "createdAt")
+            or ""
+        )
+        return (
+            f"**Zwrot** `{return_id}`\n"
+            f"- Zamówienie: `{order_id}`\n"
+            f"- Kupujący: **{buyer}**\n"
+            f"- Status: {status}\n"
+            f"- Data: {cls._format_dt_pl(created) if created else '—'}"
+        )
+
+    @classmethod
+    def _complaint_bullet(cls, item: dict) -> str:
+        """Render one dispute/claim (reklamacja) from /sale/issues as a bullet
+        block — id, type, subject, checkoutForm.id, openedDate, decisionDueDate
+        are the fields Allegro's own developer docs show for this resource."""
+        issue_id = item.get("id", "—")
+        order_id = cls._dig(item, "checkoutForm", "id") or "—"
+        issue_type = item.get("type") or "—"
+        subject = item.get("subject") or "—"
+        opened = item.get("openedDate") or ""
+        due = item.get("decisionDueDate") or ""
+        lines = [
+            f"**Reklamacja/spór** `{issue_id}`",
+            f"- Zamówienie: `{order_id}`",
+            f"- Typ: {issue_type}",
+            f"- Temat: {subject}",
+            f"- Otwarto: {cls._format_dt_pl(opened) if opened else '—'}",
+        ]
+        if due:
+            lines.append(f"- Termin decyzji: {cls._format_dt_pl(due)}")
+        return "\n".join(lines)
 
     @classmethod
     def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
@@ -1771,5 +1863,36 @@ class AllegroAgent(BaseAgent):
 
         if tool_name in ("suggest_message_monitoring", "disable_message_monitoring"):
             return await self._message_monitoring_status_block()
+
+        if tool_name == "get_new_returns":
+            returns = await self._allegro.get_customer_returns(limit=50)
+            if tool_input.get("count_only"):
+                body = f"Liczba zwrotów: {len(returns)}."
+            else:
+                body = "Brak zwrotów." if not returns else "\n\n".join(self._return_bullet(r) for r in returns)
+            return body + "\n\n" + await self._returns_monitoring_status_block()
+
+        if tool_name == "get_returns_to_process":
+            returns = await self._allegro.get_customer_returns(limit=50, status="DELIVERED")
+            if tool_input.get("count_only"):
+                body = f"Liczba zwrotów do obsłużenia: {len(returns)}."
+            else:
+                body = (
+                    "Brak zwrotów do obsłużenia — żaden zwrócony towar nie dotarł jeszcze z powrotem."
+                    if not returns else
+                    "\n\n".join(self._return_bullet(r) for r in returns)
+                )
+            return body + "\n\n" + await self._returns_monitoring_status_block()
+
+        if tool_name == "get_new_complaints":
+            issues = await self._allegro.get_issues(limit=50)
+            if tool_input.get("count_only"):
+                body = f"Liczba reklamacji: {len(issues)}."
+            else:
+                body = "Brak reklamacji." if not issues else "\n\n".join(self._complaint_bullet(i) for i in issues)
+            return body + "\n\n" + await self._returns_monitoring_status_block()
+
+        if tool_name in ("suggest_returns_monitoring", "disable_returns_monitoring"):
+            return await self._returns_monitoring_status_block()
 
         return f"Unknown tool: {tool_name}"

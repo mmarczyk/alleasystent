@@ -35,7 +35,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from services.order_monitor import run_once  # noqa: E402
+from services.order_monitor import run_once as run_order_monitor  # noqa: E402
+from services.return_complaint_monitor import run_once as run_returns_complaints_monitor  # noqa: E402
+
+
+async def _run_all() -> None:
+    # Isolated try/except per monitor so one failing (e.g. a transient Allegro
+    # API error surfacing unexpectedly) doesn't block the other from running.
+    try:
+        await run_order_monitor()
+    except Exception:
+        logger.exception("order monitor pass failed")
+    try:
+        await run_returns_complaints_monitor()
+    except Exception:
+        logger.exception("returns/complaints monitor pass failed")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -53,7 +67,7 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(404, {"error": "not found"})
             return
         try:
-            asyncio.run(run_once())
+            asyncio.run(_run_all())
             self._respond(200, {"status": "ok"})
         except Exception:
             logger.exception("order monitor run failed")
