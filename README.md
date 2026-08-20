@@ -63,7 +63,7 @@ Wszystkie parametry przez plik `.env` lub zmienne środowiskowe. Szczegółowa l
 | `ALLEGRO_CLIENT_ID` | nie | Client ID aplikacji Allegro |
 | `ALLEGRO_CLIENT_SECRET` | nie | Client Secret Allegro |
 | `FACEBOOK_PAGE_ACCESS_TOKEN` | nie | Token strony Facebook (Messenger) |
-| `GCP_PROJECT_ID` | nie | Projekt GCP (Firestore, Secret Manager) |
+| `GCP_PROJECT_ID` | nie | Projekt GCP (Pub/Sub) |
 
 ---
 

@@ -13,7 +13,7 @@ def set_env(monkeypatch):
 
 def _make_orchestrator():
     with patch("agents.orchestrator.AsyncOpenAI"), \
-         patch("agents.orchestrator.FirestoreService"):
+         patch("agents.orchestrator.SessionStore"):
         from agents.orchestrator import Orchestrator
         return Orchestrator()
 

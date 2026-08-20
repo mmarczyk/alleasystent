@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-"""GCP service layer: Firestore (conversation history) and Pub/Sub (async messaging).
+"""GCP service layer: session storage (Redis/in-memory) and Pub/Sub (async messaging).
 
 Storage priority for conversation sessions:
-  1. Firestore (if GCP_PROJECT_ID is configured)
-  2. Redis (if REDIS_URL is configured) — preferred for non-GCP deployments
-  3. In-memory dict (local dev fallback)
+  1. Redis (if REDIS_URL is configured) — the real store in every deployment
+     this app currently runs in, GCP included (an external Redis instance,
+     not GCP's own).
+  2. In-memory dict (local dev fallback, or Redis unreachable)
+
+Used to also try Firestore first when GCP_PROJECT_ID was set, on the theory
+that a GCP deployment would want a GCP-native store. In practice the actual
+deployment already runs Redis regardless of host (GCP or not), so Firestore
+was just a second, redundant persistence path adding a network round-trip
+to every request without being useful for anything Redis wasn't already
+doing — removed. Bring it back only if a deployment target genuinely has no
+usable Redis but does have Firestore.
 """
 
 import json
@@ -22,35 +31,19 @@ _REDIS_SESSION_PREFIX = "conv:"
 _REDIS_SESSION_TTL = 60 * 60 * 24 * 30  # 30 days
 
 
-class FirestoreService:
+class SessionStore:
     """
     Manages conversation sessions.
 
-    Falls back to Redis when running without GCP, and to in-memory when
-    neither GCP nor Redis is configured (local development).
+    Redis-backed when REDIS_URL is configured, in-memory otherwise (local
+    development, or Redis unreachable).
     """
 
     def __init__(self):
         self._settings = get_settings()
-        self._db = None
         self._redis = None
         self._memory_store: dict[str, dict] = {}
-        self._init_firestore()
         self._init_redis()
-
-    def _init_firestore(self) -> None:
-        if not self._settings.gcp_project_id:
-            logger.info("GCP project not configured — skipping Firestore")
-            return
-        try:
-            from google.cloud import firestore
-
-            self._db = firestore.AsyncClient(project=self._settings.gcp_project_id)
-            logger.info("Firestore client initialized")
-        except ImportError:
-            logger.warning("google-cloud-firestore not installed — skipping Firestore")
-        except Exception as exc:
-            logger.warning("Firestore init failed (%s) — skipping Firestore", exc)
 
     def _init_redis(self) -> None:
         redis_url = self._settings.redis_url
@@ -64,24 +57,9 @@ class FirestoreService:
         except Exception as exc:
             logger.warning("Redis init failed (%s) — using in-memory session store", exc)
 
-    def _disable_firestore(self, reason: Exception) -> None:
-        logger.warning("Firestore operation failed (%s) — disabling Firestore, falling back to Redis/memory", reason)
-        self._db = None
-
     # ── Session CRUD ─────────────────────────────────────────────────────────
 
     async def get_session(self, session_id: str) -> ConversationSession | None:
-        if self._db is not None:
-            try:
-                doc = await self._db.collection(
-                    self._settings.firestore_collection_conversations
-                ).document(session_id).get()
-                if not doc.exists:
-                    return None
-                return ConversationSession.model_validate(doc.to_dict())
-            except Exception as exc:
-                self._disable_firestore(exc)
-
         if self._redis is not None:
             raw = await self._redis.get(f"{_REDIS_SESSION_PREFIX}{session_id}")
             if raw is None:
@@ -96,15 +74,6 @@ class FirestoreService:
     async def save_session(self, session: ConversationSession) -> None:
         session.updated_at = datetime.utcnow()
         data = json.loads(session.model_dump_json())
-
-        if self._db is not None:
-            try:
-                await self._db.collection(
-                    self._settings.firestore_collection_conversations
-                ).document(session.session_id).set(data)
-                return
-            except Exception as exc:
-                self._disable_firestore(exc)
 
         if self._redis is not None:
             await self._redis.set(
@@ -138,17 +107,6 @@ class FirestoreService:
         channel: ChannelType | None = None,
         limit: int = 50,
     ) -> list[ConversationSession]:
-        if self._db is not None:
-            try:
-                query = self._db.collection(self._settings.firestore_collection_conversations)
-                if channel:
-                    query = query.where("channel", "==", channel.value)
-                query = query.limit(limit)
-                docs = await query.get()
-                return [ConversationSession.model_validate(doc.to_dict()) for doc in docs]
-            except Exception as exc:
-                self._disable_firestore(exc)
-
         if self._redis is not None:
             keys = await self._redis.keys(f"{_REDIS_SESSION_PREFIX}*")
             sessions = []

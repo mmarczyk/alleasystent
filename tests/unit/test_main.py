@@ -17,7 +17,7 @@ def app():
     """Build the FastAPI app with all startup hooks mocked out."""
     with patch("main.asyncio.create_task"), \
          patch("agents.orchestrator.AsyncOpenAI"), \
-         patch("agents.orchestrator.FirestoreService"), \
+         patch("agents.orchestrator.SessionStore"), \
          patch("agents.rag.retriever.ChromaRetriever._init"), \
          patch("agents.rag.retriever.build_retriever"), \
          patch("webhooks.facebook_webhook.FacebookCommunicationAgent"):

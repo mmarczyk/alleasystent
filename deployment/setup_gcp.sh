@@ -22,7 +22,6 @@ gcloud services enable \
   run.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
-  firestore.googleapis.com \
   pubsub.googleapis.com \
   secretmanager.googleapis.com \
   cloudscheduler.googleapis.com \
@@ -46,7 +45,6 @@ SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 # Grant required roles
 for ROLE in \
-  roles/datastore.user \
   roles/pubsub.publisher \
   roles/pubsub.subscriber \
   roles/secretmanager.secretAccessor \
@@ -57,12 +55,6 @@ for ROLE in \
     --role="$ROLE" --quiet
 done
 echo "  Roles granted to $SA_EMAIL"
-
-# ── Firestore ─────────────────────────────────────────────────────────────────
-echo "▶ Initializing Firestore (native mode)..."
-gcloud firestore databases create \
-  --location="$REGION" \
-  --project="$PROJECT_ID" || echo "  (already exists)"
 
 # ── Pub/Sub ───────────────────────────────────────────────────────────────────
 echo "▶ Creating Pub/Sub topics and subscriptions..."

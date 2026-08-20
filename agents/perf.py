@@ -4,13 +4,13 @@ from __future__ import annotations
 
 User queries were taking 30s-60s to answer and it wasn't clear from the
 existing logs which stage was responsible (LLM call, Allegro API round-trip,
-Firestore, ...). StageTimer wraps each stage of a request in a `with` block
-and emits one summary log line per request breaking down wall-clock time by
-stage, so a slow turn can be diagnosed straight from production logs.
+session store, ...). StageTimer wraps each stage of a request in a `with`
+block and emits one summary log line per request breaking down wall-clock
+time by stage, so a slow turn can be diagnosed straight from production logs.
 
 Not a profiler (no CPU sampling) — just elapsed wall-clock time per named
 stage, which is what matters here since every stage is I/O-bound (network
-calls to the Gemini API, Allegro API, Firestore/Redis).
+calls to the Gemini API, Allegro API, Redis).
 """
 
 import logging

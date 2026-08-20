@@ -35,7 +35,7 @@ class IncomingMessage(BaseModel):
 
 
 class ConversationMessage(BaseModel):
-    """Single turn in a conversation (stored in Firestore)."""
+    """Single turn in a conversation (stored via SessionStore)."""
 
     role: MessageRole
     content: str
@@ -44,7 +44,7 @@ class ConversationMessage(BaseModel):
 
 
 class ConversationSession(BaseModel):
-    """Full conversation session persisted in Firestore."""
+    """Full conversation session persisted via SessionStore (Redis/in-memory)."""
 
     session_id: str
     channel: ChannelType

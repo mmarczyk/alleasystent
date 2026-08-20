@@ -1,4 +1,4 @@
-"""Unit tests for services/gcp_service.py (in-memory / no-GCP mode)."""
+"""Unit tests for services/gcp_service.py (in-memory / no-Redis mode)."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,30 +11,28 @@ from models.conversation import ChannelType, ConversationSession, MessageRole
 @pytest.fixture(autouse=True)
 def set_env(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-    # No GCP project — forces in-memory mode
-    monkeypatch.delenv("GCP_PROJECT_ID", raising=False)
+    # No REDIS_URL — forces in-memory mode
     monkeypatch.delenv("REDIS_URL", raising=False)
 
 
-def _make_firestore():
-    from services.gcp_service import FirestoreService
-    svc = FirestoreService()
+def _make_store():
+    from services.gcp_service import SessionStore
+    svc = SessionStore()
     # Confirm it's in in-memory mode
-    assert svc._db is None
     assert svc._redis is None
     return svc
 
 
-class TestFirestoreServiceInMemory:
+class TestSessionStoreInMemory:
     @pytest.mark.asyncio
     async def test_get_session_missing_returns_none(self):
-        svc = _make_firestore()
+        svc = _make_store()
         result = await svc.get_session("nonexistent")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_save_and_get_session(self):
-        svc = _make_firestore()
+        svc = _make_store()
         session = ConversationSession(
             session_id="s1",
             channel=ChannelType.API,
@@ -48,7 +46,7 @@ class TestFirestoreServiceInMemory:
 
     @pytest.mark.asyncio
     async def test_get_or_create_creates_new(self):
-        svc = _make_firestore()
+        svc = _make_store()
         session = await svc.get_or_create_session(
             session_id="new-session",
             channel=ChannelType.FACEBOOK,
@@ -59,7 +57,7 @@ class TestFirestoreServiceInMemory:
 
     @pytest.mark.asyncio
     async def test_get_or_create_returns_existing(self):
-        svc = _make_firestore()
+        svc = _make_store()
         # First call creates
         s1 = await svc.get_or_create_session("s", ChannelType.API, "u")
         s1.add_message(MessageRole.USER, "hello")
@@ -71,13 +69,13 @@ class TestFirestoreServiceInMemory:
 
     @pytest.mark.asyncio
     async def test_list_sessions_empty(self):
-        svc = _make_firestore()
+        svc = _make_store()
         sessions = await svc.list_sessions()
         assert sessions == []
 
     @pytest.mark.asyncio
     async def test_list_sessions_all(self):
-        svc = _make_firestore()
+        svc = _make_store()
         await svc.get_or_create_session("s1", ChannelType.API, "u1")
         await svc.get_or_create_session("s2", ChannelType.FACEBOOK, "u2")
         sessions = await svc.list_sessions()
@@ -85,7 +83,7 @@ class TestFirestoreServiceInMemory:
 
     @pytest.mark.asyncio
     async def test_list_sessions_filtered_by_channel(self):
-        svc = _make_firestore()
+        svc = _make_store()
         await svc.get_or_create_session("s1", ChannelType.API, "u1")
         await svc.get_or_create_session("s2", ChannelType.FACEBOOK, "u2")
         sessions = await svc.list_sessions(channel=ChannelType.FACEBOOK)
@@ -94,7 +92,7 @@ class TestFirestoreServiceInMemory:
 
     @pytest.mark.asyncio
     async def test_save_updates_updated_at(self):
-        svc = _make_firestore()
+        svc = _make_store()
         session = ConversationSession(
             session_id="s1",
             channel=ChannelType.API,
