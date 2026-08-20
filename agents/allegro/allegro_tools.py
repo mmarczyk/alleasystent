@@ -794,6 +794,94 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_new_returns",
+            "description": (
+                "List recent customer returns (zwroty) reported by buyers. "
+                "Use for 'nowe zwroty', 'jakie mam zwroty', 'czy są jakieś zwroty', 'ile zwrotów'. "
+                "COUNT-ONLY: for 'ile zwrotów', 'ile mam zwrotów' (user wants a NUMBER, not the "
+                "list) — set count_only=true. "
+                "Do NOT use this for complaints/disputes ('reklamacje', 'spory') — use "
+                "get_new_complaints for those; a return and a complaint are different Allegro "
+                "processes even though the user may casually call either one a 'zwrot'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count_only": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the user only wants the NUMBER of returns "
+                            "('ile zwrotów', 'ile mam zwrotów') — the reply will state just the "
+                            "count, not list individual returns."
+                        ),
+                        "default": False,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_new_complaints",
+            "description": (
+                "List recent disputes/claims (reklamacje) opened by buyers. "
+                "Use for 'nowe reklamacje', 'jakie mam reklamacje', 'czy są jakieś spory', "
+                "'reklamacje kupujących', 'ile reklamacji'. "
+                "COUNT-ONLY: for 'ile reklamacji', 'ile mam reklamacji' (user wants a NUMBER, not "
+                "the list) — set count_only=true. "
+                "Do NOT use this for product returns with no dispute ('zwroty') — use "
+                "get_new_returns for those."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count_only": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the user only wants the NUMBER of complaints "
+                            "('ile reklamacji', 'ile mam reklamacji') — the reply will state just "
+                            "the count, not list individual complaints."
+                        ),
+                        "default": False,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_returns_monitoring",
+            "description": (
+                "Present the user with a button to enable automatic background monitoring of new "
+                "returns (zwroty) AND complaints/disputes (reklamacje) together — one shared toggle. "
+                "get_new_returns and get_new_complaints already append this automatically, so do "
+                "NOT call this tool right after either of them. Only use this when the user brings "
+                "up monitoring/notifications for returns/complaints on its own, with no "
+                "get_new_returns/get_new_complaints call in the same turn (e.g. 'chcę dostawać "
+                "powiadomienia o zwrotach i reklamacjach')."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_returns_monitoring",
+            "description": (
+                "Show a button to disable automatic returns/complaints monitoring in the browser. "
+                "get_new_returns and get_new_complaints already offer this button when monitoring "
+                "is on, so only call this tool when the user asks to turn off/stop/disable "
+                "returns/complaints monitoring outside of a returns/complaints query (no "
+                "get_new_returns/get_new_complaints call in the same turn)."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -842,13 +930,18 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "issue_invoice_for_order": "action",
     "attach_invoice_to_allegro_order": "action",
     "send_invoice_to_ksef": "action",
+    # Zwroty i reklamacje
+    "get_new_returns": "chat",
+    "get_new_complaints": "chat",
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
     "suggest_invoice_monitoring": "action",
     "suggest_message_monitoring": "action",
+    "suggest_returns_monitoring": "action",
     "disable_order_monitoring": "action",
     "disable_invoice_monitoring": "action",
     "disable_message_monitoring": "action",
+    "disable_returns_monitoring": "action",
 }
 
 # When several tools are called in the same turn, the most "structured" format

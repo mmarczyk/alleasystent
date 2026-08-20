@@ -1140,6 +1140,51 @@ const MessageMonitor = (() => {
   return { isEnabled, enable, disable, init };
 })();
 
+// ── Returns & complaints monitor ─────────────────
+// Unlike Invoice/MessageMonitor above, detection itself runs entirely
+// server-side (the same Cloud Run Job cadence as OrderMonitor, see
+// services/return_complaint_monitor.py) — there's no lightweight "since X"
+// endpoint to poll from the tab, so this object only handles the toggle
+// (push subscribe + enable/disable) and lets the server-sent push notify.
+const ReturnsMonitor = (() => {
+  const ENABLED_KEY = 'ae_returns_monitor_enabled';
+
+  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
+
+  async function enable() {
+    const pushOk = await WebPush.subscribe();
+    localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/returns-monitor/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+    if (pushOk) {
+      UI.toast('✓ Monitoring zwrotów i reklamacji włączony');
+    } else {
+      UI.toast('⚠️ Monitoring włączony, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
+    }
+    document.querySelectorAll('.btn-returns-monitoring').forEach(btn => {
+      btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring zwrotów i reklamacji aktywny</span>';
+    });
+    return true;
+  }
+
+  function disable() {
+    localStorage.removeItem(ENABLED_KEY);
+    fetch(Settings.api('/allegro/returns-monitor/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+  }
+
+  function init() {
+    if (!isEnabled()) return;
+    if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      WebPush.subscribe().catch(() => {});
+    }
+  }
+
+  return { isEnabled, enable, disable, init };
+})();
+
 // ── Notifications (bell icon panel) ──────────────
 const Notifications = (() => {
   let _items = [];
@@ -1326,6 +1371,7 @@ const UI = (() => {
     document.getElementById('set-toggle-orders').checked = OrderMonitor.isEnabled();
     document.getElementById('set-toggle-invoices').checked = InvoiceMonitor.isEnabled();
     document.getElementById('set-toggle-messages').checked = MessageMonitor.isEnabled();
+    document.getElementById('set-toggle-returns').checked = ReturnsMonitor.isEnabled();
     updateVersionInfo();
   }
 
@@ -1344,6 +1390,10 @@ const UI = (() => {
 
   function toggleMessageMonitoring(on) {
     if (on) MessageMonitor.enable(); else MessageMonitor.disable();
+  }
+
+  function toggleReturnsMonitoring(on) {
+    if (on) ReturnsMonitor.enable(); else ReturnsMonitor.disable();
   }
 
   function toggleSidebar() {
@@ -1371,7 +1421,7 @@ const UI = (() => {
 
   return {
     toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
-    toggleOrderMonitoring, toggleInvoiceMonitoring, toggleMessageMonitoring,
+    toggleOrderMonitoring, toggleInvoiceMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
   };
 })();
 
@@ -1429,6 +1479,10 @@ const Chat = (() => {
       inner.innerHTML = inner.innerHTML.replace('[MESSAGE_MONITORING_BTN]',
         '<button class="btn-message-monitoring" onclick="MessageMonitor.enable()">💬 Włącz monitoring wiadomości</button>');
     }
+    if (inner.innerHTML.includes('[RETURNS_MONITORING_BTN]')) {
+      inner.innerHTML = inner.innerHTML.replace('[RETURNS_MONITORING_BTN]',
+        '<button class="btn-returns-monitoring" onclick="ReturnsMonitor.enable()">↩️ Włącz monitoring zwrotów i reklamacji</button>');
+    }
     // Replace enable-buttons with active badge if monitoring is already on.
     // Only touches actual "enable" buttons — get_new_orders' status block already
     // renders a "disable" button of its own when monitoring is on, and that one
@@ -1451,6 +1505,13 @@ const Chat = (() => {
       inner.querySelectorAll('.btn-message-monitoring').forEach(btn => {
         if (btn.getAttribute('onclick')?.includes('MessageMonitor.enable')) {
           btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring wiadomości aktywny</span>';
+        }
+      });
+    }
+    if (ReturnsMonitor.isEnabled()) {
+      inner.querySelectorAll('.btn-returns-monitoring').forEach(btn => {
+        if (btn.getAttribute('onclick')?.includes('ReturnsMonitor.enable')) {
+          btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring zwrotów i reklamacji aktywny</span>';
         }
       });
     }
@@ -2032,6 +2093,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   OrderMonitor.init(_cameFromNotification);
   InvoiceMonitor.init(_cameFromNotification);
   MessageMonitor.init(_cameFromNotification);
+  ReturnsMonitor.init();
 
   Notifications.init();
   // Tapping a system push notification opens straight into the Notifications
