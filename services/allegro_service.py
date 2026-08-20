@@ -897,13 +897,20 @@ class AllegroService:
 
     # ── Returns & complaints ─────────────────────────────────────────────────
 
-    async def get_customer_returns(self, limit: int = 50) -> list[dict[str, Any]]:
+    async def get_customer_returns(self, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
         """Return recent customer returns (zwroty) — GET /order/customer-returns.
+
+        `status`, if given, filters server-side (e.g. status="DELIVERED" for
+        returns whose parcel has arrived back and is awaiting a seller
+        decision — accept/refund or reject).
 
         Newest first isn't guaranteed by the API, so callers that need "most
         recent" should sort client-side by whatever date field is present.
         """
-        data = await self._get("/order/customer-returns", params={"limit": limit})
+        params: dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        data = await self._get("/order/customer-returns", params=params)
         return data.get("customerReturns", [])
 
     async def get_customer_return(self, return_id: str) -> dict[str, Any]:

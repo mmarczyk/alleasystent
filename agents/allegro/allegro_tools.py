@@ -826,6 +826,40 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_returns_to_process",
+            "description": (
+                "List customer returns that need SELLER ACTION right now — status DELIVERED, "
+                "meaning the returned parcel has physically arrived back and is awaiting the "
+                "seller's decision (accept/refund or reject). "
+                "Use for 'zwroty do obsłużenia', 'zwroty do rozpatrzenia', 'zwroty czekające na "
+                "decyzję', 'czy mam jakieś zwroty do obsłużenia', 'zwroty gotowe do zwrotu "
+                "pieniędzy' — i.e. any question about returns that require doing something now, "
+                "not just ones that recently arrived as a request. "
+                "Do NOT use get_new_returns for this — that tool lists ALL recently reported "
+                "returns regardless of whether the parcel has arrived yet (most haven't, so it "
+                "answers a different, broader question than 'what needs my attention'). "
+                "COUNT-ONLY: for 'ile zwrotów do obsłużenia', 'ile mam zwrotów czekających' "
+                "(user wants a NUMBER, not the list) — set count_only=true."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count_only": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the user only wants the NUMBER of returns awaiting "
+                            "action — the reply will state just the count, not list individual "
+                            "returns."
+                        ),
+                        "default": False,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_new_complaints",
             "description": (
                 "List recent disputes/claims (reklamacje) opened by buyers. "
@@ -859,11 +893,11 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Present the user with a button to enable automatic background monitoring of new "
                 "returns (zwroty) AND complaints/disputes (reklamacje) together — one shared toggle. "
-                "get_new_returns and get_new_complaints already append this automatically, so do "
-                "NOT call this tool right after either of them. Only use this when the user brings "
-                "up monitoring/notifications for returns/complaints on its own, with no "
-                "get_new_returns/get_new_complaints call in the same turn (e.g. 'chcę dostawać "
-                "powiadomienia o zwrotach i reklamacjach')."
+                "get_new_returns, get_returns_to_process, and get_new_complaints already append this "
+                "automatically, so do NOT call this tool right after any of them. Only use this when "
+                "the user brings up monitoring/notifications for returns/complaints on its own, with "
+                "no get_new_returns/get_returns_to_process/get_new_complaints call in the same turn "
+                "(e.g. 'chcę dostawać powiadomienia o zwrotach i reklamacjach')."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -874,10 +908,11 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "disable_returns_monitoring",
             "description": (
                 "Show a button to disable automatic returns/complaints monitoring in the browser. "
-                "get_new_returns and get_new_complaints already offer this button when monitoring "
-                "is on, so only call this tool when the user asks to turn off/stop/disable "
-                "returns/complaints monitoring outside of a returns/complaints query (no "
-                "get_new_returns/get_new_complaints call in the same turn)."
+                "get_new_returns, get_returns_to_process, and get_new_complaints already offer this "
+                "button when monitoring is on, so only call this tool when the user asks to turn "
+                "off/stop/disable returns/complaints monitoring outside of a returns/complaints "
+                "query (no get_new_returns/get_returns_to_process/get_new_complaints call in the "
+                "same turn)."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -932,6 +967,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "send_invoice_to_ksef": "action",
     # Zwroty i reklamacje
     "get_new_returns": "chat",
+    "get_returns_to_process": "chat",
     "get_new_complaints": "chat",
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",

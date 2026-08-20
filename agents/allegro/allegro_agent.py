@@ -291,9 +291,16 @@ class AllegroAgent(BaseAgent):
         "date ('dzisiaj'/'today' or 'YYYY-MM-DD') if you don't already have a thread_id from earlier "
         "in this conversation — the tool finds the matching thread for you, no need to call "
         "get_message_threads first.\n"
-        "• New/recent customer returns — 'nowe zwroty', 'jakie mam zwroty', 'czy są jakieś zwroty', "
-        "'ile zwrotów' → get_new_returns (count_only=true for a plain number question). "
-        "NEVER confuse this with complaints/disputes even if the user's wording is loose.\n"
+        "• New/recent customer returns, ANY status — 'nowe zwroty', 'jakie mam zwroty', 'czy są "
+        "jakieś zwroty', 'ile zwrotów' → get_new_returns (count_only=true for a plain number "
+        "question). NEVER confuse this with complaints/disputes even if the user's wording is loose.\n"
+        "• Returns that need SELLER ACTION right now (parcel already physically back, status "
+        "DELIVERED, awaiting accept/refund or reject) — 'zwroty do obsłużenia', 'zwroty do "
+        "rozpatrzenia', 'czy mam jakieś zwroty do obsłużenia', 'zwroty czekające na decyzję', "
+        "'ile zwrotów do obsłużenia' → get_returns_to_process, NEVER get_new_returns. A return can "
+        "exist (buyer requested it) long before the parcel arrives, so 'nowe zwroty' and 'zwroty do "
+        "obsłużenia' are DIFFERENT questions with different answers — pick the tool matching what "
+        "the user actually asked: existence/count of ANY recent return vs. ones needing action now.\n"
         "• New/recent complaints or disputes — 'nowe reklamacje', 'reklamacje kupujących', 'czy są "
         "jakieś spory', 'ile reklamacji' → get_new_complaints (count_only=true for a plain number "
         "question). A 'zwrot' (return, no dispute) and a 'reklamacja'/'spór' (complaint/dispute) are "
@@ -369,8 +376,9 @@ class AllegroAgent(BaseAgent):
         "disable_returns_monitoring — a single shared toggle covering BOTH zwroty and reklamacje, "
         "there is no separate tool for each) — call suggest_message_monitoring after get_message_threads "
         "when the user asks about being notified of new buyer messages, and likewise "
-        "suggest_returns_monitoring after get_new_returns/get_new_complaints (though both of those "
-        "ALREADY append the status block themselves, same as get_new_orders — don't double-call). "
+        "suggest_returns_monitoring after get_new_returns/get_returns_to_process/get_new_complaints "
+        "(though all three ALREADY append the status block themselves, same as get_new_orders — "
+        "don't double-call). "
         "Whichever of the pair you call (suggest "
         "or disable), the reply always reflects the REAL stored status, not your guess — never assert "
         "in your own words whether monitoring is on/off ('nie jest włączone', 'jest aktywne'), always let "
@@ -1862,6 +1870,18 @@ class AllegroAgent(BaseAgent):
                 body = f"Liczba zwrotów: {len(returns)}."
             else:
                 body = "Brak zwrotów." if not returns else "\n\n".join(self._return_bullet(r) for r in returns)
+            return body + "\n\n" + await self._returns_monitoring_status_block()
+
+        if tool_name == "get_returns_to_process":
+            returns = await self._allegro.get_customer_returns(limit=50, status="DELIVERED")
+            if tool_input.get("count_only"):
+                body = f"Liczba zwrotów do obsłużenia: {len(returns)}."
+            else:
+                body = (
+                    "Brak zwrotów do obsłużenia — żaden zwrócony towar nie dotarł jeszcze z powrotem."
+                    if not returns else
+                    "\n\n".join(self._return_bullet(r) for r in returns)
+                )
             return body + "\n\n" + await self._returns_monitoring_status_block()
 
         if tool_name == "get_new_complaints":
