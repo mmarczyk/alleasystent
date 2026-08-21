@@ -44,11 +44,27 @@ async def save_subscription(user_id: str, subscription: dict) -> None:
         await r.aclose()
 
 
-async def store_pending_chat(user_id: str, text: str, ttl: int = 1800) -> None:
-    """Store a chat message in Redis to be delivered when the user opens the app.
+# A queued chat message is the assistant speaking to the seller on its own
+# initiative, so it has to survive until the seller actually opens the app —
+# the old 30-minute TTL silently dropped every message written outside that
+# window, which is most of them for a reminder that only fires every 2 hours.
+_PENDING_CHAT_TTL = 60 * 60 * 24  # 24h
 
-    Multiple messages accumulate as a list (FIFO). TTL 30 min by default.
-    This lets devices that weren't open during polling still see the message.
+
+async def store_pending_chat(
+    user_id: str,
+    text: str,
+    ttl: int = _PENDING_CHAT_TTL,
+    dedupe_tag: str | None = None,
+) -> None:
+    """Queue a chat message to be written into the seller's chat when they next
+    look at the app.
+
+    Messages accumulate as a FIFO list. `dedupe_tag` drops the queued messages
+    carrying that same tag first: a recurring reminder states the CURRENT
+    situation rather than logging an event, so an unread one must be replaced,
+    not stacked — otherwise a seller away for a day comes back to a dozen
+    identical "wystawić faktury?" messages in a row.
     """
     from config.settings import get_settings
     settings = get_settings()
@@ -58,23 +74,47 @@ async def store_pending_chat(user_id: str, text: str, ttl: int = 1800) -> None:
     key = f"push:chat:{user_id}"
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
-        await r.rpush(key, text)
+        if dedupe_tag:
+            for raw in await r.lrange(key, 0, -1):
+                if _decode_pending_chat(raw)[0] == dedupe_tag:
+                    await r.lrem(key, 0, raw)
+        await r.rpush(key, json.dumps({"tag": dedupe_tag, "text": text}))
         await r.expire(key, ttl)
     finally:
         await r.aclose()
 
 
-async def pop_pending_chat(user_id: str) -> str | None:
-    """Pop and return the oldest pending chat message, or None if queue is empty."""
+def _decode_pending_chat(raw: str) -> tuple[str | None, str]:
+    """(tag, text) for a queued entry. Entries written before tagging existed
+    are bare strings, so anything that isn't the tagged JSON shape is the text."""
+    try:
+        entry = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, raw
+    if isinstance(entry, dict) and "text" in entry:
+        return entry.get("tag"), entry.get("text") or ""
+    return None, raw
+
+
+async def pop_pending_chats(user_id: str) -> list[str]:
+    """Drain and return every queued chat message, oldest first.
+
+    Drained in one MULTI/EXEC so two devices (or a poll racing a page load)
+    can't each take half of the queue and show the seller a partial thread.
+    """
     from config.settings import get_settings
     settings = get_settings()
     if not _valid_redis_url(settings.redis_url):
-        return None
+        return []
     import redis.asyncio as aioredis
     key = f"push:chat:{user_id}"
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
-        return await r.lpop(key)
+        async with r.pipeline(transaction=True) as pipe:
+            pipe.lrange(key, 0, -1)
+            pipe.delete(key)
+            entries, _ = await pipe.execute()
+        return [text for text in (_decode_pending_chat(e)[1] for e in entries or []) if text]
     finally:
         await r.aclose()
 

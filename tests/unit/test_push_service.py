@@ -25,10 +25,10 @@ class TestNoRedisEarlyReturns:
         await store_pending_chat("user1", "hello")
 
     @pytest.mark.asyncio
-    async def test_pop_pending_chat_no_redis_returns_none(self):
-        from services.push_service import pop_pending_chat
-        result = await pop_pending_chat("user1")
-        assert result is None
+    async def test_pop_pending_chats_no_redis_returns_empty(self):
+        from services.push_service import pop_pending_chats
+        result = await pop_pending_chats("user1")
+        assert result == []
 
     @pytest.mark.asyncio
     async def test_remove_subscription_no_redis_returns_early(self):
@@ -76,15 +76,72 @@ class TestWithMockedRedis:
         mock_redis.rpush.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_pop_pending_chat_calls_lpop(self, monkeypatch):
+    async def test_store_pending_chat_replaces_same_tag(self, monkeypatch):
+        """A recurring reminder states the current situation — an unanswered one
+        is replaced, not stacked, so a seller away for a day doesn't come back
+        to a dozen identical messages."""
+        import json
         monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
+        queued = json.dumps({"tag": "invoice_reminder", "text": "stara wersja"})
         mock_redis = AsyncMock()
-        mock_redis.lpop = AsyncMock(return_value="pending message")
+        mock_redis.lrange = AsyncMock(return_value=[queued, json.dumps({"tag": None, "text": "coś innego"})])
+        mock_redis.lrem = AsyncMock()
+        mock_redis.rpush = AsyncMock()
+        mock_redis.expire = AsyncMock()
         mock_redis.aclose = AsyncMock()
         with patch("redis.asyncio.from_url", return_value=mock_redis):
-            from services.push_service import pop_pending_chat
-            result = await pop_pending_chat("user1")
-        assert result == "pending message"
+            from services.push_service import store_pending_chat
+            await store_pending_chat("user1", "nowa wersja", dedupe_tag="invoice_reminder")
+        mock_redis.lrem.assert_called_once_with("push:chat:user1", 0, queued)
+        assert json.loads(mock_redis.rpush.call_args[0][1])["text"] == "nowa wersja"
+
+    def _mock_redis_with_queue(self, entries):
+        """Redis mock whose MULTI/EXEC pipeline returns `entries` then deletes."""
+        pipe = MagicMock()
+        pipe.lrange = MagicMock()
+        pipe.delete = MagicMock()
+        pipe.execute = AsyncMock(return_value=[entries, 1])
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=pipe)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_redis = AsyncMock()
+        mock_redis.pipeline = MagicMock(return_value=ctx)
+        mock_redis.aclose = AsyncMock()
+        return mock_redis
+
+    @pytest.mark.asyncio
+    async def test_pop_pending_chats_drains_whole_queue(self, monkeypatch):
+        import json
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
+        entries = [
+            json.dumps({"tag": "invoice_reminder", "text": "pierwsza"}),
+            json.dumps({"tag": None, "text": "druga"}),
+        ]
+        mock_redis = self._mock_redis_with_queue(entries)
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            from services.push_service import pop_pending_chats
+            result = await pop_pending_chats("user1")
+        assert result == ["pierwsza", "druga"]
+        mock_redis.pipeline.assert_called_once_with(transaction=True)
+
+    @pytest.mark.asyncio
+    async def test_pop_pending_chats_reads_legacy_plain_entries(self, monkeypatch):
+        """Messages queued before entries carried a tag are bare strings."""
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
+        mock_redis = self._mock_redis_with_queue(["zwykły tekst"])
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            from services.push_service import pop_pending_chats
+            result = await pop_pending_chats("user1")
+        assert result == ["zwykły tekst"]
+
+    @pytest.mark.asyncio
+    async def test_pop_pending_chats_empty_queue(self, monkeypatch):
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
+        mock_redis = self._mock_redis_with_queue([])
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            from services.push_service import pop_pending_chats
+            result = await pop_pending_chats("user1")
+        assert result == []
 
     @pytest.mark.asyncio
     async def test_remove_subscription_calls_delete(self, monkeypatch):
