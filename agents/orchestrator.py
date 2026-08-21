@@ -128,6 +128,22 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
 ]
 
 
+# How many of the most recent conversation turns are replayed into each request.
+# Sessions live for 30 days (services/gcp_service.py), so without a cap an old
+# thread grows unboundedly and every message re-sends the whole thing — including
+# past order/offer listings, which are the largest turns by far.
+_HISTORY_TURNS = 20
+
+# Shown instead of an empty reply. A blank assistant turn must never reach the
+# user OR the session store: replayed as history it makes Gemini reject every
+# later message in the thread with a non-retryable 400 (see
+# agents/base_agent.py.sanitize_messages), which killed whole conversations.
+_EMPTY_REPLY_FALLBACK = (
+    "Przepraszam, nie udało się wygenerować odpowiedzi na to pytanie. "
+    "Spróbuj ponownie lub sformułuj je inaczej."
+)
+
+
 class Orchestrator:
     """
     Routes incoming messages to the correct specialized agent.
@@ -211,7 +227,7 @@ class Orchestrator:
             with perf.stage("classify"):
                 data_source = await self._classify(
                     message.text,
-                    session.to_anthropic_messages(),
+                    session.to_anthropic_messages(limit=_HISTORY_TURNS),
                     last_source=session.metadata.get("last_data_source"),
                 )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
@@ -231,7 +247,9 @@ class Orchestrator:
         # Route to the right agent
         try:
             with perf.stage("route"):
-                response = await self._route(data_source, message, session.to_anthropic_messages(), user_id)
+                response = await self._route(
+                    data_source, message, session.to_anthropic_messages(limit=_HISTORY_TURNS), user_id,
+                )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
             response = AgentResponse(
@@ -250,6 +268,16 @@ class Orchestrator:
                 text="Przepraszam, nie udało się przetworzyć tej wiadomości. Spróbuj sformułować pytanie inaczej.",
                 agent_type=data_source,
             )
+
+        # An agent can return an empty string (reply truncated by max_tokens, a
+        # safety filter, or a tool round that produced no text). Never show that
+        # blank bubble, and above all never store it — see _EMPTY_REPLY_FALLBACK.
+        if not (response.text or "").strip():
+            logger.warning(
+                "Empty reply from source=%s — substituting fallback | query=%.200r",
+                data_source, message.text,
+            )
+            response.text = _EMPTY_REPLY_FALLBACK
 
         # Remember what this turn was about so a keyword-less follow-up
         # ("sprawdź jeszcze raz") can anchor to it instead of defaulting to none.

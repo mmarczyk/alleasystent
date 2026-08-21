@@ -74,6 +74,64 @@ class TestCallWithRetry:
                 await _call_with_retry(client, [], "test", messages=[])
 
 
+class TestSanitizeMessages:
+    """Gemini rejects any request carrying an empty text part with a
+    non-retryable 400, so blank turns must never reach the API."""
+
+    def test_drops_blank_assistant_turn(self):
+        from agents.base_agent import sanitize_messages
+        out = sanitize_messages([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "faktury?"},
+        ])
+        assert out == [
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "faktury?"},
+        ]
+
+    def test_drops_whitespace_only_turn(self):
+        from agents.base_agent import sanitize_messages
+        out = sanitize_messages([{"role": "assistant", "content": "  \n\t "}])
+        assert out == []
+
+    def test_keeps_tool_call_turn_and_nulls_blank_content(self):
+        from agents.base_agent import sanitize_messages
+        tool_calls = [{"id": "c1", "function": {"name": "get_orders", "arguments": "{}"}}]
+        out = sanitize_messages([{"role": "assistant", "content": "", "tool_calls": tool_calls}])
+        assert out == [{"role": "assistant", "content": None, "tool_calls": tool_calls}]
+
+    def test_keeps_tool_result_with_placeholder(self):
+        """Dropping a tool result would orphan its tool_call — also a 400."""
+        from agents.base_agent import sanitize_messages
+        out = sanitize_messages([{"role": "tool", "tool_call_id": "c1", "content": ""}])
+        assert out == [{"role": "tool", "tool_call_id": "c1", "content": "(no result)"}]
+
+    def test_leaves_valid_messages_untouched(self):
+        from agents.base_agent import sanitize_messages
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        assert sanitize_messages(msgs) == msgs
+
+    @pytest.mark.asyncio
+    async def test_call_with_retry_sanitizes_before_sending(self):
+        from agents.base_agent import _call_with_retry
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=_make_response("ok"))
+        await _call_with_retry(
+            client, ["model-a"], "test",
+            messages=[
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": ""},
+            ],
+        )
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent == [{"role": "user", "content": "hi"}]
+
+
 class TestBuildSystemPrompt:
     def _make_agent(self):
         """Create a concrete subclass of BaseAgent for testing."""
