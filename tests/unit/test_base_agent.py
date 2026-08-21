@@ -5,7 +5,15 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from openai import RateLimitError, InternalServerError, APIConnectionError, APITimeoutError
+import httpx
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    BadRequestError,
+    InternalServerError,
+    RateLimitError,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +80,124 @@ class TestCallWithRetry:
         with patch("agents.base_agent.asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(Exception):
                 await _call_with_retry(client, [], "test", messages=[])
+
+
+def _status_error(status: int):
+    """Build a real openai APIStatusError with the given HTTP status."""
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    response = httpx.Response(status, request=request, json={"error": {"message": "boom"}})
+    cls = BadRequestError if status == 400 else APIStatusError
+    return cls("boom", response=response, body=None)
+
+
+@pytest.fixture(autouse=True)
+def clear_quirk_memo():
+    """_MODEL_QUIRKS is process-global — reset it so tests don't leak into each other."""
+    from agents.base_agent import _MODEL_QUIRKS
+    _MODEL_QUIRKS.clear()
+    yield
+    _MODEL_QUIRKS.clear()
+
+
+class TestBadRequestFallbackLadder:
+    """A 400 is not retryable — rotating models just reproduces it. Gemini often
+    names no field ("Request contains an invalid argument."), so the offending
+    part of the payload is found by re-sending without it."""
+
+    @pytest.mark.asyncio
+    async def test_drops_reasoning_effort_on_400(self):
+        from agents.base_agent import _call_with_retry
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[_status_error(400), _make_response("ok")]
+        )
+        result = await _call_with_retry(
+            client, ["model-a"], "test", messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort="none",
+        )
+        assert result.choices[0].message.content == "ok"
+        assert "reasoning_effort" not in client.chat.completions.create.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_quirk_is_remembered_for_the_model(self):
+        from agents.base_agent import _call_with_retry
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[_status_error(400), _make_response("ok"), _make_response("ok2")]
+        )
+        kwargs = {"messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "none"}
+        await _call_with_retry(client, ["model-a"], "test", **dict(kwargs))
+        await _call_with_retry(client, ["model-a"], "test", **dict(kwargs))
+        # 2 calls for the first request (400 + retry), 1 for the second — the
+        # rejected parameter is not sent again.
+        assert client.chat.completions.create.call_count == 3
+        assert "reasoning_effort" not in client.chat.completions.create.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_strips_empty_tool_parameters_on_second_rung(self):
+        from agents.base_agent import _call_with_retry
+        tools = [
+            {"type": "function", "function": {
+                "name": "get_account_info",
+                "parameters": {"type": "object", "properties": {}}}},
+            {"type": "function", "function": {
+                "name": "get_orders",
+                "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}}},
+        ]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[_status_error(400), _status_error(400), _make_response("ok")]
+        )
+        await _call_with_retry(
+            client, ["model-a"], "test", messages=[{"role": "user", "content": "hi"}],
+            tools=tools, reasoning_effort="none",
+        )
+        sent = client.chat.completions.create.call_args.kwargs["tools"]
+        assert "parameters" not in sent[0]["function"]
+        assert sent[1]["function"]["parameters"]["properties"] == {"limit": {"type": "integer"}}
+
+    @pytest.mark.asyncio
+    async def test_flattens_tool_turns_on_last_rung(self):
+        from agents.base_agent import _call_with_retry
+        messages = [
+            {"role": "user", "content": "pokaż zamówienia"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "function": {"name": "get_new_orders", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "2 zamówienia"},
+        ]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[_status_error(400), _status_error(400), _status_error(400), _make_response("ok")]
+        )
+        await _call_with_retry(
+            client, ["model-a"], "test", messages=messages, reasoning_effort="none",
+        )
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in sent)
+        assert any("2 zamówienia" in (m.get("content") or "") for m in sent)
+
+    @pytest.mark.asyncio
+    async def test_raises_when_no_variant_works(self):
+        from agents.base_agent import _call_with_retry
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=_status_error(400))
+        with pytest.raises(APIStatusError):
+            await _call_with_retry(
+                client, ["model-a"], "test", messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_400_status_error_is_not_retried(self):
+        """A 403 is a real error, not a payload quirk — no fallback attempts."""
+        from agents.base_agent import _call_with_retry
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=_status_error(403))
+        with pytest.raises(APIStatusError):
+            await _call_with_retry(
+                client, ["model-a"], "test", messages=[{"role": "user", "content": "hi"}],
+                reasoning_effort="none",
+            )
+        assert client.chat.completions.create.call_count == 1
 
 
 class TestSanitizeMessages:
