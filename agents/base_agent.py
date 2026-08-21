@@ -45,6 +45,44 @@ _BACKOFF_DELAYS = (2, 4, 8)
 _RETRYABLE = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError)
 
 
+def sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop/repair message turns Gemini rejects outright.
+
+    Gemini answers ANY request containing a message with an empty text part with
+    a non-retryable 400 INVALID_ARGUMENT ("Unable to submit request because it
+    has an empty text parameter"). A blank assistant turn gets into the stored
+    conversation history whenever a model reply comes back empty (output
+    truncated by max_tokens, a safety filter, or a tool round that produced no
+    text) — and from then on EVERY later message in that thread replays that
+    blank turn and fails the same way, so the whole conversation is dead until
+    the user starts a new one. The orchestrator now refuses to persist a blank
+    reply in the first place; this is the safety net that also heals threads
+    already poisoned by one, since sessions live in Redis for 30 days.
+
+    Rules:
+      - user/assistant text turns with blank content → dropped entirely.
+      - assistant turns carrying tool_calls → kept (the payload is in
+        tool_calls), but a blank content string is normalized to None, which
+        trips the same 400.
+      - tool results → never dropped (an orphaned tool_call is itself a 400),
+        blank content is replaced with a placeholder instead.
+    """
+    clean: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content")
+        blank = not content.strip() if isinstance(content, str) else content is None
+
+        if msg.get("role") == "tool":
+            clean.append({**msg, "content": "(no result)"} if blank else msg)
+        elif msg.get("tool_calls"):
+            clean.append({**msg, "content": None} if blank else msg)
+        elif not blank:
+            clean.append(msg)
+        else:
+            logger.warning("Dropping blank %s message before LLM call", msg.get("role"))
+    return clean
+
+
 async def _call_with_retry(
     client: AsyncOpenAI,
     model_pool: list[str],
@@ -60,6 +98,9 @@ async def _call_with_retry(
       2. After all models exhausted → wait (exponential backoff) → restart from first model.
       3. After all backoff rounds exhausted → raise the last seen exception.
     """
+    if "messages" in api_kwargs:
+        api_kwargs["messages"] = sanitize_messages(api_kwargs["messages"])
+
     last_exc: Exception = RuntimeError("No models in pool")
     for backoff_round, delay in enumerate((*_BACKOFF_DELAYS, None)):
         for model in model_pool:

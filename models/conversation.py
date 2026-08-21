@@ -60,13 +60,23 @@ class ConversationSession(BaseModel):
         )
         self.updated_at = datetime.utcnow()
 
-    def to_anthropic_messages(self) -> list[dict[str, str]]:
-        """Convert to Anthropic API messages format (user/assistant alternation)."""
+    def to_anthropic_messages(self, limit: int | None = None) -> list[dict[str, str]]:
+        """Convert to Anthropic API messages format (user/assistant alternation).
+
+        Blank turns are skipped: a stored empty assistant reply makes Gemini
+        reject the whole request with a non-retryable 400 ("empty text
+        parameter"), which would break every later message in the thread —
+        see agents/base_agent.py.sanitize_messages.
+
+        `limit` keeps only the most recent N turns. Sessions live for 30 days,
+        so an old thread otherwise replays hundreds of turns (including full
+        order/offer listings) into every single request.
+        """
         result = []
         for msg in self.messages:
-            if msg.role in (MessageRole.USER, MessageRole.ASSISTANT):
+            if msg.role in (MessageRole.USER, MessageRole.ASSISTANT) and msg.content.strip():
                 result.append({"role": msg.role.value, "content": msg.content})
-        return result
+        return result[-limit:] if limit else result
 
 
 class AgentResponse(BaseModel):

@@ -181,6 +181,33 @@ class TestConversationSession:
         session = self._make_session()
         assert session.to_anthropic_messages() == []
 
+    def test_to_anthropic_messages_skips_blank_turns(self):
+        """A stored empty assistant reply must never be replayed — Gemini 400s
+        on an empty text part, which would break the whole conversation."""
+        session = self._make_session()
+        session.add_message(MessageRole.USER, "hi")
+        session.add_message(MessageRole.ASSISTANT, "")
+        session.add_message(MessageRole.USER, "still there?")
+        session.add_message(MessageRole.ASSISTANT, "   \n ")
+        msgs = session.to_anthropic_messages()
+        assert msgs == [
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "still there?"},
+        ]
+
+    def test_to_anthropic_messages_limit_keeps_most_recent(self):
+        session = self._make_session()
+        for i in range(10):
+            session.add_message(MessageRole.USER, f"q{i}")
+            session.add_message(MessageRole.ASSISTANT, f"a{i}")
+        msgs = session.to_anthropic_messages(limit=4)
+        assert [m["content"] for m in msgs] == ["q8", "a8", "q9", "a9"]
+
+    def test_to_anthropic_messages_limit_larger_than_history(self):
+        session = self._make_session()
+        session.add_message(MessageRole.USER, "hi")
+        assert len(session.to_anthropic_messages(limit=50)) == 1
+
     def test_channel_type_values(self):
         assert ChannelType.FACEBOOK == "facebook"
         assert ChannelType.WHATSAPP == "whatsapp"
