@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from agents.allegro.allegro_tools import ALLEGRO_TOOLS, resolve_output_format
 from agents.base_agent import BaseAgent
+from agents.perf import StageTimer
 from models.conversation import AgentResponse
 from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
 
@@ -411,16 +412,21 @@ class AllegroAgent(BaseAgent):
     ) -> AgentResponse:
         from agents.base_agent import _call_with_retry
 
+        perf = StageTimer("allegro_agent.run")
+
         # ── Auth guard ────────────────────────────────────────────────────────
-        if self._allegro._tokens is None:
-            await self._allegro._load_tokens_from_redis()
-        if self._allegro._tokens is None:
-            return self._request_auth()
-        if self._allegro._tokens.is_expired():
-            try:
-                await self._allegro._refresh_tokens()
-            except AllegroAuthError:
+        with perf.stage("auth_check"):
+            if self._allegro._tokens is None:
+                await self._allegro._load_tokens_from_redis()
+            if self._allegro._tokens is None:
+                perf.log(result="auth_required")
                 return self._request_auth()
+            if self._allegro._tokens.is_expired():
+                try:
+                    await self._allegro._refresh_tokens()
+                except AllegroAuthError:
+                    perf.log(result="auth_expired")
+                    return self._request_auth()
 
         tools = self._get_tools()
         model_pool = self._get_model_pool()
@@ -455,20 +461,30 @@ class AllegroAgent(BaseAgent):
         message_threads_count_only = False
 
         while tool_rounds < MAX_TOOL_ROUNDS:
-            resp = await _call_with_retry(
-                self._client,
-                model_pool,
-                f"allegro/tool-select-{tool_rounds + 1}",
-                messages=messages,
-                tools=tools,
-                tool_choice="required",
-                max_tokens=400,
-            )
+            with perf.stage("tool_select_llm"):
+                resp = await _call_with_retry(
+                    self._client,
+                    model_pool,
+                    f"allegro/tool-select-{tool_rounds + 1}",
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="required",
+                    max_tokens=400,
+                    # This call only ever needs to pick a tool + arguments per the
+                    # MANDATORY TOOL CALLS rules above — no open-ended reasoning is
+                    # needed. Without this, thinking-capable models (gemini-3.5-flash,
+                    # 2.5-flash) burn seconds of invisible reasoning tokens before
+                    # emitting the tool call (same issue as orchestrator._classify_with_llm
+                    # — see the comment there), which was the single biggest contributor
+                    # to the 30s-60s response times reported for e.g. "new orders" queries.
+                    reasoning_effort="none",
+                )
             msg = resp.choices[0].message
 
             if not msg.tool_calls:
                 # model ignored tool_choice — interpret whatever it said
                 logger.warning("AllegroAgent: model skipped tool_choice=required (round %d)", tool_rounds + 1)
+                perf.log(result="no_tool_call")
                 return AgentResponse(text=msg.content or "", agent_type=self.agent_name, metadata={"output_format": "chat"})
 
             messages.append({
@@ -497,7 +513,8 @@ class AllegroAgent(BaseAgent):
                         message_threads_count_only = True
                 logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
                 try:
-                    result = await self._execute_tool(tool_name, tool_input)
+                    with perf.stage(f"tool:{tool_name}"):
+                        result = await self._execute_tool(tool_name, tool_input)
                 except Exception as exc:
                     logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
                     result = "An internal error occurred. Please try again."
@@ -537,15 +554,27 @@ class AllegroAgent(BaseAgent):
         # ── Step 2: interpret — NO tools ─────────────────────────────────────
         # The LLM now sees the real API results and formats the answer.
         # Without tools it literally cannot hallucinate store data.
-        interp_resp = await _call_with_retry(
-            self._client,
-            model_pool,
-            "allegro/interpret",
-            messages=messages,
-            max_tokens=self._settings.gemini_max_tokens,
-            # no `tools` parameter — model can only read and format
-        )
+        with perf.stage("interpret_llm"):
+            interp_resp = await _call_with_retry(
+                self._client,
+                model_pool,
+                "allegro/interpret",
+                messages=messages,
+                max_tokens=self._settings.gemini_max_tokens,
+                # Pure formatting of data that's already in `messages` (see the
+                # tool-select call above for why thinking-capable models eating
+                # invisible reasoning tokens here — against a 16000 max_tokens
+                # budget, easily tens of seconds — is the main driver of slow
+                # replies) — no extended reasoning is needed to lay it out.
+                reasoning_effort="none",
+                # no `tools` parameter — model can only read and format
+            )
         final_text = interp_resp.choices[0].message.content or ""
+        perf.log(
+            source=self.agent_name,
+            output_format=output_format,
+            tools=",".join(called_tools) or "none",
+        )
         return AgentResponse(text=final_text, agent_type=self.agent_name, metadata={"output_format": output_format})
 
     def _request_auth(self) -> AgentResponse:

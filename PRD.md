@@ -29,7 +29,7 @@ AllEasystent to asystent AI dla właścicieli sklepów na Allegro. Umożliwia za
 │  FastAPI (main.py)                                  │
 │  ┌──────────────────────────────────────────────┐  │
 │  │  Orchestrator                                │  │
-│  │  1. Ładuje historię (Firestore / in-memory)  │  │
+│  │  1. Ładuje historię (Redis / in-memory)      │  │
 │  │  2. RAG retrieve (best-effort)               │  │
 │  │  3. Klasyfikacja intencji                    │  │
 │  │  4. Routing do agenta                        │  │
@@ -48,13 +48,13 @@ AllegroService → Allegro REST API
 ### 2.2 Przepływ wiadomości
 
 1. Wiadomość trafia przez `/query` lub webhook Messengera
-2. Orkiestrator ładuje historię rozmowy z Firestore (fallback: pamięć)
+2. Orkiestrator ładuje historię rozmowy z Redis (fallback: pamięć)
 3. RAG retriever pobiera kontekst z bazy wiedzy (opcjonalnie)
 4. Klasyfikacja intencji: najpierw reguły słów kluczowych, potem Gemini
 5. Routing do odpowiedniego agenta
 6. Agent wykonuje pętlę tool-use z Gemini
 7. Odpowiedź wraca do kanału wyjściowego
-8. Historia rozmowy zapisywana w Firestore
+8. Historia rozmowy zapisywana w Redis
 
 ---
 
@@ -242,11 +242,11 @@ Centralny router odpowiedzialny za cały przepływ przetwarzania wiadomości.
 
 ## 7. Persystencja danych
 
-### 7.1 Historia rozmów — Firestore
+### 7.1 Historia rozmów — Redis
 
-- Kolekcja: `conversations` (konfigurowalna)
+- Klucz: `conv:{session_id}` (TTL 30 dni)
 - Operacje: `get`, `save`, `get_or_create`, `list` (z filtrowaniem po kanale)
-- Fallback: in-memory dict (gdy `gcp_project_id` nie ustawiony)
+- Fallback: in-memory dict (gdy `REDIS_URL` nie ustawiony)
 
 ### 7.2 Historia rozmów — LocalStorage (frontend)
 
@@ -327,7 +327,7 @@ Wszystkie parametry odczytywane z pliku `.env` lub zmiennych środowiskowych.
 
 | Zmienna | Domyślnie | Opis |
 |---|---|---|
-| `GCP_PROJECT_ID` | `""` | ID projektu GCP (Firestore, Pub/Sub) |
+| `GCP_PROJECT_ID` | `""` | ID projektu GCP (Pub/Sub) |
 | `GCP_REGION` | `europe-central2` | Region |
 
 ### Opcjonalne — Aplikacja
@@ -391,6 +391,6 @@ Wszystkie parametry odczytywane z pliku `.env` lub zmiennych środowiskowych.
 - **RAG jest pusty po starcie** — baza wiedzy wymaga ręcznego zaindeksowania przez `/admin/rag/*`
 - **ChromaDB jest efemeryczny na Railway** — dane tracone przy restarcie kontenera (brak persistent volume)
 - **Jedno konto Allegro** — system zakłada jednego sprzedawcę; tokeny przechowywane w jednym pliku
-- **Historia rozmów w dwóch miejscach** — Firestore (backend) i LocalStorage (frontend) są niezależne
+- **Historia rozmów w dwóch miejscach** — Redis (backend) i LocalStorage (frontend) są niezależne
 - **Pub/Sub** — zintegrowany w kodzie, ale nieaktywnie używany w głównym przepływie
 - **Secret Manager dla tokenów Allegro** — opcja `allegro_token_store = "secret_manager"` jest w konfiguracji, ale implementacja nie jest ukończona

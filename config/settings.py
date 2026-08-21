@@ -98,7 +98,6 @@ class Settings(BaseSettings):
     # ── GCP ──────────────────────────────────────────────────────────────────
     gcp_project_id: str = ""
     gcp_region: str = "europe-central2"
-    firestore_collection_conversations: str = "conversations"
     pubsub_topic_incoming: str = "incoming-messages"
     pubsub_topic_outgoing: str = "outgoing-messages"
     pubsub_subscription_incoming: str = "incoming-messages-sub"

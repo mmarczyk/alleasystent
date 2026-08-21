@@ -129,7 +129,7 @@ AllEasystent to asystent AI dla właścicieli sklepów na Allegro. Umożliwia za
 │  FastAPI (main.py)                                  │
 │  ┌──────────────────────────────────────────────┐  │
 │  │  Orchestrator                                │  │
-│  │  1. Ładuje historię (Firestore / in-memory)  │  │
+│  │  1. Ładuje historię (Redis / in-memory)      │  │
 │  │  2. RAG retrieve (best-effort)               │  │
 │  │  3. Klasyfikacja intencji                    │  │
 │  │  4. Routing do agenta                        │  │
@@ -148,13 +148,13 @@ AllegroService → Allegro REST API
 **Przepływ wiadomości:**
 
 1. Wiadomość trafia przez `/query` lub webhook Messengera
-2. Orkiestrator ładuje historię rozmowy z Firestore (fallback: pamięć)
+2. Orkiestrator ładuje historię rozmowy z Redis (fallback: pamięć)
 3. RAG retriever pobiera kontekst z bazy wiedzy
 4. Klasyfikacja intencji: reguły słów kluczowych → Gemini
 5. Routing do odpowiedniego agenta
 6. Agent wykonuje pętlę tool-use z Gemini (max 10 iteracji)
 7. Odpowiedź wraca do kanału wyjściowego
-8. Historia rozmowy zapisywana w Firestore
+8. Historia rozmowy zapisywana w Redis
 
 ---
 
@@ -262,7 +262,7 @@ Dla zapytań niejednoznacznych, nierozpoznanych przez reguły. Fallback przy nie
 
 | Dane | Backend produkcja | Backend development | Fallback |
 |---|---|---|---|
-| Historia rozmów | Firestore (`conversations`) | Firestore | In-memory dict |
+| Historia rozmów | Redis | Redis | In-memory dict |
 | Historia rozmów (frontend) | LocalStorage | LocalStorage | — |
 | Tokeny Allegro | GCP Secret Manager | `.allegro_tokens.json` | — |
 | Wektory RAG | Vertex AI | ChromaDB (SQLite) | — |
@@ -334,7 +334,7 @@ Dla zapytań niejednoznacznych, nierozpoznanych przez reguły. Fallback przy nie
 
 | Zmienna | Domyślnie | Opis |
 |---|---|---|
-| `GCP_PROJECT_ID` | `""` | ID projektu GCP (Firestore, Pub/Sub) |
+| `GCP_PROJECT_ID` | `""` | ID projektu GCP (Pub/Sub) |
 | `GCP_REGION` | `europe-central2` | Region |
 
 ### Aplikacja
@@ -395,6 +395,6 @@ Dla zapytań niejednoznacznych, nierozpoznanych przez reguły. Fallback przy nie
 | L-01 | RAG jest pusty po starcie — baza wiedzy wymaga ręcznego zaindeksowania przez `/admin/rag/*` |
 | L-02 | ChromaDB traci dane przy restarcie kontenera — brak persistent volume na Railway |
 | L-03 | System obsługuje jedno konto Allegro na instancję |
-| L-04 | Historia rozmów w Firestore (backend) i LocalStorage (frontend) są niezależne |
+| L-04 | Historia rozmów w Redis (backend) i LocalStorage (frontend) są niezależne |
 | L-05 | `allegro_token_store = "secret_manager"` jest w konfiguracji, ale implementacja nie jest ukończona |
 | L-06 | Pub/Sub jest zintegrowany w kodzie, ale nieużywany aktywnie w głównym przepływie |

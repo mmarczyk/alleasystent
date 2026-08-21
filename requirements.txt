@@ -16,7 +16,6 @@ chromadb==0.5.23
 sentence-transformers==3.3.1
 
 # ── GCP ───────────────────────────────────────────────────────────────────────
-google-cloud-firestore==2.19.0
 google-cloud-pubsub==2.27.1
 google-cloud-secret-manager==2.21.1
 # google-cloud-aiplatform==1.73.0  # Uncomment for Vertex AI RAG
