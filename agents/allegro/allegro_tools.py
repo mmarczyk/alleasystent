@@ -773,6 +773,43 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "suggest_invoice_reminder",
+            "description": (
+                "Present the user with a button to enable the automatic invoice REMINDER — a "
+                "scheduled check (every 2h, 7:00-20:00) for unissued VAT invoices on already-"
+                "SHIPPED orders that asks the seller IN CHAT whether to issue them, and adapts to "
+                "the reply: issues them right away, reschedules itself if the seller asks to be "
+                "reminded again later (and remembers for how long), or nags again unchanged if the "
+                "seller never answers. "
+                "This is DIFFERENT from suggest_invoice_monitoring (a simple 15-minute new-order "
+                "notifier with no follow-up conversation) — call THIS one when the user wants to be "
+                "actively asked/nagged about issuing pending invoices, not just notified that one "
+                "exists. get_orders_pending_invoice ALREADY appends this automatically, so do NOT "
+                "call this tool right after it. Only call this when the user brings up invoice "
+                "reminders/nagging on its own, with no get_orders_pending_invoice call in the same "
+                "turn. Do NOT call multiple times in one conversation."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_invoice_reminder",
+            "description": (
+                "Show a button to disable the automatic invoice REMINDER in the browser — the one "
+                "that asks in chat whether to issue pending invoices and adapts to the reply. Not "
+                "the same as disable_invoice_monitoring (the simpler notifier); call THIS one when "
+                "the user asks to stop the reminders/nagging about invoices specifically. "
+                "get_orders_pending_invoice ALREADY offers this button when the reminder is on, so "
+                "only call this tool when the user asks outside of an invoice query."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "suggest_message_monitoring",
             "description": (
                 "Present the user with a button to enable automatic monitoring of new/unread buyer "
@@ -972,10 +1009,12 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
     "suggest_invoice_monitoring": "action",
+    "suggest_invoice_reminder": "action",
     "suggest_message_monitoring": "action",
     "suggest_returns_monitoring": "action",
     "disable_order_monitoring": "action",
     "disable_invoice_monitoring": "action",
+    "disable_invoice_reminder": "action",
     "disable_message_monitoring": "action",
     "disable_returns_monitoring": "action",
 }

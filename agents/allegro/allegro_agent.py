@@ -372,14 +372,26 @@ class AllegroAgent(BaseAgent):
         "/ disable_order_monitoring when the user brings up monitoring/notifications OUTSIDE of an "
         "order query (e.g. general 'wyłącz monitoring', 'chcę powiadomienia o zamówieniach' with no "
         "get_new_orders call in this turn), or for INVOICE monitoring (suggest_invoice_monitoring / "
-        "disable_invoice_monitoring), MESSAGE monitoring (suggest_message_monitoring / "
+        "disable_invoice_monitoring — a simple 15-minute new-order notifier), the INVOICE REMINDER "
+        "(suggest_invoice_reminder / disable_invoice_reminder — a scheduled 7:00-20:00 check that "
+        "actively ASKS in chat whether to issue pending invoices for shipped orders and adapts to "
+        "the reply; use this pair, not the plain monitoring one, when the user wants to be nagged/"
+        "asked rather than just notified), MESSAGE monitoring (suggest_message_monitoring / "
         "disable_message_monitoring), or RETURNS/COMPLAINTS monitoring (suggest_returns_monitoring / "
         "disable_returns_monitoring — a single shared toggle covering BOTH zwroty and reklamacje, "
         "there is no separate tool for each) — call suggest_message_monitoring after get_message_threads "
         "when the user asks about being notified of new buyer messages, and likewise "
-        "suggest_returns_monitoring after get_new_returns/get_returns_to_process/get_new_complaints "
-        "(though all three ALREADY append the status block themselves, same as get_new_orders — "
+        "suggest_returns_monitoring after get_new_returns/get_returns_to_process/get_new_complaints, and "
+        "suggest_invoice_reminder after get_orders_pending_invoice when the user wants to be actively "
+        "asked about pending invoices "
+        "(though get_new_orders/get_message_threads/get_new_returns/get_returns_to_process/"
+        "get_new_complaints/get_orders_pending_invoice ALREADY append their own status block — "
         "don't double-call). "
+        "The invoice REMINDER also handles its own conversation once it has asked — if the user's "
+        "current message looks like a reply to that chat question ('tak wystaw', 'później', 'za 3 "
+        "godziny', 'przestań pytać'), it is intercepted before reaching you at all "
+        "(agents.orchestrator.Orchestrator.handle), so you will never see it; don't try to replicate "
+        "that logic yourself. "
         "Whichever of the pair you call (suggest "
         "or disable), the reply always reflects the REAL stored status, not your guess — never assert "
         "in your own words whether monitoring is on/off ('nie jest włączone', 'jest aktywne'), always let "
@@ -834,6 +846,34 @@ class AllegroAgent(BaseAgent):
             '🧾 Włącz monitoring faktur</button>'
         )
 
+    async def _invoice_reminder_status_block(self) -> str:
+        """Deterministic (non-LLM) status + action button for the automatic
+        invoice REMINDER — a scheduled 7:00-20:00 check (every 2h by default,
+        adjustable by the seller) for unissued VAT invoices on already-shipped
+        orders, which asks in chat whether to issue them and adapts to the
+        reply (see services/invoice_reminder.py). Different from
+        _invoice_monitoring_status_block above, which is a simple client-side
+        15-minute "new order needs an invoice" notifier with no follow-up.
+        """
+        from services.invoice_reminder import is_monitor_enabled
+
+        if await is_monitor_enabled(self._allegro._user_id):
+            return (
+                "⏰ Automatyczne przypomnienia o niewystawionych fakturach są włączone — co 2 "
+                "godziny (7:00-20:00) sprawdzę, czy są niewystawione faktury dla wysłanych "
+                "zamówień, i zapytam Cię o to na czacie.\n\n"
+                '<button class="btn-invoice-reminder" style="filter:grayscale(1)" '
+                'onclick="InvoiceReminder.disable();this.outerHTML=\'<span>✓ Przypomnienia o fakturach wyłączone</span>\'">'
+                '🔕 Wyłącz przypomnienia o fakturach</button>'
+            )
+        return (
+            "💡 Mogę co 2 godziny (7:00-20:00) sprawdzać, czy są niewystawione faktury dla już "
+            "wysłanych zamówień, i pytać Cię o to na czacie — a jeśli poprosisz o odłożenie, "
+            "zapamiętam na jak długo.\n\n"
+            '<button class="btn-invoice-reminder" onclick="InvoiceReminder.enable()">'
+            '⏰ Włącz przypomnienia o fakturach</button>'
+        )
+
     async def _message_monitoring_status_block(self) -> str:
         """Deterministic (non-LLM) status + action button for automatic message
         checking — same rationale as _monitoring_status_block above."""
@@ -1050,39 +1090,14 @@ class AllegroAgent(BaseAgent):
         ambiguous yes/no question created a real (failed) issuance attempt.
         Requiring a concrete order_id per call keeps the blast radius of any
         future misfire to at most one invoice.
+
+        Delegates to services.infakt_service.issue_invoice_for_order, which is
+        also called (once per order, same one-at-a-time path) by the invoice
+        reminder's "issue now" action — see services/invoice_reminder.py.
         """
-        from services.infakt_service import (
-            InfaktAPIError,
-            InfaktService,
-            InfaktTaskError,
-            build_invoice_payload,
-        )
+        from services.infakt_service import issue_invoice_for_order
 
-        order = await self._allegro.get_order(order_id)
-        if not order.invoice_required:
-            return f"Zamówienie `{order_id}`: kupujący nie poprosił o fakturę VAT — nic nie wystawiono."
-
-        existing = await self._allegro.get_order_invoices(order_id)
-        if existing:
-            return f"Zamówienie `{order_id}`: faktura już istnieje w Allegro — nie wystawiono kolejnej."
-
-        try:
-            address = await self._allegro.get_order_invoice_data(order_id)
-            payload = build_invoice_payload(order, address, self._settings.is_production)
-            infakt = InfaktService.get_instance()
-            status = await infakt.create_invoice(payload)
-            invoice_uuid = status["invoice_uuid"]
-            link = await infakt.get_share_link(invoice_uuid)
-            buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
-            return (
-                f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt: {link}\n"
-                f"ID faktury w inFakt: `{invoice_uuid}`\n"
-                f"Nabywca: {buyer_kind}.\n"
-                "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
-            )
-        except (InfaktAPIError, InfaktTaskError, TimeoutError) as exc:
-            logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
-            return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
+        return await issue_invoice_for_order(self._allegro, order_id, self._settings.is_production)
 
     async def _attach_invoice_to_allegro_order(self, order_id: str, invoice_uuid: str) -> str:
         """Fetch the invoice PDF from inFakt and attach it to the Allegro order.
@@ -1832,7 +1847,7 @@ class AllegroAgent(BaseAgent):
                 year=tool_input.get("year"),
             )
             if not orders:
-                return "Brak zamówień wymagających wystawienia faktury."
+                return "Brak zamówień wymagających wystawienia faktury." + "\n\n" + await self._invoice_reminder_status_block()
             # Fetch invoice address data for all orders in parallel
             inv_results = await asyncio.gather(
                 *[self._allegro.get_order_invoice_data(o.order_id) for o in orders],
@@ -1859,7 +1874,7 @@ class AllegroAgent(BaseAgent):
                     if inv.get("street"):
                         extra.append(f"Adres: {inv['street']}, {inv.get('zip_code', '')} {inv.get('city', '')}".strip(", "))
                 blocks.append(self._order_block(o, extra_lines=extra))
-            return header + "\n\n".join(blocks)
+            return header + "\n\n".join(blocks) + "\n\n" + await self._invoice_reminder_status_block()
 
         if tool_name == "preview_pending_invoices":
             return await self._preview_pending_invoices(
@@ -1889,6 +1904,9 @@ class AllegroAgent(BaseAgent):
 
         if tool_name in ("suggest_invoice_monitoring", "disable_invoice_monitoring"):
             return await self._invoice_monitoring_status_block()
+
+        if tool_name in ("suggest_invoice_reminder", "disable_invoice_reminder"):
+            return await self._invoice_reminder_status_block()
 
         if tool_name in ("suggest_message_monitoring", "disable_message_monitoring"):
             return await self._message_monitoring_status_block()

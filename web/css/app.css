@@ -496,6 +496,15 @@ select option { background: var(--bg2); }
 }
 .btn-returns-monitoring:hover { filter: brightness(1.12); }
 
+.btn-invoice-reminder {
+  display: inline-flex; align-items: center; gap: .4rem;
+  background: var(--warning, #f59e0b); color: #fff;
+  border: none; border-radius: var(--radius-sm);
+  padding: .5rem 1rem; font-size: .88rem; font-weight: 600;
+  cursor: pointer; margin-top: .5rem; transition: filter .15s;
+}
+.btn-invoice-reminder:hover { filter: brightness(1.12); }
+
 /* ── DOCUMENT VIEWER ─────────────────────────────── */
 .doc-viewer {
   position: fixed; inset: 0; z-index: 200;

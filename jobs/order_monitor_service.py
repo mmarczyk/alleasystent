@@ -37,11 +37,12 @@ logger = logging.getLogger(__name__)
 
 from services.order_monitor import run_once as run_order_monitor  # noqa: E402
 from services.return_complaint_monitor import run_once as run_returns_complaints_monitor  # noqa: E402
+from services.invoice_reminder import run_once as run_invoice_reminder  # noqa: E402
 
 
 async def _run_all() -> None:
     # Isolated try/except per monitor so one failing (e.g. a transient Allegro
-    # API error surfacing unexpectedly) doesn't block the other from running.
+    # API error surfacing unexpectedly) doesn't block the others from running.
     try:
         await run_order_monitor()
     except Exception:
@@ -50,6 +51,10 @@ async def _run_all() -> None:
         await run_returns_complaints_monitor()
     except Exception:
         logger.exception("returns/complaints monitor pass failed")
+    try:
+        await run_invoice_reminder()
+    except Exception:
+        logger.exception("invoice reminder pass failed")
 
 
 class Handler(BaseHTTPRequestHandler):

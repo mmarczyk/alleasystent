@@ -627,11 +627,16 @@ class AllegroService:
         self,
         month: int | None = None,
         year: int | None = None,
+        shipped_only: bool = False,
     ) -> list[AllegroOrder]:
         """
         Return orders for the given month (default: current month) where:
           - buyer requested an invoice (invoice.required=true, dontWant=false)
           - seller hasn't uploaded one yet
+          - if shipped_only: the order has already been sent to the buyer
+            (fulfillment.status SENT or PICKED_UP) — used by the invoice
+            reminder (services/invoice_reminder.py), which only nags about
+            orders that already shipped, not ones still being packed.
         Paginates through all orders for the month, then checks invoice status.
         """
         import calendar
@@ -662,6 +667,8 @@ class AllegroService:
 
         # Client-side filter: buyer wants invoice
         candidates = [o for o in all_orders if o.invoice_required]
+        if shipped_only:
+            candidates = [o for o in candidates if o.fulfillment_status in ("SENT", "PICKED_UP")]
 
         # Keep only those without any uploaded invoice — fetch all in parallel
         invoice_lists = await asyncio.gather(*[

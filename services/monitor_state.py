@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-"""Per-user enabled/disabled flags for the client-side invoice and message
-monitors (web/js/app.js InvoiceMonitor / MessageMonitor) — those poll from
-the browser tab, not a Cloud Run Job like services/order_monitor.py, but the
-chat agent still needs a source of truth to answer "is monitoring on?"
-honestly instead of guessing (see AllegroAgent._invoice_monitoring_status_block
-/ _message_monitoring_status_block, mirroring order_monitor.is_monitor_enabled).
+"""Per-user enabled/disabled flags for on/off monitor toggles that don't
+warrant their own Redis module: the client-side invoice and message
+monitors (web/js/app.js InvoiceMonitor / MessageMonitor, kinds "invoice" /
+"message"), which poll from the browser tab rather than a Cloud Run Job like
+services/order_monitor.py, and the server-side invoice REMINDER (kind
+"invoice_reminder", see services/invoice_reminder.py), whose own detection
++ state live elsewhere but which reuses this same enabled-flag store. The
+chat agent still needs a source of truth to answer "is this on?" honestly
+instead of guessing (see AllegroAgent._invoice_monitoring_status_block /
+_message_monitoring_status_block / _invoice_reminder_status_block,
+mirroring order_monitor.is_monitor_enabled).
 """
 
 import logging
