@@ -162,7 +162,7 @@ class TestPushPending:
     def test_pending_returns_null_when_no_messages(self, client):
         from services.auth_service import create_session_token
         token = create_session_token({"sub": "user1", "name": "User"})
-        with patch("services.push_service.pop_pending_chat", new_callable=AsyncMock, return_value=None):
+        with patch("services.push_service.pop_pending_chats", new_callable=AsyncMock, return_value=[]):
             resp = client.get("/push/pending", cookies={"session": token})
         assert resp.status_code == 200
         assert resp.json()["chatMessage"] is None

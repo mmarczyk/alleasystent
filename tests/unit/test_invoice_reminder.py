@@ -249,3 +249,44 @@ class TestHandleReply:
             result = await invoice_reminder.handle_reply("user1", "później")
         assert "jak długo" in result.lower()
         mock_await_duration.assert_awaited_once_with("user1", state)
+
+
+class TestReminderIsChatOnly:
+    """The reminder must read as the assistant writing in the chat, not as a
+    system alert: no OS push, no entry in the notifications panel. The other
+    monitors (orders, messages, returns) are unaffected and still notify."""
+
+    async def _run_ask(self, **kwargs):
+        from services import invoice_reminder, push_service
+
+        store = AsyncMock()
+        notify = AsyncMock()
+        push = AsyncMock()
+        with patch.object(push_service, "store_pending_chat", store), \
+             patch.object(push_service, "add_notification", notify), \
+             patch.object(push_service, "send_push", push):
+            await invoice_reminder._ask("user1", ["o1", "o2"], **kwargs)
+        return store, notify, push
+
+    @pytest.mark.asyncio
+    async def test_first_ask_only_queues_a_chat_message(self):
+        store, notify, push = await self._run_ask(again=False, awaiting_duration=False)
+        store.assert_awaited_once()
+        notify.assert_not_awaited()
+        push.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_queued_under_a_dedupe_tag(self):
+        """An unanswered reminder is replaced by the next one, not stacked."""
+        from services.invoice_reminder import _MONITOR_KIND
+
+        store, _, _ = await self._run_ask(again=True, awaiting_duration=False)
+        assert store.await_args.kwargs["dedupe_tag"] == _MONITOR_KIND
+
+    @pytest.mark.asyncio
+    async def test_repeat_ask_mentions_the_orders(self):
+        store, notify, push = await self._run_ask(again=True, awaiting_duration=True)
+        text = store.await_args[0][1]
+        assert "o1" in text and "o2" in text
+        notify.assert_not_awaited()
+        push.assert_not_awaited()

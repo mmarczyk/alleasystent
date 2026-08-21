@@ -812,14 +812,15 @@ const WebPush = (() => {
   }
 
   async function checkPending() {
-    // Retrieve and remove the oldest pending chat message from the server.
-    // Called on app startup so devices that were offline during polling still see messages.
+    // Drain the server-side queue of messages the assistant wrote on its own
+    // initiative. Returns them oldest-first, [] when there is nothing waiting.
     try {
       const res = await fetch(Settings.api('/push/pending'), { credentials: 'include', headers: Auth.headers() });
-      if (!res.ok) return null;
+      if (!res.ok) return [];
       const data = await res.json();
-      return data.chatMessage || null;
-    } catch { return null; }
+      if (Array.isArray(data.chatMessages)) return data.chatMessages;
+      return data.chatMessage ? [data.chatMessage] : [];  // backend older than the list response
+    } catch { return []; }
   }
 
   async function init() {
@@ -839,6 +840,66 @@ const WebPush = (() => {
   }
 
   return { isSupported, subscribe, sendNotification, checkPending, init };
+})();
+
+// ── Assistant-initiated chat messages ────────────
+// The invoice reminder is written by the assistant on its own schedule, so it
+// has no reply to ride back on and no open channel to arrive through — it waits
+// in a server-side queue until the app asks for it. Delivered here as an
+// ordinary assistant turn in the current conversation, which is what makes it
+// read as the assistant writing rather than as a system alert.
+//
+// Polled from three places because each alone leaves a hole: startup misses an
+// app that was already open, resume misses a desktop tab that never goes
+// hidden, and the interval alone would sit on a message for up to a minute
+// after the seller opens the app.
+const PendingChat = (() => {
+  const POLL_MS = 60 * 1000;
+  let _timer = null;
+  let _inflight = false;
+
+  async function deliver() {
+    // Fetching drains the queue, so overlapping runs would split it between
+    // them and paint half a conversation.
+    if (_inflight) return;
+    _inflight = true;
+    try {
+      const texts = await WebPush.checkPending();
+      if (!texts.length) return;
+      if (!Store.active()) Store.create();
+      const conv = Store.active();
+      if (!conv) return;
+      let added = false;
+      for (const text of texts) {
+        const last = conv.messages[conv.messages.length - 1];
+        // Guard against delivering the same message twice (two tabs, a retried
+        // fetch) — but only against the message immediately before it, since
+        // the same reminder legitimately recurs later in a long conversation.
+        if (last && last.role === 'assistant' && last.content === text) continue;
+        Store.addMessage('assistant', text);
+        added = true;
+      }
+      if (added) Chat.renderMessages();
+    } catch {
+      // Nothing to do — the next poll picks it up, unless the queue was already
+      // drained, in which case the message is lost either way.
+    } finally {
+      _inflight = false;
+    }
+  }
+
+  function start() {
+    deliver();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') deliver();
+    });
+    if (_timer) clearInterval(_timer);
+    _timer = setInterval(() => {
+      if (document.visibilityState === 'visible') deliver();
+    }, POLL_MS);
+  }
+
+  return { start, deliver };
 })();
 
 // ── Order monitor ────────────────────────────────
@@ -1197,17 +1258,15 @@ const InvoiceReminder = (() => {
 
   function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
 
+  // No push subscription here, unlike the other monitors: this reminder is
+  // delivered as a chat message from the assistant (see PendingChat), so it
+  // works regardless of notification permissions.
   async function enable() {
-    const pushOk = await WebPush.subscribe();
     localStorage.setItem(ENABLED_KEY, '1');
     fetch(Settings.api('/allegro/invoice-reminder/enable'), {
       method: 'POST', credentials: 'include', headers: Auth.headers(),
     }).catch(() => {});
-    if (pushOk) {
-      UI.toast('✓ Przypomnienia o fakturach włączone (co 2h, 7:00-20:00)');
-    } else {
-      UI.toast('⚠️ Przypomnienia włączone, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
-    }
+    UI.toast('✓ Przypomnienia o fakturach włączone — napiszę Ci na czacie (co 2h, 7:00-20:00)');
     document.querySelectorAll('.btn-invoice-reminder').forEach(btn => {
       btn.outerHTML = '<span class="monitoring-badge">✓ Przypomnienia o fakturach aktywne</span>';
     });
@@ -1221,14 +1280,7 @@ const InvoiceReminder = (() => {
     }).catch(() => {});
   }
 
-  function init() {
-    if (!isEnabled()) return;
-    if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      WebPush.subscribe().catch(() => {});
-    }
-  }
-
-  return { isEnabled, enable, disable, init };
+  return { isEnabled, enable, disable };
 })();
 
 // ── Notifications (bell icon panel) ──────────────
@@ -1915,7 +1967,7 @@ const Chat = (() => {
     if (lastUser) await send(lastUser.content);
   }
 
-  return { send, handleKey, sendSuggestion, newConversation, loadConversation, deleteConversation, copyMessage, regenerate, retryLast };
+  return { send, handleKey, sendSuggestion, newConversation, loadConversation, deleteConversation, copyMessage, regenerate, retryLast, renderMessages };
 })();
 
 // ── Allegro OAuth login ──────────────────────────────────────────────────
@@ -2124,20 +2176,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Re-register push subscription with backend (token may have rotated)
   WebPush.init();
 
-  // Check for pending chat messages stored on server (sent while this device was offline)
-  WebPush.checkPending().then(text => {
-    if (!text) return;
-    try {
-      if (!Store.active()) Store.create();
-      const conv = Store.active();
-      if (!conv) return;
-      const isDup = conv.messages.some(m => m.content === text);
-      if (isDup) return;
-      conv.messages.push({ role: 'assistant', content: text, ts: Date.now() });
-      localStorage.setItem('ae_conversations', JSON.stringify(Store.all()));
-      setTimeout(() => Chat.loadConversation(conv.id), 0);
-    } catch {}
-  }).catch(() => {});
+  // Deliver anything the assistant wrote while this device wasn't listening,
+  // and keep watching for more while the app stays open.
+  PendingChat.start();
 
   // Init monitors AFTER full UI setup so chat injection finds a ready DOM
   const _startParams = new URLSearchParams(location.search);
@@ -2146,7 +2187,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   InvoiceMonitor.init(_cameFromNotification);
   MessageMonitor.init(_cameFromNotification);
   ReturnsMonitor.init();
-  InvoiceReminder.init();
 
   Notifications.init();
   // Tapping a system push notification opens straight into the Notifications

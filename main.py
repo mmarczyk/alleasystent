@@ -944,17 +944,22 @@ async def push_notify(request: Request):
 
 @app.get("/push/pending", tags=["Push"])
 async def push_pending(request: Request):
-    """Return (and remove) the oldest pending chat message for the current user.
+    """Return (and remove) every pending chat message for the current user.
 
-    Called on app startup — lets devices that were offline during polling still
-    receive the formatted order/invoice notification in their chat.
-    Returns {chatMessage: string} or {chatMessage: null} when queue is empty.
+    Polled by the app on startup, on resume, and periodically while open — that
+    is how a message the assistant wrote on its own initiative (e.g. the invoice
+    reminder) reaches the seller's chat, whether or not the app was running when
+    it was written.
+
+    Returns {chatMessages: [string], chatMessage: string|null}. `chatMessage` is
+    the first of them, kept so an app version cached before this endpoint
+    returned a list still shows something rather than nothing.
     """
     from services.auth_service import get_current_user
-    from services.push_service import pop_pending_chat
+    from services.push_service import pop_pending_chats
     user = await get_current_user(request)
-    text = await pop_pending_chat(user["sub"])
-    return {"chatMessage": text}
+    texts = await pop_pending_chats(user["sub"])
+    return {"chatMessages": texts, "chatMessage": texts[0] if texts else None}
 
 
 # ── Notifications ────────────────────────────────────────────────────────────

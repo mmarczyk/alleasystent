@@ -183,43 +183,43 @@ async def _ask(user_id: str, order_ids: list[str], again: bool, awaiting_duratio
     ids_str = _format_order_ids(order_ids)
 
     if not again:
-        title = "Niewystawione faktury"
-        body = f"Masz {phrase} do wystawienia dla wysłanych zamówień."
         text = (
             f"🧾 Masz {phrase} dla już wysłanych zamówień: {ids_str}.\n\n"
             "Wystawić je teraz?"
         )
     elif awaiting_duration:
-        title = "Nadal czekam na odpowiedź"
-        body = f"Na jak długo odłożyć przypomnienie o {_count_phrase(len(order_ids))}?"
         text = (
             f"🧾 Ponownie Ci przypominam o {phrase} do wystawienia ({ids_str}) — "
             "na jak długo mam odłożyć to przypomnienie? Albo napisz „wystaw”, "
             "jeśli chcesz zrobić to teraz."
         )
     else:
-        title = "Ponownie przypominam"
-        body = f"Nadal masz {phrase} do wystawienia."
         text = (
             f"🧾 Ponownie Ci przypominam: nadal masz {phrase} dla wysłanych zamówień "
             f"({ids_str}). Wystawić je teraz?"
         )
 
-    await _notify(user_id, title=title, body=body, chat_text=text)
+    await _notify(user_id, chat_text=text)
 
 
-async def _notify(user_id: str, title: str, body: str, chat_text: str) -> None:
-    from services.push_service import add_notification, send_push, store_pending_chat
+async def _notify(user_id: str, chat_text: str) -> None:
+    """Deliver the reminder as a chat message from the assistant — nothing else.
 
-    # Written directly into whatever conversation the seller next opens (see
-    # module docstring) — the OS push below is what actually alerts them.
-    await store_pending_chat(user_id, chat_text)
-    entry = await add_notification(user_id, title=title, body=body, url="/")
-    await send_push(
-        user_id=user_id, title=title, body=body, url="/",
-        notif_id=entry["id"] if entry else None,
-        created_at=entry["created_at"] if entry else None,
-    )
+    Deliberately no OS push and no entry in the notifications panel: the seller
+    asked for this reminder to read as the assistant writing to them in the
+    chat, the way it would answer a question, rather than as a system alert
+    they have to tap through to find. The other monitors (orders, messages,
+    returns) are unchanged and still notify.
+
+    The message is queued rather than sent, because the assistant has no open
+    channel to the app: it lands in whatever conversation the seller has open
+    the next time the app polls /push/pending (startup, resume, or its periodic
+    check). `dedupe_tag` means an unanswered reminder is replaced by the next
+    one instead of stacking up.
+    """
+    from services.push_service import store_pending_chat
+
+    await store_pending_chat(user_id, chat_text, dedupe_tag=_MONITOR_KIND)
 
 
 def _format_duration(minutes: int) -> str:
