@@ -18,6 +18,7 @@ from typing import Any
 
 from openai import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     InternalServerError,
@@ -83,6 +84,147 @@ def sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clean
 
 
+
+# ── 400 fallback ladder ───────────────────────────────────────────────────────
+# A 400 INVALID_ARGUMENT from Gemini is NOT retryable: rotating models or backing
+# off just reproduces it, and the whole reply dies with "nie udało się przetworzyć
+# tej wiadomości". Gemini's message for these is often the bare "Request contains
+# an invalid argument.", naming no field — so the only way to find out which part
+# of the payload it dislikes is to send it again without that part.
+#
+# Each quirk below is an optional piece of the request that some model/backend
+# version rejects outright. On a 400 they are dropped one at a time, cumulatively,
+# and the first variant that succeeds is remembered FOR THAT MODEL for the rest of
+# the process — so the retry cost is paid once, not per request. Whichever quirk
+# turns out to be needed is logged at ERROR level, which is what tells us (from
+# production logs) what was actually wrong.
+#
+# Ordered most-likely-first:
+#   reasoning_effort   — "none" asks the backend for a thinking budget of 0, which
+#                        models that cannot disable thinking reject. Every LLM call
+#                        in this app sends it (added in 03a9f9f to cut latency).
+#   empty_tool_params  — a function declaration with "parameters": {"type":
+#                        "object", "properties": {}}; Gemini requires an OBJECT
+#                        schema to have properties, so those must be sent with no
+#                        parameters key at all. 12 of the Allegro tools are like this.
+#   tool_turns         — assistant turns carrying tool_calls plus their tool results.
+#                        The interpret call replays them with NO tools declared, and
+#                        thinking models additionally expect their own signature
+#                        fields echoed back with a function call. Flattened to plain
+#                        text, the model still sees every tool result.
+_QUIRK_ORDER = ("reasoning_effort", "empty_tool_params", "tool_turns")
+
+# model → quirks already known to be rejected by it. Process-lifetime memo.
+_MODEL_QUIRKS: dict[str, set[str]] = {}
+
+
+def _strip_empty_tool_params(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for tool in tools:
+        fn = tool.get("function") or {}
+        params = fn.get("parameters") or {}
+        if params.get("type") == "object" and not params.get("properties"):
+            fn = {k: v for k, v in fn.items() if k != "parameters"}
+            tool = {**tool, "function": fn}
+        out.append(tool)
+    return out
+
+
+def _flatten_tool_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rewrite tool-call/tool-result turns as ordinary text turns, keeping the data."""
+    out = []
+    for msg in messages:
+        if msg.get("role") == "tool":
+            out.append({"role": "user", "content": f"[WYNIK NARZĘDZIA]\n{msg.get('content') or ''}"})
+        elif msg.get("tool_calls"):
+            names = ", ".join(
+                (tc.get("function") or {}).get("name", "?") for tc in msg["tool_calls"]
+            )
+            out.append({
+                "role": "assistant",
+                "content": msg.get("content") or f"[Wywołano narzędzia: {names}]",
+            })
+        else:
+            out.append(msg)
+    return out
+
+
+def _apply_quirk(api_kwargs: dict[str, Any], quirk: str) -> dict[str, Any]:
+    kwargs = dict(api_kwargs)
+    if quirk == "reasoning_effort":
+        kwargs.pop("reasoning_effort", None)
+    elif quirk == "empty_tool_params" and kwargs.get("tools"):
+        kwargs["tools"] = _strip_empty_tool_params(kwargs["tools"])
+    elif quirk == "tool_turns" and kwargs.get("messages"):
+        kwargs["messages"] = _flatten_tool_turns(kwargs["messages"])
+    return kwargs
+
+
+def _payload_shape(model: str, api_kwargs: dict[str, Any]) -> str:
+    """Compact description of a request, for the log line left behind when even the
+    last fallback 400s — enough to tell which call it was and what it carried."""
+    messages = api_kwargs.get("messages") or []
+    roles = ",".join(
+        f"{m.get('role')}{'+tc' if m.get('tool_calls') else ''}" for m in messages
+    )
+    return (
+        f"model={model} tools={len(api_kwargs.get('tools') or [])} "
+        f"tool_choice={api_kwargs.get('tool_choice')} "
+        f"reasoning_effort={api_kwargs.get('reasoning_effort')} "
+        f"max_tokens={api_kwargs.get('max_tokens')} msgs=[{roles}]"
+    )
+
+
+async def _create_with_fallbacks(
+    client: AsyncOpenAI,
+    model: str,
+    label: str,
+    api_kwargs: dict[str, Any],
+):
+    """One model attempt, walking the quirk ladder above on a 400."""
+    known = _MODEL_QUIRKS.setdefault(model, set())
+    kwargs = api_kwargs
+    for quirk in _QUIRK_ORDER:
+        if quirk in known:
+            kwargs = _apply_quirk(kwargs, quirk)
+
+    try:
+        return await client.chat.completions.create(model=model, **kwargs)
+    except _RETRYABLE:
+        raise
+    except APIStatusError as exc:
+        if exc.status_code != 400:
+            raise
+        last_exc: APIStatusError = exc
+
+    for quirk in _QUIRK_ORDER:
+        if quirk in known:
+            continue
+        kwargs = _apply_quirk(kwargs, quirk)
+        try:
+            response = await client.chat.completions.create(model=model, **kwargs)
+        except _RETRYABLE:
+            raise
+        except APIStatusError as exc:
+            if exc.status_code != 400:
+                raise
+            last_exc = exc
+            continue
+        known.add(quirk)
+        logger.error(
+            "%s: %s rejected the request with 400; it succeeded after dropping %r — "
+            "dropping it for this model from now on. Consider removing it for good.",
+            label, model, quirk,
+        )
+        return response
+
+    logger.error(
+        "%s: %s returned 400 for every fallback variant | %s | error=%s",
+        label, model, _payload_shape(model, api_kwargs), last_exc,
+    )
+    raise last_exc
+
+
 async def _call_with_retry(
     client: AsyncOpenAI,
     model_pool: list[str],
@@ -97,6 +239,9 @@ async def _call_with_retry(
          On a retryable error (429, 500, connection/timeout) → rotate to next model.
       2. After all models exhausted → wait (exponential backoff) → restart from first model.
       3. After all backoff rounds exhausted → raise the last seen exception.
+
+    A 400 is never retryable, so it is handled separately by the quirk ladder in
+    _create_with_fallbacks rather than by rotation.
     """
     if "messages" in api_kwargs:
         api_kwargs["messages"] = sanitize_messages(api_kwargs["messages"])
@@ -106,7 +251,7 @@ async def _call_with_retry(
         for model in model_pool:
             try:
                 logger.debug("%s: calling model %s", label, model)
-                return await client.chat.completions.create(model=model, **api_kwargs)
+                return await _create_with_fallbacks(client, model, label, api_kwargs)
             except _RETRYABLE as exc:
                 last_exc = exc
                 logger.warning(
