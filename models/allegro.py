@@ -71,6 +71,13 @@ class AllegroOrder(BaseModel):
     created_at: str = ""
     fulfillment_status: str = ""
     paid_at: str = ""  # payment.finishedAt from Allegro
+    # delivery.time.dispatch.{from,to} from Allegro — the window the seller has
+    # to hand the parcel over to the carrier. `dispatch_to` is the deadline the
+    # store owner cares about ("do kiedy paczka ma zostać wysłana"); Allegro
+    # returns it for every delivery method, but it can be missing on older
+    # orders, so both default to "".
+    dispatch_from: str = ""
+    dispatch_to: str = ""
     delivery: dict[str, Any] = Field(default_factory=dict)
     line_items: list[AllegroOrderLine] = Field(default_factory=list)
     billing_address: AllegroAddress = Field(default_factory=AllegroAddress)

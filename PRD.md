@@ -90,8 +90,8 @@ AllegroService → Allegro REST API
 | Operacja | Opis | Parametry | Zwraca |
 |---|---|---|---|
 | **Zamówienia** | | | |
-| Pobierz listę zamówień | Ostatnie zamówienia z filtrowaniem | status, login kupującego, fulfillment_status, czy wysłane, limit (max 50) | ID, kupujący, status, kwota, pozycje |
-| Pobierz szczegóły zamówienia | Kompletne dane zamówienia | order_id | Kupujący, pozycje, dostawa, status płatności |
+| Pobierz listę zamówień | Ostatnie zamówienia z filtrowaniem | status, login kupującego, fulfillment_status, czy wysłane, limit (max 50) | ID, kupujący, status, termin wysyłki, kwota, pozycje |
+| Pobierz szczegóły zamówienia | Kompletne dane zamówienia | order_id | Kupujący, status, termin wysyłki, pozycje, dostawa, status płatności |
 | **Oferty** | | | |
 | Pobierz aktywne oferty | Lista ofert sklepu | filtr po nazwie, limit (max 50) | ID, nazwa, cena, stan magazynowy |
 | Pobierz szczegóły oferty | Pełne dane oferty | offer_id | Cały JSON oferty (max 3000 znaków) |

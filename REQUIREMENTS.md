@@ -57,8 +57,8 @@ AllEasystent to asystent AI dla właścicieli sklepów na Allegro. Umożliwia za
 
 | Operacja | Parametry wejściowe | Wynik |
 |---|---|---|
-| Lista zamówień | status, login kupującego, czy wysłane, limit (max 50) | ID, kupujący, status, kwota, pozycje |
-| Szczegóły zamówienia | order_id | Kupujący, pozycje, dostawa, status płatności |
+| Lista zamówień | status, login kupującego, czy wysłane, limit (max 50) | ID, kupujący, status, termin wysyłki, kwota, pozycje |
+| Szczegóły zamówienia | order_id | Kupujący, status, termin wysyłki, pozycje, dostawa, status płatności |
 | Lista ofert | filtr po nazwie, limit (max 50) | ID, nazwa, cena, stan magazynowy |
 | Szczegóły oferty | offer_id | Pełne dane oferty (max 3000 znaków) |
 | Zmiana ceny | offer_id, cena w PLN (> 0) | Potwierdzenie |

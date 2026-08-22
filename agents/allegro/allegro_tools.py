@@ -19,7 +19,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'liczba nowych zamówień' (the user wants a NUMBER, not the order details) — set "
                 "count_only=true. Do NOT set count_only when the user also wants to see the orders "
                 "themselves (e.g. 'pokaż nowe zamówienia', 'jakie zamówienia mam' with no 'ile'). "
-                "Returns order IDs, buyer info, fulfillment status, and totals."
+                "Returns order IDs, buyer info, current status, dispatch deadline "
+                "('Wysyłka do' — when the parcel must be handed to the carrier), and totals."
             ),
             "parameters": {
                 "type": "object",
@@ -67,7 +68,9 @@ ALLEGRO_TOOLS: list[dict] = [
                 "(a UUID, e.g. '0c4854a0-9646-11f1-8028-338c43adc37a') — this tool has NO order_id "
                 "parameter and cannot filter to a single order; it will silently ignore the ID and "
                 "return an unrelated list of unrelated orders. Use get_order_details instead for any "
-                "question (status, contents, invoice, cost) about one already-identified order."
+                "question (status, contents, invoice, cost) about one already-identified order. "
+                "Every order returned carries its current status and its dispatch deadline "
+                "('Wysyłka do' — when the parcel must be handed to the carrier)."
             ),
             "parameters": {
                 "type": "object",
@@ -136,7 +139,8 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_order_details",
             "description": (
-                "Get full details of a specific Allegro order: status, items, buyer address, "
+                "Get full details of a specific Allegro order: status, dispatch deadline "
+                "('Wysyłka do' — when the parcel must be handed to the carrier), items, buyer address, "
                 "delivery info, payment status, AND all Allegro billing entries for that order "
                 "(individual commission per item, delivery fees, any credits). "
                 "USE THIS for ANY question about ONE already-identified order — not just costs: "

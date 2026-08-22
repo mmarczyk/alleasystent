@@ -129,10 +129,11 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "Przedstaw zamówienia z danych powyżej jako listę punktowaną — jeden blok na "
         "zamówienie, dokładnie jak w danych narzędzia. NIGDY nie buduj tabeli markdown "
         "dla zamówień.\n"
-        "Dla każdego zamówienia pokaż TYLKO te pola: Zamawiający, Rodzaj dostawy, "
-        "Ilość szt., Wartość, Opłacone (data i godzina). Nie dodawaj innych pól "
-        "(bez statusu realizacji, bez linku, bez daty złożenia), chyba że user o nie "
-        "poprosi osobno. Bez wstępu przed listą."
+        "Dla każdego zamówienia pokaż TYLKO te pola: Zamawiający, Status, Wysyłka do, "
+        "Rodzaj dostawy, Ilość szt., Wartość, Opłacone (data i godzina). Pola Status i "
+        "Wysyłka do (termin nadania paczki) przepisz DOKŁADNIE z danych narzędzia, razem "
+        "ze znacznikiem '⚠️ po terminie', jeśli tam jest. Nie dodawaj innych pól (bez "
+        "linku, bez daty złożenia), chyba że user o nie poprosi osobno. Bez wstępu przed listą."
     ),
     "get_new_orders:count_only": (
         "[FORMAT ODPOWIEDZI: TYLKO LICZBA]\n"
@@ -170,6 +171,7 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "- Zamówienie: `ID zamówienia`\n"
         "- Kupujący: ...\n"
         "- Status: ...\n"
+        "- Wysyłka do: ...\n"
         "- Wartość: ...\n"
         "- Faktura: ...\n"
         "```\n"
@@ -222,6 +224,12 @@ class AllegroAgent(BaseAgent):
     system_prompt = (
         "You are an AI assistant specialized in managing an Allegro (Polish e-commerce) store. "
         "You have access to the store's orders, offers, and messaging system. "
+        "ORDER FIELDS — ALWAYS PRESENT: every answer that lists or describes orders MUST show, "
+        "for each order, its current status ('Status' / 'Status realizacji') and the dispatch "
+        "deadline ('Wysyłka do' — the moment by which the parcel has to be handed over to the "
+        "carrier). In a table these are two of the columns; in a bullet list, two of the lines. "
+        "Copy both verbatim from the tool data (including the '⚠️ po terminie' marker and the "
+        "'—' used when Allegro didn't return a deadline) — never compute, guess or omit them.\n"
         "When answering questions about orders or offers, always fetch fresh data via tools. "
         "Present information clearly and concisely. "
         "When showing prices, always include the PLN currency. "
@@ -731,6 +739,12 @@ class AllegroAgent(BaseAgent):
         "SUSPENDED":          "Wstrzymane",
     }
 
+    # Fulfillment states where the parcel has already left (or never will) —
+    # the dispatch deadline is then history, not something to warn about.
+    _DISPATCH_DONE_STATUSES: frozenset[str] = frozenset(
+        {"SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED"}
+    )
+
     _STATUS_PL: dict[str, str] = {
         "BOUGHT":               "Opłacone",
         "FILLED_IN":            "Wypełnione",
@@ -926,6 +940,32 @@ class AllegroAgent(BaseAgent):
             return iso_str
 
     @classmethod
+    def _dispatch_deadline_pl(cls, o: Any) -> str:
+        """'Do kiedy paczka ma zostać wysłana' — delivery.time.dispatch.to, in
+        Warsaw local time, with a '⚠️ po terminie' marker once the deadline has
+        passed and the order still isn't sent.
+
+        Allegro doesn't return the dispatch window on every order (older ones,
+        some delivery methods), hence the '—' fallback: an unknown deadline must
+        never be rendered as an urgent one.
+        """
+        deadline = getattr(o, "dispatch_to", "") or ""
+        if not deadline:
+            return "—"
+        formatted = cls._format_dt_pl(deadline)
+        # Already handed over (or no longer to be handed over) — the deadline is
+        # history, not a warning.
+        if getattr(o, "fulfillment_status", "") in cls._DISPATCH_DONE_STATUSES:
+            return formatted
+        try:
+            dt = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+        except ValueError:
+            return formatted
+        if dt < datetime.now(cls._UTC):
+            return f"{formatted} ⚠️ po terminie"
+        return formatted
+
+    @classmethod
     def _to_warsaw_date(cls, iso_str: str) -> str:
         """ISO 8601 (UTC) → 'YYYY-MM-DD' in Warsaw local time, for date matching."""
         if not iso_str:
@@ -951,9 +991,10 @@ class AllegroAgent(BaseAgent):
     @classmethod
     def _new_order_bullet(cls, o: Any) -> str:
         """Render one new order as a bullet-list block with exactly the fields
-        the store owner asked for: buyer, delivery type, item count, value,
-        payment date/time. No status, no link, no order-creation date — those
-        are for get_orders / get_order_details, not this compact new-orders view."""
+        the store owner asked for: buyer, current status, dispatch deadline,
+        delivery type, item count, value, payment date/time. No link and no
+        order-creation date — those are for get_orders / get_order_details,
+        not this compact new-orders view."""
         d = o.delivery if isinstance(o.delivery, dict) else {}
         delivery_name = cls._dig(d, "method", "name", default="—")
         total_qty = sum(li.quantity for li in o.line_items)
@@ -961,6 +1002,8 @@ class AllegroAgent(BaseAgent):
         return (
             f"**Zamówienie** `{o.order_id}`\n"
             f"- Zamawiający: **{o.buyer_login}**\n"
+            f"- Status: **{cls._fulfillment_pl(o.fulfillment_status)}**\n"
+            f"- Wysyłka do: **{cls._dispatch_deadline_pl(o)}**\n"
             f"- Rodzaj dostawy: {delivery_name}\n"
             f"- Ilość: {total_qty} szt.\n"
             f"- Wartość: **{price}**\n"
@@ -1032,6 +1075,7 @@ class AllegroAgent(BaseAgent):
             f"- Kupujący: **{o.buyer_login}**",
             f"- Wartość: **{price}**",
             f"- Status realizacji: **{fulfillment}**",
+            f"- Wysyłka do: **{cls._dispatch_deadline_pl(o)}**",
             f"- Dostawa: {delivery_name}",
             f"- Produkty: {total_qty} szt.",
         ]
@@ -1253,6 +1297,7 @@ class AllegroAgent(BaseAgent):
                 f"Buyer: {order.buyer_login} ({order.buyer_email})\n"
                 f"Status: {order.status}\n"
                 f"Fulfillment status: {self._fulfillment_pl(order.fulfillment_status)}\n"
+                f"Wysyłka do (termin nadania paczki): {self._dispatch_deadline_pl(order)}\n"
                 f"Total: {order.total_price} {order.currency}\n"
                 f"Created: {order.created_at}\n"
                 f"Paid: {self._format_dt_pl(order.paid_at)}\n"
@@ -1830,7 +1875,6 @@ class AllegroAgent(BaseAgent):
                 )
                 extra = [
                     f"Kurier/dostawa: **{method_name}**",
-                    f"Status: **{self._fulfillment_pl(o.fulfillment_status)}**",
                     f"Numer śledzenia: {tracking_str}",
                 ]
                 if pickup_name:
