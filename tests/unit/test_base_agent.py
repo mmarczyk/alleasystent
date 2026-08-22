@@ -177,6 +177,24 @@ class TestBadRequestFallbackLadder:
         assert any("2 zamówienia" in (m.get("content") or "") for m in sent)
 
     @pytest.mark.asyncio
+    async def test_drops_leading_assistant_turn_on_last_rung(self):
+        """Possible since the invoice reminder writes itself into a conversation
+        unprompted, so a history can now open with an assistant turn."""
+        from agents.base_agent import _call_with_retry
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "🧾 Masz 2 niewystawione faktury. Wystawić?"},
+            {"role": "user", "content": "wystaw"},
+        ]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[_status_error(400)] * 4 + [_make_response("ok")]
+        )
+        await _call_with_retry(client, ["model-a"], "test", messages=messages)
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        assert [m["role"] for m in sent] == ["system", "user"]
+
+    @pytest.mark.asyncio
     async def test_raises_when_no_variant_works(self):
         from agents.base_agent import _call_with_retry
         client = MagicMock()

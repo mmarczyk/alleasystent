@@ -166,3 +166,37 @@ class TestPushPending:
             resp = client.get("/push/pending", cookies={"session": token})
         assert resp.status_code == 200
         assert resp.json()["chatMessage"] is None
+
+
+class TestPendingChatRecordedInSession:
+    """A message the assistant wrote on its own initiative has to land in the
+    conversation history too, or the assistant reads the seller's reply to it
+    with no idea a question was ever asked."""
+
+    @pytest.mark.asyncio
+    async def test_records_delivered_messages_as_assistant_turns(self):
+        import main
+        from models.conversation import ChannelType, ConversationSession, MessageRole
+
+        session = ConversationSession(session_id="u1:conv7", channel=ChannelType.API, sender_id="u1")
+        store = MagicMock()
+        store.get_or_create_session = AsyncMock(return_value=session)
+        store.save_session = AsyncMock()
+        with patch.object(main._orchestrator, "_session_store", store):
+            await main._record_assistant_turns("u1", "conv7", ["🧾 Wystawić faktury?"])
+
+        assert store.get_or_create_session.await_args.kwargs["session_id"] == "u1:conv7"
+        assert [(m.role, m.content) for m in session.messages] == [
+            (MessageRole.ASSISTANT, "🧾 Wystawić faktury?")
+        ]
+        store.save_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_recording_failure_does_not_break_delivery(self):
+        """The messages have already left the queue — showing them wins."""
+        import main
+
+        store = MagicMock()
+        store.get_or_create_session = AsyncMock(side_effect=RuntimeError("redis down"))
+        with patch.object(main._orchestrator, "_session_store", store):
+            await main._record_assistant_turns("u1", "conv7", ["cokolwiek"])

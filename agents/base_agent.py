@@ -112,7 +112,11 @@ def sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 #                        thinking models additionally expect their own signature
 #                        fields echoed back with a function call. Flattened to plain
 #                        text, the model still sees every tool result.
-_QUIRK_ORDER = ("reasoning_effort", "empty_tool_params", "tool_turns")
+#   leading_assistant  — a history that opens with an assistant turn instead of a
+#                        user one. Possible since the invoice reminder writes itself
+#                        into the conversation unprompted (main.py._record_assistant_turns),
+#                        and some backends insist the first turn be the user's.
+_QUIRK_ORDER = ("reasoning_effort", "empty_tool_params", "tool_turns", "leading_assistant")
 
 # model → quirks already known to be rejected by it. Process-lifetime memo.
 _MODEL_QUIRKS: dict[str, set[str]] = {}
@@ -149,6 +153,25 @@ def _flatten_tool_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _drop_leading_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop the turns that precede the conversation's first user turn, keeping
+    the system prompt. Loses the opening context, which is the point: it is only
+    reached when the backend refused the request over it."""
+    out = []
+    seen_user = False
+    for msg in messages:
+        role = msg.get("role")
+        if role == "system":
+            out.append(msg)
+            continue
+        if not seen_user:
+            if role != "user":
+                continue
+            seen_user = True
+        out.append(msg)
+    return out
+
+
 def _apply_quirk(api_kwargs: dict[str, Any], quirk: str) -> dict[str, Any]:
     kwargs = dict(api_kwargs)
     if quirk == "reasoning_effort":
@@ -157,6 +180,8 @@ def _apply_quirk(api_kwargs: dict[str, Any], quirk: str) -> dict[str, Any]:
         kwargs["tools"] = _strip_empty_tool_params(kwargs["tools"])
     elif quirk == "tool_turns" and kwargs.get("messages"):
         kwargs["messages"] = _flatten_tool_turns(kwargs["messages"])
+    elif quirk == "leading_assistant" and kwargs.get("messages"):
+        kwargs["messages"] = _drop_leading_assistant(kwargs["messages"])
     return kwargs
 
 
