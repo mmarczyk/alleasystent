@@ -611,7 +611,10 @@ async def allegro_get_order(order_id: str, request: Request):
         "buyer_login": order.buyer_login,
         "total_price": order.total_price,
         "currency": order.currency,
+        "status": order.status,
         "fulfillment_status": order.fulfillment_status,
+        # delivery.time.dispatch.to — deadline for handing the parcel to the carrier
+        "dispatch_to": order.dispatch_to,
         "delivery_method": method_name,
         "items": [{"name": li.offer_name, "quantity": li.quantity, "price": li.price} for li in order.line_items],
     }
@@ -725,7 +728,14 @@ async def allegro_pending_invoices(request: Request):
         raise HTTPException(502, str(exc))
     return {
         "orders": [
-            {"order_id": o.order_id, "buyer": o.buyer_login, "total": o.total_price}
+            {
+                "order_id": o.order_id,
+                "buyer": o.buyer_login,
+                "total": o.total_price,
+                "status": o.status,
+                "fulfillment_status": o.fulfillment_status,
+                "dispatch_to": o.dispatch_to,
+            }
             for o in orders
         ],
         "count": len(orders),

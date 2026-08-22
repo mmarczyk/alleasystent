@@ -550,6 +550,13 @@ class AllegroService:
         total_amount = summary.get("totalToPay") or {}
         invoice = data.get("invoice") or {}
         invoice_required = bool(invoice.get("required")) and not bool(invoice.get("dontWant"))
+        # delivery.time.dispatch = the window the seller has to hand the parcel
+        # over to the carrier; `.to` is the deadline the store owner is held to.
+        # Every level can legitimately be absent or null (older orders), so each
+        # one is unwrapped defensively rather than chained.
+        delivery = data.get("delivery") if isinstance(data.get("delivery"), dict) else {}
+        delivery_time = delivery.get("time") if isinstance(delivery.get("time"), dict) else {}
+        dispatch = delivery_time.get("dispatch") if isinstance(delivery_time.get("dispatch"), dict) else {}
         return AllegroOrder(
             order_id=data.get("id", ""),
             buyer_login=(data.get("buyer") or {}).get("login", ""),
@@ -561,7 +568,9 @@ class AllegroService:
             total_price=float(total_amount.get("amount", 0) or 0) if isinstance(total_amount, dict) else 0.0,
             currency=total_amount.get("currency", "PLN") if isinstance(total_amount, dict) else "PLN",
             created_at=data.get("boughtAt", ""),
-            delivery=data.get("delivery") or {},
+            dispatch_from=dispatch.get("from") or "",
+            dispatch_to=dispatch.get("to") or "",
+            delivery=delivery,
             line_items=line_items,
             invoice_required=invoice_required,
         )
