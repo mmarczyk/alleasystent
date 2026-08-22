@@ -943,13 +943,18 @@ async def push_notify(request: Request):
 
 
 @app.get("/push/pending", tags=["Push"])
-async def push_pending(request: Request):
+async def push_pending(request: Request, session_id: str | None = None):
     """Return (and remove) every pending chat message for the current user.
 
     Polled by the app on startup, on resume, and periodically while open — that
     is how a message the assistant wrote on its own initiative (e.g. the invoice
     reminder) reaches the seller's chat, whether or not the app was running when
     it was written.
+
+    `session_id` is the conversation the app is about to show them in. The
+    delivered messages are recorded there as assistant turns, so the assistant
+    can see what it said on its own initiative and the seller can just answer
+    it ("wystaw", "za 3 godziny") as part of an ordinary conversation.
 
     Returns {chatMessages: [string], chatMessage: string|null}. `chatMessage` is
     the first of them, kept so an app version cached before this endpoint
@@ -959,7 +964,38 @@ async def push_pending(request: Request):
     from services.push_service import pop_pending_chats
     user = await get_current_user(request)
     texts = await pop_pending_chats(user["sub"])
+    if texts and session_id:
+        await _record_assistant_turns(user["sub"], session_id, texts)
     return {"chatMessages": texts, "chatMessage": texts[0] if texts else None}
+
+
+async def _record_assistant_turns(user_sub: str, session_id: str, texts: list[str]) -> None:
+    """Append assistant-initiated messages to the conversation they were delivered to.
+
+    Without this the seller sees the message but the assistant does not: the next
+    thing they type is read with no idea that a question was ever asked, so
+    "wystaw je" or "jutro rano" arrives as a non sequitur. The reminder's own
+    reply handling (services/invoice_reminder.py) works off Redis state and does
+    not need this — this is what makes every OTHER follow-up read as a
+    conversation rather than a message the assistant has no memory of sending.
+
+    Never fails the delivery: the messages have already left the queue, so
+    showing them matters more than recording them.
+    """
+    from models.conversation import ChannelType, MessageRole
+
+    try:
+        store = _orchestrator._session_store
+        session = await store.get_or_create_session(
+            session_id=f"{user_sub}:{session_id}",   # same key shape as /query
+            channel=ChannelType.API,
+            sender_id=user_sub,
+        )
+        for text in texts:
+            session.add_message(MessageRole.ASSISTANT, text)
+        await store.save_session(session)
+    except Exception as exc:
+        logger.warning("Could not record delivered chat messages in session: %s", exc)
 
 
 # ── Notifications ────────────────────────────────────────────────────────────

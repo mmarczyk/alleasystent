@@ -811,11 +811,16 @@ const WebPush = (() => {
     }
   }
 
-  async function checkPending() {
+  async function checkPending(sessionId) {
     // Drain the server-side queue of messages the assistant wrote on its own
     // initiative. Returns them oldest-first, [] when there is nothing waiting.
+    // sessionId names the conversation they are about to be shown in, so the
+    // backend can record them there as assistant turns.
     try {
-      const res = await fetch(Settings.api('/push/pending'), { credentials: 'include', headers: Auth.headers() });
+      const url = sessionId
+        ? `${Settings.api('/push/pending')}?session_id=${encodeURIComponent(sessionId)}`
+        : Settings.api('/push/pending');
+      const res = await fetch(url, { credentials: 'include', headers: Auth.headers() });
       if (!res.ok) return [];
       const data = await res.json();
       if (Array.isArray(data.chatMessages)) return data.chatMessages;
@@ -864,11 +869,15 @@ const PendingChat = (() => {
     if (_inflight) return;
     _inflight = true;
     try {
-      const texts = await WebPush.checkPending();
-      if (!texts.length) return;
+      // The conversation has to exist before the fetch: draining the queue is
+      // what records the messages server-side, and that needs to name the
+      // conversation they land in. At most one empty conversation is ever
+      // created this way — only for an account that has never had one.
       if (!Store.active()) Store.create();
       const conv = Store.active();
       if (!conv) return;
+      const texts = await WebPush.checkPending(conv.id);
+      if (!texts.length) return;
       let added = false;
       for (const text of texts) {
         const last = conv.messages[conv.messages.length - 1];

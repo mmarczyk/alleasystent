@@ -19,6 +19,12 @@ from, so — unlike a normal chat turn — this can't rely on Firestore
 conversation context. Instead the reminder's own question/answer loop is
 tracked here and consulted by agents.orchestrator.Orchestrator.handle() on
 every incoming message, regardless of which thread or channel it lands on.
+
+The reminder's TEXT is a separate matter: it is recorded as an assistant turn
+in whichever conversation it finally gets delivered to (see
+main.py._record_assistant_turns), so the assistant can see what it said and
+any follow-up reads as a conversation. The state machine above still cannot
+depend on that, for the same reason — the seller may answer from elsewhere.
 """
 
 import json
