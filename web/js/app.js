@@ -488,7 +488,8 @@ const Store = (() => {
 // ── Sidebar (FAQ + Documents) ─────────────────────
 // Replaces the old chat-history list: surfaces the most common questions
 // (aggregated across all conversations, so several phrasings of "new orders?"
-// collapse into one entry) and every document/summary the assistant has
+// collapse into one entry, shown as a short "nowe zamówienia"-style headline
+// rather than the raw question) and every document/summary the assistant has
 // generated, instead of making the user hunt through past threads.
 const Sidebar = (() => {
   const STOPWORDS = new Set([
@@ -502,11 +503,18 @@ const Sidebar = (() => {
   const MAX_FAQ = 8;
   const MAX_DOCS = 30;
 
-  function _sigWords(text) {
-    const norm = text.toLowerCase()
+  // Lowercase + de-diacritic + strip punctuation, so both the clustering and
+  // the topic/qualifier patterns below can work on plain ascii.
+  function _norm(text) {
+    return text.toLowerCase()
       .replace(/[ąćęłńóśźż]/g, c => PL_MAP[c])
-      .replace(/[^a-z0-9\s]/g, ' ');
-    return new Set(norm.split(/\s+/).filter(w => w.length > 2 && !STOPWORDS.has(w)));
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function _sigWords(text) {
+    return new Set(_norm(text).split(' ').filter(w => w.length > 2 && !STOPWORDS.has(w)));
   }
 
   function _jaccard(a, b) {
@@ -515,6 +523,97 @@ const Sidebar = (() => {
     a.forEach(w => { if (b.has(w)) inter++; });
     const union = a.size + b.size - inter;
     return union === 0 ? 0 : inter / union;
+  }
+
+  // What the question is about → a short noun label plus its grammatical form
+  // ('pl' plural, 'mpl' masculine-personal plural, 'f'/'m' singular), so the
+  // qualifier in front of it agrees: "nowe zamówienia", but "nowa sprzedaż".
+  // Order matters — more specific stems first (reklamacje before kampanie).
+  const TOPICS = [
+    [/zamowien|zamowie/, 'zamówienia', 'pl'],
+    [/faktur|rachunk/, 'faktury', 'pl'],
+    [/reklamacj/, 'reklamacje', 'pl'],
+    [/zwrot/, 'zwroty', 'pl'],
+    [/sprzeda|obrot|utarg|przychod/, 'sprzedaż', 'f'],
+    [/marz|rentownos/, 'marża', 'f'],
+    [/zysk|dochod|zarob|zarabia/, 'zysk', 'm'],
+    [/koszt|wydatk/, 'koszty', 'pl'],
+    [/platnos|oplat|przelew/, 'płatności', 'pl'],
+    [/wiadomosc|wiadomosci|zapytani/, 'wiadomości', 'pl'],
+    [/oferta|oferty|ofert|aukcj|ogloszen|listing/, 'oferty', 'pl'],
+    [/magazyn|zapas|stany|stanow/, 'stany magazynowe', 'pl'],
+    [/wysylk|przesylk|pacz|kurier|dostaw(?!c)/, 'wysyłki', 'pl'],
+    [/produkt|towar|asortyment/, 'produkty', 'pl'],
+    [/opini|ocen|recenzj/, 'opinie', 'pl'],
+    [/promocj|rabat|kupon/, 'promocje', 'pl'],
+    [/kampani|reklam/, 'kampanie', 'pl'],
+    [/podatk|podatek|\bvat\b|\bjpk\b|ksef/, 'podatki', 'pl'],
+    [/statystyk|analiz|wykres/, 'analiza', 'f'],
+    [/raport|podsumowan/, 'raport', 'm'],
+    [/konkurencj/, 'konkurencja', 'f'],
+    [/cennik|\bceny\b|\bcena\b|\bcen\b/, 'ceny', 'pl'],
+    [/dostawc/, 'dostawcy', 'mpl'],
+    [/klient|kupujac/, 'klienci', 'mpl'],
+  ];
+
+  // Adjective-style qualifiers, rendered in front of the noun.
+  const QUALIFIERS = [
+    [/nieoplacon|niezaplacon|nieuregulowan|zalegl|przetermin|do zaplaty/,
+      { pl: 'nieopłacone', mpl: 'nieopłaceni', f: 'nieopłacona', m: 'nieopłacony' }],
+    [/nieprzeczytan|bez odpowiedzi/,
+      { pl: 'nieprzeczytane', mpl: 'nieprzeczytani', f: 'nieprzeczytana', m: 'nieprzeczytany' }],
+    [/\bnow[aeyi]\b|\bnowych\b|\bnowe\b|najnowsz/,
+      { pl: 'nowe', mpl: 'nowi', f: 'nowa', m: 'nowy' }],
+    [/anulowan|odrzucon/,
+      { pl: 'anulowane', mpl: 'anulowani', f: 'anulowana', m: 'anulowany' }],
+    [/oczekuj|niezrealizowan|w trakcie|do realizacji/,
+      { pl: 'oczekujące', mpl: 'oczekujący', f: 'oczekująca', m: 'oczekujący' }],
+    [/\boplacon|\bzaplacon|zrealizowan/,
+      { pl: 'opłacone', mpl: 'opłaceni', f: 'opłacona', m: 'opłacony' }],
+    [/wyslan|wysylan|nadan/,
+      { pl: 'wysłane', mpl: 'wysłani', f: 'wysłana', m: 'wysłany' }],
+    [/najlepsz|bestseller|\btop\b|hitow/,
+      { pl: 'najlepsze', mpl: 'najlepsi', f: 'najlepsza', m: 'najlepszy' }],
+  ];
+
+  // Time-range qualifiers, rendered after the noun ("sprzedaż wczoraj").
+  const PERIODS = [
+    [/\bwczoraj\b/, 'wczoraj'],
+    [/\bdzisiaj\b|\bdzis\b|\bdzisiejsz/, 'dzisiaj'],
+    [/ostatni\w* (\d+) dni/, null],
+    [/\bw tym tygodniu\b|\btygodni|\btydzien\b/, 'w tym tygodniu'],
+    [/\bw tym miesiacu\b|\bmiesiac|\bmiesiecz/, 'w tym miesiącu'],
+    [/\bw tym roku\b|\brok\b|\broku\b|\broczn/, 'w tym roku'],
+  ];
+
+  const LEAD_RE = /^(?:czy\s+|jak\s+|gdzie\s+|kiedy\s+|co\s+|jakie\s+|jaki\s+|jaka\s+|ile\s+|sa\s+|są\s+|mam\s+|mi\s+|moje\s+|moich\s+|pokaz\w*\s+|pokaż\w*\s+|wyswietl\w*\s+|wyświetl\w*\s+|podaj\s+|sprawdz\w*\s+|sprawdź\w*\s+|prosze\s+|proszę\s+|o\s+|chce\s+|chcę\s+|potrzebuje\s+|potrzebuję\s+|mozesz\s+|możesz\s+|daj\s+|zrob\w*\s+|zrób\w*\s+)+/i;
+
+  // Fallback for questions no topic matches: strip the "pokaż mi…" scaffolding
+  // and keep the first few meaningful words.
+  function _shorten(text) {
+    const stripped = text.replace(/[?!.]+$/, '').replace(LEAD_RE, '').trim() || text;
+    const words = stripped.split(/\s+/).slice(0, 3).join(' ');
+    const label = words.length > 34 ? words.slice(0, 33).trim() + '…' : words;
+    return label.charAt(0).toLowerCase() + label.slice(1);
+  }
+
+  // Turns a question into a short "przymiotnik + rzeczownik" (or "rzeczownik +
+  // okres") headline: "pokaż mi zamówienia z wczoraj" → "zamówienia wczoraj".
+  function _label(text) {
+    const n = _norm(text);
+    const topic = TOPICS.find(([re]) => re.test(n));
+    if (!topic) return _shorten(text);
+    const [, noun, form] = topic;
+
+    const qual = QUALIFIERS.find(([re]) => re.test(n));
+    if (qual) return `${qual[1][form] || qual[1].pl} ${noun}`;
+
+    for (const [re, name] of PERIODS) {
+      const m = n.match(re);
+      if (!m) continue;
+      return `${noun} ${name || `z ostatnich ${m[1]} dni`}`;
+    }
+    return noun;
   }
 
   // Groups differently-worded user questions into one aggregated entry (e.g.
@@ -540,18 +639,30 @@ const Sidebar = (() => {
         clusters.push({ words, count: 1, examples: new Map([[text, 1]]) });
       }
     }));
-    return clusters
+    // Two clusters can summarise to the same headline (e.g. "nowe zamówienia"
+    // asked in wordings too different to cluster) — fold those together so the
+    // sidebar never shows the same topic twice.
+    const byLabel = new Map();
+    clusters.forEach(cl => {
+      let rep = null, repCount = -1;
+      cl.examples.forEach((cnt, text) => {
+        if (cnt > repCount || (cnt === repCount && (!rep || text.length < rep.length))) {
+          rep = text; repCount = cnt;
+        }
+      });
+      const label = _label(rep);
+      const prev = byLabel.get(label);
+      if (prev) {
+        prev.count += cl.count;
+        if (cl.count > prev.repCount) { prev.text = rep; prev.repCount = cl.count; }
+      } else {
+        byLabel.set(label, { label, text: rep, count: cl.count, repCount: cl.count });
+      }
+    });
+    return [...byLabel.values()]
       .sort((a, b) => b.count - a.count)
       .slice(0, MAX_FAQ)
-      .map(cl => {
-        let rep = null, repCount = -1;
-        cl.examples.forEach((cnt, text) => {
-          if (cnt > repCount || (cnt === repCount && (!rep || text.length < rep.length))) {
-            rep = text; repCount = cnt;
-          }
-        });
-        return { text: rep, count: cl.count };
-      });
+      .map(({ label, text, count }) => ({ label, text, count }));
   }
 
   // Mirrors Chat.buildBubble's isArtifact rule: a table only counts once it
@@ -592,7 +703,7 @@ const Sidebar = (() => {
     el.innerHTML = _faqCache.length ? _faqCache.map((q, i) => `
       <button class="sidebar-list-item" onclick="Sidebar.ask(${i})" title="${escHtml(q.text)}">
         <span class="sli-icon">💡</span>
-        <span class="sli-text">${escHtml(q.text)}</span>
+        <span class="sli-text">${escHtml(q.label)}</span>
         ${q.count > 1 ? `<span class="sli-count">${q.count}×</span>` : ''}
       </button>`).join('')
       : '<p class="sidebar-empty">Zadaj pytanie na czacie, aby zobaczyć tu najczęstsze tematy.</p>';
