@@ -24,6 +24,7 @@ Routing model:
   just forwards that into the "<source>:<format>" tag the frontend reads.
 """
 
+import asyncio
 import logging
 
 from openai import (
@@ -43,6 +44,7 @@ from agents.perf import StageTimer
 from agents.rag.rag_agent import RAGAgent
 from config.settings import get_settings
 from models.conversation import AgentResponse, IncomingMessage, MessageRole
+from services import analytics_service
 from services.gcp_service import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -290,6 +292,22 @@ class Orchestrator:
             await self._session_store.save_session(session)
 
         perf.log(source=data_source, channel=message.channel)
+
+        # Fire-and-forget: feed the phase-timing breakdown to the analytics
+        # dashboard's query-performance chart. The "route" stage above is this
+        # level's one opaque bucket for whatever the routed agent did — when
+        # that agent reports its own breakdown (AllegroAgent/BaseAgent do, via
+        # metadata["perf_stages"]: auth check, tool-select LLM call, the
+        # Allegro API call(s), interpret LLM call), swap it in for the real
+        # picture instead of double-counting both.
+        own_stages = perf.snapshot()
+        own_stages.pop("route", None)
+        combined_phases = {**own_stages, **response.metadata.get("perf_stages", {})}
+        perf_label = analytics_service.label_for_perf(data_source, response.metadata.get("tools"))
+        asyncio.create_task(
+            analytics_service.log_perf(perf_label, combined_phases, perf.elapsed_ms())
+        )
+
         return response
 
     # ── Classification ─────────────────────────────────────────────────────────

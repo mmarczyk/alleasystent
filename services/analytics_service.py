@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 _QUERY_KEY = "analytics:queries"   # Redis list, LPUSH, capped at _MAX
 _GAP_KEY   = "analytics:gaps"      # Redis list of LLM-detected tool gaps
+_PERF_KEY  = "analytics:perf"      # Redis list of per-request phase-timing breakdowns
 _MAX_QUERIES = 2000
 _MAX_GAPS    = 500
+_MAX_PERF    = 2000
 
 _SOURCE_LABELS = {
     "allegro_orders":    "Zamówienia",
@@ -47,6 +49,81 @@ def _intent_label(intent: str) -> str:
         fmt_label = _FORMAT_LABELS.get(fmt, fmt)
         return f"{src_label} [{fmt_label}]" if fmt != "chat" else src_label
     return _SOURCE_LABELS.get(intent, intent)
+
+
+# ── Query-performance-by-phase chart ────────────────────────────────────────
+# Query-type label is derived from which Allegro tool actually ran — finer
+# grained than the data_source bucket above (e.g. "Nowe zamówienia" vs
+# "Zamówienia" are both allegro_orders, but different tools: get_new_orders
+# vs get_orders). See agents/allegro/allegro_tools.py for the full tool list.
+_TOOL_LABELS = {
+    "get_new_orders":                  "Nowe zamówienia",
+    "get_orders":                      "Zamówienia",
+    "get_orders_delivery":             "Zamówienia (dostawa)",
+    "get_order_details":               "Szczegóły zamówienia",
+    "get_orders_pending_invoice":      "Faktury do wystawienia",
+    "get_order_invoice_data":          "Dane do faktury",
+    "issue_invoice_for_order":         "Wystawianie faktury",
+    "preview_pending_invoices":        "Podgląd faktur",
+    "attach_invoice_to_allegro_order": "Załączanie faktury",
+    "send_invoice_to_ksef":            "Wysyłka do KSeF",
+    "get_active_offers":               "Oferty",
+    "get_offer_details":               "Szczegóły oferty",
+    "get_offers_summary":              "Podsumowanie ofert",
+    "query_offers_by_stock":           "Stany magazynowe",
+    "query_offers_by_price":           "Ceny ofert",
+    "get_products_to_reorder":         "Uzupełnienie zapasów",
+    "update_offer_price":              "Zmiana ceny oferty",
+    "update_offer_stock":              "Zmiana stanu oferty",
+    "get_message_threads":             "Wiadomości",
+    "get_thread_messages":             "Treść wiadomości",
+    "send_message_to_buyer":           "Wiadomość do kupującego",
+    "get_account_info":                "Konto",
+    "get_billing_summary":             "Rozliczenia",
+    "get_sales_summary":               "Sprzedaż i zysk",
+    "get_new_returns":                 "Zwroty",
+    "get_returns_to_process":          "Zwroty do obsłużenia",
+    "get_new_complaints":              "Reklamacje",
+    "suggest_order_monitoring":        "Monitoring zamówień",
+    "disable_order_monitoring":        "Monitoring zamówień",
+    "suggest_invoice_monitoring":      "Monitoring faktur",
+    "disable_invoice_monitoring":      "Monitoring faktur",
+    "suggest_message_monitoring":      "Monitoring wiadomości",
+    "disable_message_monitoring":      "Monitoring wiadomości",
+    "suggest_returns_monitoring":      "Monitoring zwrotów",
+    "disable_returns_monitoring":      "Monitoring zwrotów",
+}
+
+# Canonical phase order for the chart, chosen from the actual request
+# pipeline: Orchestrator.handle() (session_load, classify, session_save)
+# wraps whichever agent handles routing — for Allegro queries that's
+# AllegroAgent.run() (auth_check, tool_select_llm, the Allegro API call(s),
+# interpret_llm). See agents/perf.py StageTimer, the source of every phase
+# name below.
+_PHASE_ORDER = [
+    "session_load", "classify", "auth_check", "tool_select_llm",
+    "allegro_call", "interpret_llm", "session_save",
+]
+_PHASE_LABELS = {
+    "session_load":    "Wczytanie sesji",
+    "classify":        "Klasyfikacja intencji",
+    "auth_check":      "Sprawdzenie autoryzacji",
+    "tool_select_llm": "Wybór narzędzia (LLM)",
+    "allegro_call":    "Zapytanie do Allegro",
+    "interpret_llm":   "Interpretacja wyniku (LLM)",
+    "session_save":    "Zapis odpowiedzi",
+}
+
+
+def label_for_perf(data_source: str, tools: list[str] | None) -> str:
+    """Query-type label for the phase-timing chart. Prefers the specific tool
+    that ran; falls back to the coarser data-source bucket for turns with no
+    tool call (chitchat, rag, auth prompts, errors)."""
+    if tools:
+        primary = tools[0]
+        return _TOOL_LABELS.get(primary, primary.replace("_", " ").capitalize())
+    return _SOURCE_LABELS.get(data_source, data_source)
+
 
 _LLM_SYSTEM = (
     "You are an expert product analyst. Respond ONLY with valid JSON — no markdown fences, "
@@ -146,6 +223,35 @@ async def log_gap(tool_name: str, description: str, query: str, examples: list[s
             await r.aclose()
     except Exception as exc:
         logger.debug("analytics.log_gap failed (non-critical): %s", exc)
+
+
+async def log_perf(label: str, phases: dict[str, float], total_ms: float) -> None:
+    """Append one request's phase-timing breakdown to Redis. Non-blocking, never raises.
+
+    `phases` comes straight from agents.perf.StageTimer.snapshot() (raw stage
+    names, e.g. "tool:get_new_orders") — bucketing into the chart's canonical
+    phases happens in get_perf_stats(), not here, so this stays a dumb log.
+    """
+    from config.settings import get_settings
+    settings = get_settings()
+    if not _valid_redis_url(settings.redis_url):
+        return
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            entry = json.dumps({
+                "ts": round(time.time()),
+                "label": label,
+                "total_ms": round(total_ms, 1),
+                "phases": {k: round(v, 1) for k, v in phases.items()},
+            }, ensure_ascii=False)
+            await r.lpush(_PERF_KEY, entry)
+            await r.ltrim(_PERF_KEY, 0, _MAX_PERF - 1)
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.debug("analytics.log_perf failed (non-critical): %s", exc)
 
 
 async def get_stats() -> dict:
@@ -264,3 +370,57 @@ async def _fetch_all() -> tuple[list[dict], list[dict]]:
     except Exception as exc:
         logger.debug("analytics._fetch_all failed: %s", exc)
         return [], []
+
+
+async def get_perf_stats() -> dict:
+    """Average phase-timing breakdown (ms) per query-type label, for the
+    analytics dashboard's query-performance chart."""
+    raw = await _fetch_perf()
+
+    phase_keys = list(_PHASE_ORDER)
+    phase_labels = [_PHASE_LABELS[p] for p in phase_keys]
+    if not raw:
+        return {"phase_keys": phase_keys, "phase_labels": phase_labels, "series": []}
+
+    by_label: dict[str, list[dict]] = defaultdict(list)
+    for entry in raw:
+        by_label[entry.get("label") or "?"].append(entry)
+
+    series = []
+    for label, entries in by_label.items():
+        n = len(entries)
+        sums: dict[str, float] = defaultdict(float)
+        for e in entries:
+            for stage_name, ms in (e.get("phases") or {}).items():
+                # Which specific Allegro tool ran doesn't matter for phase
+                # timing, only that a network round-trip to Allegro happened —
+                # collapse every "tool:<name>" stage into one bucket.
+                bucket = "allegro_call" if stage_name.startswith("tool:") else stage_name
+                sums[bucket] += ms
+        series.append({
+            "label": label,
+            "count": n,
+            "avg_total_ms": round(sum(e.get("total_ms", 0.0) for e in entries) / n, 1),
+            "phases": {phase: round(sums.get(phase, 0.0) / n, 1) for phase in phase_keys},
+        })
+    series.sort(key=lambda s: -s["count"])
+
+    return {"phase_keys": phase_keys, "phase_labels": phase_labels, "series": series}
+
+
+async def _fetch_perf() -> list[dict]:
+    from config.settings import get_settings
+    settings = get_settings()
+    if not _valid_redis_url(settings.redis_url):
+        return []
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            raw = await r.lrange(_PERF_KEY, 0, -1)
+            return [json.loads(x) for x in raw if x]
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.debug("analytics._fetch_perf failed: %s", exc)
+        return []
