@@ -566,6 +566,14 @@ async def admin_analytics_analyze(request: Request) -> dict:
     )
 
 
+@app.get("/admin/analytics/perf", tags=["Analytics Admin"], include_in_schema=False)
+async def admin_analytics_perf(request: Request) -> dict:
+    """Return average processing-time breakdown by phase, grouped by query-type label."""
+    _check_analytics_auth(request)
+    from services.analytics_service import get_perf_stats
+    return await get_perf_stats()
+
+
 @app.get("/allegro/order-event-stats", tags=["Allegro"])
 async def allegro_order_event_stats(request: Request):
     """Return the latest Allegro event ID — used to establish monitoring baseline."""

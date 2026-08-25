@@ -389,6 +389,10 @@ class BaseAgent(ABC):
                 return AgentResponse(
                     text=final_text,
                     agent_type=self.agent_name,
+                    metadata={
+                        "perf_stages": perf.snapshot(),
+                        "perf_total_ms": perf.elapsed_ms(),
+                    },
                 )
 
             # Append assistant turn — serialize via model_dump() so Gemini-specific

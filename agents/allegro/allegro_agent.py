@@ -595,7 +595,16 @@ class AllegroAgent(BaseAgent):
             output_format=output_format,
             tools=",".join(called_tools) or "none",
         )
-        return AgentResponse(text=final_text, agent_type=self.agent_name, metadata={"output_format": output_format})
+        return AgentResponse(
+            text=final_text,
+            agent_type=self.agent_name,
+            metadata={
+                "output_format": output_format,
+                "tools": called_tools,
+                "perf_stages": perf.snapshot(),
+                "perf_total_ms": perf.elapsed_ms(),
+            },
+        )
 
     def _request_auth(self) -> AgentResponse:
         # [ALLEGRO_LOGIN_BTN] is replaced client-side with a button that fetches
