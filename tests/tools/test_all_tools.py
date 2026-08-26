@@ -11,7 +11,7 @@ would see in the chat.
 import pytest
 
 from agents.allegro.allegro_tools import ALLEGRO_TOOLS
-from tests.tools.cases import CASES, COVERED_TOOLS, Case
+from tests.tools.cases import CASES, CASES_BY_ID, COVERED_TOOLS, Case
 from tests.tools.runner import run_case
 
 TOOL_NAMES = {t["function"]["name"] for t in ALLEGRO_TOOLS}
@@ -58,3 +58,34 @@ async def test_tool_case_hits_the_api(case: Case):
         assert not result["api_calls"], f"{case.id} unexpectedly called {result['api_calls']}"
     else:
         assert result["api_calls"], f"{case.id} never reached the Allegro/inFakt API"
+
+
+# ── Regressions found by reading the captured screenshots ────────────────────
+
+
+async def test_preview_invoices_keeps_the_id_placeholder():
+    """Chat replies render as markdown, so a bare <id> is parsed as an HTML tag
+    and dropped — the hint has to survive as literal text."""
+    result = await run_case(CASES_BY_ID["preview_pending_invoices"])
+    assert "`<id>`" in result["output"]
+    assert "dla zamówienia `<id>`" in result["output"]
+
+
+async def test_sales_summary_fee_breakdown_sits_under_the_fee_line():
+    """The indented breakdown nests under the preceding bullet, so the fee types
+    must follow "Łączne opłaty", not "Zwroty/rabaty"."""
+    out = (await run_case(CASES_BY_ID["get_sales_summary"]))["output"]
+    fees = out.index("- Łączne opłaty:")
+    refunds = out.index("- Zwroty/rabaty:")
+    first_fee_type = out.index("  - Prowizja od sprzedaży")
+    first_refund_type = out.index("  - Zwrot prowizji")
+    assert fees < first_fee_type < refunds < first_refund_type
+
+
+async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
+    """A task that is already done must cost exactly one status call and no
+    up-front poll_interval wait."""
+    result = await run_case(CASES_BY_ID["issue_invoice_for_order"])
+    status_calls = [c for c in result["api_calls"] if "async/invoices/status" in c]
+    assert len(status_calls) == 1, status_calls
+    assert result["duration_ms"] < 1000, f"still waiting up front: {result['duration_ms']} ms"
