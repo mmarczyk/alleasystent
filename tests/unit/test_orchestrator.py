@@ -132,6 +132,68 @@ class TestRegisterAgent:
         assert len(orc._extra_agents) == 2
 
 
-class TestRegisterAgent:
-    def test_register_and_retrieve(self):
-        pass
+class TestEmptyReplyNeverPersisted:
+    """A blank agent reply used to be shown as an empty bubble AND stored in the
+    session. Replayed as history, Gemini rejected every later message in that
+    thread with a non-retryable 400 ("empty text parameter"), so the user got
+    "nie udało się przetworzyć tej wiadomości" forever — the whole conversation
+    was dead until they started a new one."""
+
+    def _orchestrator_with_session(self):
+        from models.conversation import ChannelType, ConversationSession
+
+        orc = _make_orchestrator()
+        session = ConversationSession(session_id="s1", channel=ChannelType.API, sender_id="u1")
+        orc._session_store.get_or_create_session = AsyncMock(return_value=session)
+        orc._session_store.save_session = AsyncMock()
+        return orc, session
+
+    def _message(self, text: str):
+        from models.conversation import ChannelType, IncomingMessage
+        return IncomingMessage(text=text, session_id="s1", channel=ChannelType.API, sender_id="u1")
+
+    @pytest.mark.asyncio
+    async def test_blank_reply_replaced_with_fallback(self):
+        from models.conversation import AgentResponse, MessageRole
+
+        orc, session = self._orchestrator_with_session()
+        orc._classify = AsyncMock(return_value="allegro_orders")
+        orc._route = AsyncMock(return_value=AgentResponse(text="   ", agent_type="allegro_orders:chat"))
+
+        response = await orc.handle(self._message("Czy są jakieś faktury do wystawienia"))
+
+        assert response.text.strip()
+        stored = [m.content for m in session.messages if m.role == MessageRole.ASSISTANT]
+        assert stored and all(c.strip() for c in stored)
+
+    @pytest.mark.asyncio
+    async def test_stored_blank_turn_is_not_replayed(self):
+        """Belt and braces for sessions already poisoned before the fix."""
+        from models.conversation import AgentResponse, MessageRole
+
+        orc, session = self._orchestrator_with_session()
+        session.add_message(MessageRole.USER, "pokaż zamówienia")
+        session.add_message(MessageRole.ASSISTANT, "")
+        orc._classify = AsyncMock(return_value="allegro_orders")
+        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro_orders:chat"))
+
+        await orc.handle(self._message("a faktury?"))
+
+        history = orc._route.call_args[0][2]
+        assert all(m["content"].strip() for m in history)
+
+    @pytest.mark.asyncio
+    async def test_history_is_capped(self):
+        from models.conversation import AgentResponse, MessageRole
+        from agents.orchestrator import _HISTORY_TURNS
+
+        orc, session = self._orchestrator_with_session()
+        for i in range(_HISTORY_TURNS * 2):
+            session.add_message(MessageRole.USER, f"q{i}")
+            session.add_message(MessageRole.ASSISTANT, f"a{i}")
+        orc._classify = AsyncMock(return_value="none")
+        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="none:chat"))
+
+        await orc.handle(self._message("i co dalej?"))
+
+        assert len(orc._route.call_args[0][2]) == _HISTORY_TURNS
