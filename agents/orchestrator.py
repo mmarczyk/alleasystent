@@ -164,6 +164,10 @@ class Orchestrator:
         self._client = AsyncOpenAI(
             api_key=self._settings.google_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            # See agents/base_agent.py BaseAgent.__init__ for why this matters:
+            # without it a degraded-but-not-erroring model can sit inside one
+            # call for up to the SDK's 600s default with no rotation.
+            timeout=30.0,
         )
         self._session_store = SessionStore()
         self._allegro_agents: dict[str, AllegroAgent] = {}

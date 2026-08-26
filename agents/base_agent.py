@@ -308,6 +308,17 @@ class BaseAgent(ABC):
         self._client = AsyncOpenAI(
             api_key=self._settings.google_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            # The openai SDK's default is 600s. A model that's degraded (not
+            # outright erroring, just slow) would sit inside a single
+            # chat.completions.create() call for up to 10 minutes with no
+            # exception raised — _call_with_retry only rotates to the next
+            # model on _RETRYABLE errors, so a merely-slow call never rotates
+            # away on its own. 30s matches the timeout already used for other
+            # external API calls in this codebase (services/allegro_service.py)
+            # and turns a stuck/degraded model into an APITimeoutError (which
+            # IS retryable) that fails over to the next model in the pool
+            # instead of one request eating tens of seconds on its own.
+            timeout=30.0,
         )
 
     def _get_model_pool(self) -> list[str]:

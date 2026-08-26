@@ -276,6 +276,32 @@ class TestSanitizeMessages:
         assert sent == [{"role": "user", "content": "hi"}]
 
 
+class TestClientTimeout:
+    def test_client_gets_explicit_timeout(self):
+        """Regression test: without an explicit timeout, the openai SDK
+        defaults to 600s — a degraded (not erroring) model can then sit
+        inside one call for up to 10 minutes with no exception raised for
+        _call_with_retry to rotate on. See production phase-timing data
+        (agents/perf.py) showing calls regularly taking tens of seconds
+        even after the model-pool-fallback fix, since a merely-slow call
+        never rotates away on its own without a timeout that fires."""
+        from agents.base_agent import BaseAgent
+
+        class ConcreteAgent(BaseAgent):
+            agent_name = "test"
+            system_prompt = "prompt"
+
+            def _get_tools(self):
+                return []
+
+            async def _execute_tool(self, t, i):
+                return ""
+
+        with patch("agents.base_agent.AsyncOpenAI") as MockOpenAI:
+            ConcreteAgent()
+        assert MockOpenAI.call_args.kwargs["timeout"] == 30.0
+
+
 class TestBuildSystemPrompt:
     def _make_agent(self):
         """Create a concrete subclass of BaseAgent for testing."""
