@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from agents.allegro.allegro_tools import ALLEGRO_TOOLS, resolve_output_format
+from agents.allegro.allegro_tools import ALLEGRO_TOOLS, TOOL_OUTPUT_FORMAT, resolve_output_format
 from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
@@ -133,6 +133,10 @@ _OUTPUT_FORMAT_INSTRUCTIONS: dict[str, str] = {
         "jeśli pasuje."
     ),
 }
+
+# Above this many characters of tool results, AllegroAgent.run stops offering the
+# model another tool round — see the cost guard in run() for why.
+_CHAIN_RESULT_BUDGET = 8000
 
 # Per-tool overrides, checked BEFORE the generic per-format instruction above —
 # for cases where "chat" isn't specific enough (get_new_orders is "chat" format
@@ -281,6 +285,14 @@ class AllegroAgent(BaseAgent):
         "'najnowsze zamówienie', 'ostatniego nowego zamówienia') → get_new_orders with limit=1. "
         "Do NOT return the whole list when the user asks about just ONE order — check singular vs "
         "plural phrasing carefully before calling.\n"
+        "• TWO-STEP LOOKUPS — you may call tools in SEQUENCE, and for details of an order you "
+        "cannot name yet you MUST: 'szczegóły ostatniego nowego zamówienia' / 'co zawiera "
+        "najnowsze zamówienie' / 'pełne dane ostatniego zamówienia' → FIRST get_new_orders "
+        "(limit=1), then, once you can see that order's ID in the tool result, get_order_details "
+        "with THAT order_id. Same for a thread you must find before reading it (get_message_threads "
+        "→ get_thread_messages). NEVER invent or guess a UUID to satisfy get_order_details — a made-up "
+        "ID just fails against the Allegro API and the user gets no answer at all. When a step "
+        "returns nothing to continue with, say so instead of calling the next tool with a guess.\n"
         "• Unsent / 'niewysłane' / 'do wysłania' → get_orders_delivery (fulfillment_status=READY_FOR_SHIPMENT)\n"
         "• Not packed / 'niespakowane' / 'do spakowania' → get_new_orders (fulfillment_status=NEW)\n"
         "• Delivery providers / 'dostawcy' / 'kurierzy' → get_orders_delivery\n"
@@ -463,7 +475,7 @@ class AllegroAgent(BaseAgent):
         conversation_history: list[dict[str, str]] | None = None,
         context: str | None = None,
     ) -> AgentResponse:
-        from agents.base_agent import _call_with_retry
+        from agents.base_agent import _call_for_reply, _call_with_retry
 
         perf = StageTimer("allegro_agent.run")
 
@@ -513,16 +525,29 @@ class AllegroAgent(BaseAgent):
         new_orders_count_only = False
         message_threads_count_only = False
         single_tool_raw_result: str | None = None
+        # tool call signature → result, so a model that re-asks for data it was
+        # already given costs no second Allegro API round-trip.
+        tool_results: dict[str, str] = {}
 
         while tool_rounds < MAX_TOOL_ROUNDS:
+            # A reply with neither text nor a tool call means something went
+            # wrong in round 1 (it was asked for a tool and produced nothing) but
+            # is the normal "I have everything I need" signal from round 2 on —
+            # so only round 1 gets the blank-reply model rotation.
+            select_call = _call_for_reply if tool_rounds == 0 else _call_with_retry
             with perf.stage("tool_select_llm"):
-                resp = await _call_with_retry(
+                resp = await select_call(
                     self._client,
                     model_pool,
                     f"allegro/tool-select-{tool_rounds + 1}",
                     messages=messages,
                     tools=tools,
-                    tool_choice="required",
+                    # Round 1 must produce data — the model may not answer store
+                    # questions from memory. From round 2 on it is "auto": the
+                    # model has results in hand and signals it is done by
+                    # returning no further tool calls (with "required" it could
+                    # never say that, and would be forced to call something).
+                    tool_choice="required" if tool_rounds == 0 else "auto",
                     max_tokens=400,
                     # This call only ever needs to pick a tool + arguments per the
                     # MANDATORY TOOL CALLS rules above — no open-ended reasoning is
@@ -536,10 +561,21 @@ class AllegroAgent(BaseAgent):
             msg = resp.choices[0].message
 
             if not msg.tool_calls:
-                # model ignored tool_choice — interpret whatever it said
+                if tool_rounds > 0:
+                    # The model has its data and wants no more tools — that is the
+                    # normal way out of a multi-round chain. Go format the answer.
+                    break
+                # Round 1 with no tool call: the model ignored tool_choice=required.
+                # Interpret whatever it said — but never hand back an empty reply
+                # (the user would just see the orchestrator's generic "nie udało
+                # się wygenerować odpowiedzi"), so fall through to Step 2 instead
+                # and let the interpret call answer from the conversation.
                 logger.warning("AllegroAgent: model skipped tool_choice=required (round %d)", tool_rounds + 1)
-                perf.log(result="no_tool_call")
-                return AgentResponse(text=msg.content or "", agent_type=self.agent_name, metadata={"output_format": "chat"})
+                if (msg.content or "").strip():
+                    perf.log(result="no_tool_call")
+                    return AgentResponse(text=msg.content, agent_type=self.agent_name, metadata={"output_format": "chat"})
+                logger.warning("AllegroAgent: no tool call and no text — falling through to interpret")
+                break
 
             messages.append({
                 "role": "assistant",
@@ -566,12 +602,18 @@ class AllegroAgent(BaseAgent):
                     if tool_input.get("count_only"):
                         message_threads_count_only = True
                 logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
-                try:
-                    with perf.stage(f"tool:{tool_name}"):
-                        result = await self._execute_tool(tool_name, tool_input)
-                except Exception as exc:
-                    logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
-                    result = "An internal error occurred. Please try again."
+                signature = f"{tool_name}:{json.dumps(tool_input, sort_keys=True, default=str)}"
+                if signature in tool_results:
+                    logger.info("[allegro] repeat call to %s — reusing the previous result", tool_name)
+                    result = tool_results[signature]
+                else:
+                    try:
+                        with perf.stage(f"tool:{tool_name}"):
+                            result = await self._execute_tool(tool_name, tool_input)
+                    except Exception as exc:
+                        logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
+                        result = "An internal error occurred. Please try again."
+                    tool_results[signature] = result
                 single_tool_raw_result = result if len(msg.tool_calls) == 1 else None
                 messages.append({
                     "role": "tool",
@@ -581,12 +623,28 @@ class AllegroAgent(BaseAgent):
 
             tool_rounds += 1
 
-            # After one round, most queries are satisfied.
-            # Allow a second round only if the tool result itself signals that
-            # more data is needed (e.g. it returned a partial list + "fetch more").
-            # For safety we just break after round 1 unless MAX_TOOL_ROUNDS > 1
-            # and we detect the model wants to chain (handled by the loop limit).
-            break
+            # Cost guard on the follow-up round: it re-sends every tool result
+            # collected so far alongside all ~30 tool schemas, so for a query
+            # that already pulled a big listing (all offers, a 50-row order
+            # table) asking "need anything else?" is both expensive and
+            # pointless — that dump IS the answer. Chaining is for lookups,
+            # whose results are small.
+            collected = sum(len(r) for r in tool_results.values())
+            if collected > _CHAIN_RESULT_BUDGET:
+                logger.info(
+                    "[allegro] %d chars of tool results after round %d — formatting instead of chaining",
+                    collected, tool_rounds,
+                )
+                break
+            # No break here: most queries are satisfied by round 1 and the model
+            # ends the loop itself by asking for no further tools (above). Some
+            # genuinely need a chain, and cutting the loop off after round 1 left
+            # those unanswerable — "szczegóły ostatniego nowego zamówienia" needs
+            # get_new_orders to learn the order's UUID before get_order_details
+            # can be called with it (that tool has no "latest" mode), so the model
+            # was forced to either guess an ID or call the listing tool alone, and
+            # the interpret step then had nothing that matched what was asked and
+            # sometimes replied with nothing at all. MAX_TOOL_ROUNDS still caps it.
 
         # ── Skip the interpret call entirely when it would be pure passthrough ──
         # See _PASSTHROUGH_TOOLS above for which tools and why. count_only
@@ -632,9 +690,22 @@ class AllegroAgent(BaseAgent):
             else t
             for t in called_tools
         ]
+        # With a chain of tools (get_new_orders → get_order_details), the last
+        # tool is the one that answered the question, and resolve_output_format
+        # already picked its format — so prefer the instruction belonging to a
+        # tool whose own format IS the resolved one, rather than whichever tool
+        # happened to run first (that would tell the model to render an order
+        # details document as the bullet list get_new_orders asks for). With a
+        # single tool called — the overwhelming majority — this picks the same
+        # instruction it always did.
+        available = [
+            (key, TOOL_OUTPUT_FORMAT.get(tool, "chat"))
+            for key, tool in zip(instruction_keys, called_tools)
+            if key in _TOOL_SPECIFIC_INSTRUCTIONS
+        ]
         tool_instruction = next(
-            (_TOOL_SPECIFIC_INSTRUCTIONS[k] for k in instruction_keys if k in _TOOL_SPECIFIC_INSTRUCTIONS),
-            None,
+            (_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, fmt in available if fmt == output_format),
+            next((_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, _ in available), None),
         )
         format_instruction = tool_instruction or _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
         if format_instruction:
@@ -644,7 +715,7 @@ class AllegroAgent(BaseAgent):
         # The LLM now sees the real API results and formats the answer.
         # Without tools it literally cannot hallucinate store data.
         with perf.stage("interpret_llm"):
-            interp_resp = await _call_with_retry(
+            interp_resp = await _call_for_reply(
                 self._client,
                 model_pool,
                 "allegro/interpret",
@@ -659,6 +730,47 @@ class AllegroAgent(BaseAgent):
                 # no `tools` parameter — model can only read and format
             )
         final_text = interp_resp.choices[0].message.content or ""
+
+        # Last resort before the user gets the orchestrator's generic apology:
+        # the tool data IS in `messages`, so a blank reply here means the model
+        # balked at the format instruction — typically one demanding a full
+        # document (get_order_details) from a tool result that turned out to be
+        # an error or an empty list. Ask once more for a plain answer instead of
+        # returning nothing.
+        if not final_text.strip() and format_instruction:
+            logger.warning(
+                "[allegro] interpret returned nothing (tools=%s, format=%s) — "
+                "retrying without the format instruction",
+                ",".join(called_tools) or "none", output_format,
+            )
+            # messages[-1] is the format instruction appended just above.
+            plain_messages = messages[:-1] + [{
+                "role": "user",
+                "content": (
+                    "Odpowiedz na pytanie użytkownika krótko i po polsku, wyłącznie na "
+                    "podstawie danych zwróconych przez narzędzia powyżej. Jeśli danych "
+                    "brakuje albo narzędzie zwróciło błąd — napisz wprost, czego nie udało "
+                    "się ustalić. Nie zmyślaj żadnych danych sklepu."
+                ),
+            }]
+            with perf.stage("interpret_llm_retry"):
+                retry_resp = await _call_for_reply(
+                    self._client,
+                    model_pool,
+                    "allegro/interpret-plain",
+                    messages=plain_messages,
+                    max_tokens=self._settings.gemini_max_tokens,
+                    reasoning_effort="none",
+                )
+            final_text = retry_resp.choices[0].message.content or ""
+            if final_text.strip():
+                output_format = "chat"
+
+        if not final_text.strip():
+            logger.error(
+                "[allegro] empty reply for query=%.200r | tools=%s | format=%s",
+                query, ",".join(called_tools) or "none", output_format,
+            )
         perf.log(
             source=self.agent_name,
             output_format=output_format,

@@ -51,6 +51,19 @@ def _tool_select_response(tool_calls: list) -> MagicMock:
     return resp
 
 
+def _no_more_tools_response() -> MagicMock:
+    """The chained tool loop always offers a second, tool_choice='auto' round
+    after the first — this is what the model returns to end it there."""
+    msg = MagicMock()
+    msg.tool_calls = None
+    msg.content = None
+    choice = MagicMock()
+    choice.message = msg
+    resp = MagicMock()
+    resp.choices = [choice]
+    return resp
+
+
 @pytest.fixture(autouse=True)
 def set_env(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
@@ -74,7 +87,9 @@ class TestGetNewOrdersInterpretBypass:
     async def test_polish_query_skips_interpret_call(self):
         agent = _make_agent()
         tool_select_resp = _tool_select_response([_tool_call("get_new_orders", {})])
-        agent._client.chat.completions.create = AsyncMock(return_value=tool_select_resp)
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_select_resp, _no_more_tools_response()]
+        )
 
         raw_text = "**Zamówienie** `X`\n- Zamawiający: **jan_kowalski**"
         agent._dispatch = AsyncMock(return_value=raw_text)
@@ -82,7 +97,7 @@ class TestGetNewOrdersInterpretBypass:
         response = await agent.run("jakie mam nowe zamówienia")
 
         assert response.text == raw_text
-        assert agent._client.chat.completions.create.call_count == 1
+        assert agent._client.chat.completions.create.call_count == 2
         assert "interpret_llm" not in response.metadata["perf_stages"]
         assert response.metadata["tools"] == ["get_new_orders"]
 
@@ -100,7 +115,7 @@ class TestGetNewOrdersInterpretBypass:
         interp_resp.choices = [interp_choice]
 
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, interp_resp]
+            side_effect=[tool_select_resp, _no_more_tools_response(), interp_resp]
         )
         agent._dispatch = AsyncMock(
             return_value="**Zamówienie** `X`\n- Zamawiający: **jan_kowalski**"
@@ -109,7 +124,7 @@ class TestGetNewOrdersInterpretBypass:
         response = await agent.run("show me my new orders")
 
         assert response.text == "**Order** `X`\n- Buyer: **jan_kowalski**"
-        assert agent._client.chat.completions.create.call_count == 2
+        assert agent._client.chat.completions.create.call_count == 3
         assert "interpret_llm" in response.metadata["perf_stages"]
 
     @pytest.mark.asyncio
@@ -132,14 +147,14 @@ class TestGetNewOrdersInterpretBypass:
         interp_resp.choices = [interp_choice]
 
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, interp_resp]
+            side_effect=[tool_select_resp, _no_more_tools_response(), interp_resp]
         )
         agent._dispatch = AsyncMock(return_value="Liczba nowych zamówień: 3.")
 
         response = await agent.run("ile mam nowych zamówień")
 
         assert response.text == "Masz 3 nowe zamówienia."
-        assert agent._client.chat.completions.create.call_count == 2
+        assert agent._client.chat.completions.create.call_count == 3
 
     @pytest.mark.asyncio
     async def test_multi_tool_turn_still_uses_interpret_call(self):
@@ -161,14 +176,14 @@ class TestGetNewOrdersInterpretBypass:
         interp_resp.choices = [interp_choice]
 
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, interp_resp]
+            side_effect=[tool_select_resp, _no_more_tools_response(), interp_resp]
         )
         agent._dispatch = AsyncMock(side_effect=["orders text", "account text"])
 
         response = await agent.run("nowe zamówienia i moje konto")
 
         assert response.text == "combined answer"
-        assert agent._client.chat.completions.create.call_count == 2
+        assert agent._client.chat.completions.create.call_count == 3
 
 
 class TestPassthroughGeneralizedToOtherTools:
@@ -186,13 +201,15 @@ class TestPassthroughGeneralizedToOtherTools:
         tool_select_resp = _tool_select_response(
             [_tool_call("get_new_returns", {"count_only": True})]
         )
-        agent._client.chat.completions.create = AsyncMock(return_value=tool_select_resp)
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_select_resp, _no_more_tools_response()]
+        )
         agent._dispatch = AsyncMock(return_value="Liczba zwrotów: 2.")
 
         response = await agent.run("czy mam jakieś zwroty")
 
         assert response.text == "Liczba zwrotów: 2."
-        assert agent._client.chat.completions.create.call_count == 1
+        assert agent._client.chat.completions.create.call_count == 2
 
     @pytest.mark.asyncio
     async def test_monitoring_toggle_bypasses(self):
@@ -200,7 +217,9 @@ class TestPassthroughGeneralizedToOtherTools:
         tool_select_resp = _tool_select_response(
             [_tool_call("suggest_order_monitoring", {})]
         )
-        agent._client.chat.completions.create = AsyncMock(return_value=tool_select_resp)
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_select_resp, _no_more_tools_response()]
+        )
         status_block = (
             "💡 Mogę automatycznie sprawdzać nowe zamówienia...\n\n"
             '<button onclick="OrderMonitor.enable()">🔔 Włącz</button>'
@@ -210,7 +229,7 @@ class TestPassthroughGeneralizedToOtherTools:
         response = await agent.run("włącz monitoring zamówień")
 
         assert response.text == status_block
-        assert agent._client.chat.completions.create.call_count == 1
+        assert agent._client.chat.completions.create.call_count == 2
 
     @pytest.mark.asyncio
     async def test_tool_not_in_passthrough_set_still_uses_interpret_call(self):
@@ -228,7 +247,7 @@ class TestPassthroughGeneralizedToOtherTools:
         interp_resp.choices = [interp_choice]
 
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, interp_resp]
+            side_effect=[tool_select_resp, _no_more_tools_response(), interp_resp]
         )
         agent._dispatch = AsyncMock(
             return_value="Thread t1 | Buyer: jan_kowalski | Unread: True | Last message: 2026-08-26"
@@ -237,4 +256,4 @@ class TestPassthroughGeneralizedToOtherTools:
         response = await agent.run("pokaż wiadomości")
 
         assert response.text == "- **jan_kowalski** — nieprzeczytana"
-        assert agent._client.chat.completions.create.call_count == 2
+        assert agent._client.chat.completions.create.call_count == 3
