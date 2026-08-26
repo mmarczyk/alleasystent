@@ -132,6 +132,43 @@ class TestRegisterAgent:
         assert len(orc._extra_agents) == 2
 
 
+class TestClassifySkipsLLMOnKeywordMatch:
+    """A keyword match always wins over the LLM's own answer when they
+    disagree (see _classify's docstring), so for a keyword-matched query the
+    LLM call changes nothing — it used to still run for anything under 6
+    words, e.g. "nowe zamówienia" (2 words), pure wasted latency."""
+
+    @pytest.mark.asyncio
+    async def test_short_keyword_query_skips_llm(self):
+        orc = _make_orchestrator()
+        orc._classify_with_llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
+
+        source = await orc._classify("nowe zamówienia", [])
+
+        assert source == "allegro_orders"
+        orc._classify_with_llm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_long_keyword_query_still_skips_llm(self):
+        orc = _make_orchestrator()
+        orc._classify_with_llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
+
+        source = await orc._classify("pokaż mi proszę wszystkie moje nowe zamówienia z dzisiaj", [])
+
+        assert source == "allegro_orders"
+        orc._classify_with_llm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_keyword_less_query_still_calls_llm(self):
+        orc = _make_orchestrator()
+        orc._classify_with_llm = AsyncMock(return_value="none")
+
+        source = await orc._classify("a teraz?", [])
+
+        assert source == "none"
+        orc._classify_with_llm.assert_called_once()
+
+
 class TestEmptyReplyNeverPersisted:
     """A blank agent reply used to be shown as an empty bubble AND stored in the
     session. Replayed as history, Gemini rejected every later message in that

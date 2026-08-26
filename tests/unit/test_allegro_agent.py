@@ -1,0 +1,171 @@
+"""Unit tests for the get_new_orders interpret-bypass optimization in
+agents/allegro/allegro_agent.py — see AllegroAgent.run() for the rationale:
+get_new_orders' dispatch output already matches _TOOL_SPECIFIC_INSTRUCTIONS
+verbatim for a Polish query, so the interpret LLM call is pure passthrough
+and can be skipped entirely.
+"""
+from __future__ import annotations
+
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from agents.allegro.allegro_agent import _is_confidently_polish
+
+
+class TestIsConfidentlyPolish:
+    def test_polish_diacritics_detected(self):
+        assert _is_confidently_polish("jakie mam nowe zamówienia")
+        assert _is_confidently_polish("pokaż moje oferty")
+
+    def test_ascii_only_english_not_detected(self):
+        assert not _is_confidently_polish("show me my new orders")
+
+    def test_ascii_only_polish_not_detected(self):
+        """Conservative by design: missing this optimization is fine, wrongly
+        assuming Polish and skipping translation for a real English query is not."""
+        assert not _is_confidently_polish("ile mam zamowien")
+
+
+def _tool_call(name: str, arguments: dict) -> MagicMock:
+    tc = MagicMock()
+    tc.id = "c1"
+    tc.function.name = name
+    tc.function.arguments = json.dumps(arguments)
+    tc.model_dump.return_value = {
+        "id": "c1",
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+    return tc
+
+
+def _tool_select_response(tool_calls: list) -> MagicMock:
+    msg = MagicMock()
+    msg.tool_calls = tool_calls
+    msg.content = None
+    choice = MagicMock()
+    choice.message = msg
+    resp = MagicMock()
+    resp.choices = [choice]
+    return resp
+
+
+@pytest.fixture(autouse=True)
+def set_env(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+
+
+def _make_agent():
+    from agents.allegro.allegro_agent import AllegroAgent
+
+    with patch("agents.base_agent.AsyncOpenAI"), \
+         patch("agents.allegro.allegro_agent.AllegroService") as MockService:
+        mock_service = MagicMock()
+        mock_service._tokens = MagicMock()
+        mock_service._tokens.is_expired.return_value = False
+        MockService.get_instance.return_value = mock_service
+        agent = AllegroAgent()
+    return agent
+
+
+class TestGetNewOrdersInterpretBypass:
+    @pytest.mark.asyncio
+    async def test_polish_query_skips_interpret_call(self):
+        agent = _make_agent()
+        tool_select_resp = _tool_select_response([_tool_call("get_new_orders", {})])
+        agent._client.chat.completions.create = AsyncMock(return_value=tool_select_resp)
+
+        raw_text = "**Zamówienie** `X`\n- Zamawiający: **jan_kowalski**"
+        agent._dispatch = AsyncMock(return_value=raw_text)
+
+        response = await agent.run("jakie mam nowe zamówienia")
+
+        assert response.text == raw_text
+        assert agent._client.chat.completions.create.call_count == 1
+        assert "interpret_llm" not in response.metadata["perf_stages"]
+        assert response.metadata["tools"] == ["get_new_orders"]
+
+    @pytest.mark.asyncio
+    async def test_english_query_still_uses_interpret_call(self):
+        agent = _make_agent()
+        tool_select_resp = _tool_select_response([_tool_call("get_new_orders", {})])
+
+        interp_msg = MagicMock()
+        interp_msg.tool_calls = None
+        interp_msg.content = "**Order** `X`\n- Buyer: **jan_kowalski**"
+        interp_choice = MagicMock()
+        interp_choice.message = interp_msg
+        interp_resp = MagicMock()
+        interp_resp.choices = [interp_choice]
+
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_select_resp, interp_resp]
+        )
+        agent._dispatch = AsyncMock(
+            return_value="**Zamówienie** `X`\n- Zamawiający: **jan_kowalski**"
+        )
+
+        response = await agent.run("show me my new orders")
+
+        assert response.text == "**Order** `X`\n- Buyer: **jan_kowalski**"
+        assert agent._client.chat.completions.create.call_count == 2
+        assert "interpret_llm" in response.metadata["perf_stages"]
+
+    @pytest.mark.asyncio
+    async def test_count_only_still_uses_interpret_call(self):
+        """count_only's raw dispatch text ("Liczba nowych zamówień: N.") differs
+        in wording from what the tool instruction asks for ("Masz N nowych
+        zamówień.") — real transformation, not passthrough, so it must not
+        bypass even for a Polish query."""
+        agent = _make_agent()
+        tool_select_resp = _tool_select_response(
+            [_tool_call("get_new_orders", {"count_only": True})]
+        )
+
+        interp_msg = MagicMock()
+        interp_msg.tool_calls = None
+        interp_msg.content = "Masz 3 nowe zamówienia."
+        interp_choice = MagicMock()
+        interp_choice.message = interp_msg
+        interp_resp = MagicMock()
+        interp_resp.choices = [interp_choice]
+
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_select_resp, interp_resp]
+        )
+        agent._dispatch = AsyncMock(return_value="Liczba nowych zamówień: 3.")
+
+        response = await agent.run("ile mam nowych zamówień")
+
+        assert response.text == "Masz 3 nowe zamówienia."
+        assert agent._client.chat.completions.create.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_multi_tool_turn_still_uses_interpret_call(self):
+        """A turn calling get_new_orders alongside another tool still needs the
+        LLM to weave the results together — passthrough only applies when it
+        was the ONLY tool called."""
+        agent = _make_agent()
+        tool_select_resp = _tool_select_response([
+            _tool_call("get_new_orders", {}),
+            _tool_call("get_account_info", {}),
+        ])
+
+        interp_msg = MagicMock()
+        interp_msg.tool_calls = None
+        interp_msg.content = "combined answer"
+        interp_choice = MagicMock()
+        interp_choice.message = interp_msg
+        interp_resp = MagicMock()
+        interp_resp.choices = [interp_choice]
+
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_select_resp, interp_resp]
+        )
+        agent._dispatch = AsyncMock(side_effect=["orders text", "account text"])
+
+        response = await agent.run("nowe zamówienia i moje konto")
+
+        assert response.text == "combined answer"
+        assert agent._client.chat.completions.create.call_count == 2

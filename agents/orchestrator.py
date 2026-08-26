@@ -391,13 +391,19 @@ class Orchestrator:
         Strategy:
           1. Always compute a keyword-based source guess. Domain nouns like
              "faktur" or "zamówien" are unambiguous regardless of sentence length.
-          2. If the query is long/self-contained AND matches keywords, skip the
-             LLM entirely (cheap fast-path).
-          3. Otherwise call the LLM — but never let it silently override an
-             unambiguous keyword match. The classifier occasionally defaults an
-             obvious topic to "none" (flaky output, timeout, parse edge case),
-             which used to leak straight to the user as "I don't have access to
-             your data" even though the query clearly named e.g. invoices.
+          2. Any keyword match skips the LLM entirely (cheap fast-path). This used
+             to be gated on the query being long/self-contained, but a keyword
+             match was ALWAYS trusted over the LLM's answer when they disagreed —
+             so for a short-but-unambiguous query ("nowe zamówienia", "moje
+             oferty": 2 words, always kw-matched — the single most common
+             phrasing for a direct command) the LLM call ran, its result got
+             thrown away the moment it disagreed with the keyword, and even
+             agreeing was a wasted round-trip that changed nothing. There's no
+             query shape where consulting the LLM changes the returned value once
+             a keyword has matched, so the call is skipped outright now.
+          3. No keyword match → call the LLM. A keyword-less query is exactly
+             the case where the LLM's own judgment (and conversation history)
+             is what decides, so nothing here is skippable.
           4. Keyword-less follow-ups ("sprawdź jeszcze raz", "spróbuj ponownie")
              that the LLM defaults to "none" almost always mean "continue the
              previous topic", not a genuine switch to chitchat — anchor to the
@@ -406,22 +412,16 @@ class Orchestrator:
         known_sources = list(self._KNOWN_SOURCES)
         kw_source = self._keyword_source(query)
 
-        if self._is_self_contained(query) and kw_source is not None:
+        if kw_source is not None:
             logger.info("Keyword fast-path: src=%s | %.60s", kw_source, query)
             return kw_source
 
         source = await self._classify_with_llm(query, history, known_sources)
 
-        if kw_source is not None and source != kw_source:
-            logger.warning(
-                "LLM source (%s) overridden by keyword match (%s) | %.60s",
-                source, kw_source, query,
-            )
-            source = kw_source
-
+        # kw_source is always None here (the fast-path above already returned
+        # otherwise), so the LLM's own answer stands unless overridden below.
         if (
             source == "none"
-            and kw_source is None
             and last_source
             and last_source != "none"
             and not self._is_self_contained(query)

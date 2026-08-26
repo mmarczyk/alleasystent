@@ -80,6 +80,20 @@ def _wants_message_content(query: str, conversation_history: list[dict[str, str]
     return False
 
 
+# Used to skip the interpret LLM call entirely for tools whose dispatch output
+# is already rendered in exactly the shape _TOOL_SPECIFIC_INSTRUCTIONS asks
+# for (see get_new_orders below) — the interpret call's only remaining job is
+# translating Polish field labels for a non-Polish query, so it's only safe
+# to skip when the query is confidently Polish. A diacritic-free Polish query
+# ("ile mam zamowien") just falls through to the LLM as before — missing the
+# optimization there is fine, guessing wrong and mangling the language isn't.
+_POLISH_DIACRITICS = set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+def _is_confidently_polish(query: str) -> bool:
+    return any(ch in _POLISH_DIACRITICS for ch in query)
+
+
 # Injected as a user-turn message right before the final "interpret" call, once
 # the output format is known from which tool(s) were just called (see
 # agents/allegro/allegro_tools.py TOOL_OUTPUT_FORMAT). "chat" and "action" need
@@ -479,6 +493,7 @@ class AllegroAgent(BaseAgent):
         called_tools: list[str] = []
         new_orders_count_only = False
         message_threads_count_only = False
+        new_orders_raw_result: str | None = None
 
         while tool_rounds < MAX_TOOL_ROUNDS:
             with perf.stage("tool_select_llm"):
@@ -538,6 +553,8 @@ class AllegroAgent(BaseAgent):
                 except Exception as exc:
                     logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
                     result = "An internal error occurred. Please try again."
+                if tool_name == "get_new_orders" and not tool_input.get("count_only"):
+                    new_orders_raw_result = result
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -552,6 +569,37 @@ class AllegroAgent(BaseAgent):
             # For safety we just break after round 1 unless MAX_TOOL_ROUNDS > 1
             # and we detect the model wants to chain (handled by the loop limit).
             break
+
+        # ── Skip the interpret call entirely when it would be pure passthrough ──
+        # get_new_orders' dispatch branch builds its response from
+        # _new_order_bullet(), which already renders exactly the fields/shape
+        # _TOOL_SPECIFIC_INSTRUCTIONS["get_new_orders"] asks for ("dokładnie
+        # jak w danych narzędzia") — for a Polish query the interpret call's
+        # entire remaining job is verbatim passthrough, an LLM round-trip that
+        # does zero transformation work. The query-performance-by-phase chart
+        # showed this call as the dominant cost per request for "Nowe
+        # zamówienia"; skipping it removes that cost outright instead of just
+        # making the call itself faster/more resilient. Only bypassed when
+        # get_new_orders was the ONLY tool called (a mixed multi-tool turn
+        # still needs the LLM to weave the results together) and the query is
+        # confidently Polish (see _is_confidently_polish) — an English query
+        # still needs the LLM to translate the Polish field labels.
+        if (
+            called_tools == ["get_new_orders"]
+            and new_orders_raw_result is not None
+            and _is_confidently_polish(query)
+        ):
+            perf.log(source=self.agent_name, output_format="chat", tools="get_new_orders", bypassed_interpret=True)
+            return AgentResponse(
+                text=new_orders_raw_result,
+                agent_type=self.agent_name,
+                metadata={
+                    "output_format": "chat",
+                    "tools": called_tools,
+                    "perf_stages": perf.snapshot(),
+                    "perf_total_ms": perf.elapsed_ms(),
+                },
+            )
 
         # ── Step 1b: resolve output format from the tool(s) just called ───────
         # Deterministic — decided by WHICH TOOL ran, not guessed from the
