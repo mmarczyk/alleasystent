@@ -1086,14 +1086,14 @@ class AllegroAgent(BaseAgent):
         if await is_monitor_enabled("message", self._allegro._user_id):
             return (
                 "💬 Automatyczne sprawdzanie nowych wiadomości jest włączone — dam Ci znać, "
-                "gdy kupujący napisze coś nowego.\n\n"
+                "gdy kupujący napisze coś nowego, także gdy aplikacja jest zamknięta.\n\n"
                 '<button class="btn-message-monitoring" style="filter:grayscale(1)" '
                 'onclick="MessageMonitor.disable();this.outerHTML=\'<span>✓ Monitoring wiadomości wyłączony</span>\'">'
                 '🔕 Wyłącz monitoring wiadomości</button>'
             )
         return (
-            "💡 Mogę co 10 minut sprawdzać, czy pojawiły się nowe wiadomości od kupujących, "
-            "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
+            "💡 Mogę na bieżąco sprawdzać, czy pojawiły się nowe wiadomości od kupujących, "
+            "i natychmiast Cię powiadamiać — także gdy aplikacja jest zamknięta.\n\n"
             '<button class="btn-message-monitoring" onclick="MessageMonitor.enable()">'
             '💬 Włącz monitoring wiadomości</button>'
         )
