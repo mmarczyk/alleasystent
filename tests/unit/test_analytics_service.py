@@ -82,3 +82,33 @@ class TestGetPerfStats:
 
         result = await svc.get_perf_stats()
         assert [s["label"] for s in result["series"]] == ["Częste", "Rzadkie"]
+
+    @pytest.mark.asyncio
+    async def test_hours_filters_out_older_entries(self, monkeypatch):
+        import time as time_mod
+        now = time_mod.time()
+        monkeypatch.setattr(svc.time, "time", lambda: now)
+
+        async def fake_fetch():
+            return [
+                {"label": "Nowe zamówienia", "total_ms": 1000, "ts": now - 3600, "phases": {}},   # 1h ago
+                {"label": "Nowe zamówienia", "total_ms": 5000, "ts": now - 30 * 3600, "phases": {}},  # 30h ago
+            ]
+        monkeypatch.setattr(svc, "_fetch_perf", fake_fetch)
+
+        result = await svc.get_perf_stats(hours=24)
+        by_label = {s["label"]: s for s in result["series"]}
+        assert by_label["Nowe zamówienia"]["count"] == 1
+        assert by_label["Nowe zamówienia"]["avg_total_ms"] == 1000.0
+
+    @pytest.mark.asyncio
+    async def test_hours_none_keeps_full_history(self, monkeypatch):
+        async def fake_fetch():
+            return [
+                {"label": "Nowe zamówienia", "total_ms": 1000, "ts": 1, "phases": {}},
+                {"label": "Nowe zamówienia", "total_ms": 5000, "ts": 2, "phases": {}},
+            ]
+        monkeypatch.setattr(svc, "_fetch_perf", fake_fetch)
+
+        result = await svc.get_perf_stats()
+        assert result["series"][0]["count"] == 2

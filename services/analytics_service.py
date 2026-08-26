@@ -372,13 +372,23 @@ async def _fetch_all() -> tuple[list[dict], list[dict]]:
         return [], []
 
 
-async def get_perf_stats() -> dict:
+async def get_perf_stats(hours: float | None = None) -> dict:
     """Average phase-timing breakdown (ms) per query-type label, for the
-    analytics dashboard's query-performance chart."""
+    analytics dashboard's query-performance chart.
+
+    `hours`, when given, restricts the average to entries logged in the last
+    `hours` — the stored list otherwise holds up to _MAX_PERF requests with
+    no time bound, so right after a latency fix ships the chart would still
+    mostly reflect pre-fix requests until enough new ones pushed old entries
+    out of the window (which for a low-traffic tool label can take days).
+    """
     raw = await _fetch_perf()
 
     phase_keys = list(_PHASE_ORDER)
     phase_labels = [_PHASE_LABELS[p] for p in phase_keys]
+    if hours is not None:
+        cutoff = time.time() - hours * 3600
+        raw = [e for e in raw if e.get("ts", 0) >= cutoff]
     if not raw:
         return {"phase_keys": phase_keys, "phase_labels": phase_labels, "series": []}
 
