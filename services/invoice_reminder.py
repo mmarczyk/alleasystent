@@ -378,6 +378,10 @@ async def _classify_reply(text: str, state: dict) -> tuple[str, int]:
     client = AsyncOpenAI(
         api_key=settings.google_api_key,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        # See agents/base_agent.py BaseAgent.__init__ for why this matters:
+        # without it a degraded-but-not-erroring model can sit inside one
+        # call for up to the SDK's 600s default with no rotation.
+        timeout=30.0,
     )
     try:
         resp = await _call_with_retry(

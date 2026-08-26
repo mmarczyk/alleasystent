@@ -225,14 +225,18 @@ class TestFormatInstruction:
 
     @pytest.mark.asyncio
     async def test_single_tool_keeps_its_own_instruction(self):
+        # get_message_threads rather than get_new_orders: the latter is in
+        # _PASSTHROUGH_TOOLS (see AllegroAgent.run's interpret-bypass), so a
+        # single Polish-language get_new_orders call would skip the interpret
+        # round covered here entirely — a different, already-tested behavior.
         agent = _agent()
         agent._client.chat.completions.create = AsyncMock(side_effect=[
-            _resp(tool_calls=[_tool_call("c1", "get_new_orders", {})]),
+            _resp(tool_calls=[_tool_call("c1", "get_message_threads", {})]),
             _resp(),
-            _resp("- Zamawiający: jan"),
+            _resp("- Kupujący: jan"),
         ])
 
-        response = await agent.run("pokaż nowe zamówienia")
+        response = await agent.run("pokaż wiadomości")
 
         assert response.metadata["output_format"] == "chat"
         sent = json.dumps(agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False)

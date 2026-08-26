@@ -80,6 +80,20 @@ def _wants_message_content(query: str, conversation_history: list[dict[str, str]
     return False
 
 
+# Used to skip the interpret LLM call entirely for tools whose dispatch output
+# is already rendered in exactly the shape _TOOL_SPECIFIC_INSTRUCTIONS asks
+# for (see get_new_orders below) — the interpret call's only remaining job is
+# translating Polish field labels for a non-Polish query, so it's only safe
+# to skip when the query is confidently Polish. A diacritic-free Polish query
+# ("ile mam zamowien") just falls through to the LLM as before — missing the
+# optimization there is fine, guessing wrong and mangling the language isn't.
+_POLISH_DIACRITICS = set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+
+
+def _is_confidently_polish(query: str) -> bool:
+    return any(ch in _POLISH_DIACRITICS for ch in query)
+
+
 # Injected as a user-turn message right before the final "interpret" call, once
 # the output format is known from which tool(s) were just called (see
 # agents/allegro/allegro_tools.py TOOL_OUTPUT_FORMAT). "chat" and "action" need
@@ -211,6 +225,25 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "tabelą. Maksymalnie 1-2 zdania podsumowania PO tabeli."
     ),
 }
+
+# Tools whose dispatch output is already the final answer verbatim — see the
+# "Skip the interpret call entirely" block in AllegroAgent.run() for the full
+# reasoning. None of these have a _TOOL_SPECIFIC_INSTRUCTIONS entry asking the
+# interpret call to reshape anything, so for a confidently-Polish query that
+# call is pure passthrough and gets skipped.
+_PASSTHROUGH_TOOLS = frozenset({
+    "get_new_orders",
+    "get_new_returns",
+    "get_returns_to_process",
+    "get_new_complaints",
+    "get_orders_pending_invoice",
+    "get_order_invoice_data",
+    "suggest_order_monitoring", "disable_order_monitoring",
+    "suggest_invoice_monitoring", "disable_invoice_monitoring",
+    "suggest_invoice_reminder", "disable_invoice_reminder",
+    "suggest_message_monitoring", "disable_message_monitoring",
+    "suggest_returns_monitoring", "disable_returns_monitoring",
+})
 
 
 class AllegroAgent(BaseAgent):
@@ -491,6 +524,7 @@ class AllegroAgent(BaseAgent):
         called_tools: list[str] = []
         new_orders_count_only = False
         message_threads_count_only = False
+        single_tool_raw_result: str | None = None
         # tool call signature → result, so a model that re-asks for data it was
         # already given costs no second Allegro API round-trip.
         tool_results: dict[str, str] = {}
@@ -580,6 +614,7 @@ class AllegroAgent(BaseAgent):
                         logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
                         result = "An internal error occurred. Please try again."
                     tool_results[signature] = result
+                single_tool_raw_result = result if len(msg.tool_calls) == 1 else None
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -610,6 +645,40 @@ class AllegroAgent(BaseAgent):
             # was forced to either guess an ID or call the listing tool alone, and
             # the interpret step then had nothing that matched what was asked and
             # sometimes replied with nothing at all. MAX_TOOL_ROUNDS still caps it.
+
+        # ── Skip the interpret call entirely when it would be pure passthrough ──
+        # See _PASSTHROUGH_TOOLS above for which tools and why. count_only
+        # doesn't disqualify get_new_returns/get_returns_to_process/
+        # get_new_complaints (no dedicated instruction exists for them either
+        # way) but DOES disqualify get_new_orders specifically — its
+        # get_new_orders:count_only instruction demands different wording
+        # ("Masz 5 nowych zamówień.") than the raw dispatch text ("Liczba
+        # nowych zamówień: 5."). Bypassed only when this was the ONLY tool
+        # called in the turn — a multi-tool turn still needs the LLM to weave
+        # the results together — and the query is confidently Polish (see
+        # _is_confidently_polish); an English query still needs the LLM to
+        # translate the Polish field labels.
+        if (
+            len(called_tools) == 1
+            and called_tools[0] in _PASSTHROUGH_TOOLS
+            and not (called_tools[0] == "get_new_orders" and new_orders_count_only)
+            and single_tool_raw_result is not None
+            and _is_confidently_polish(query)
+        ):
+            perf.log(
+                source=self.agent_name, output_format="chat",
+                tools=called_tools[0], bypassed_interpret=True,
+            )
+            return AgentResponse(
+                text=single_tool_raw_result,
+                agent_type=self.agent_name,
+                metadata={
+                    "output_format": "chat",
+                    "tools": called_tools,
+                    "perf_stages": perf.snapshot(),
+                    "perf_total_ms": perf.elapsed_ms(),
+                },
+            )
 
         # ── Step 1b: resolve output format from the tool(s) just called ───────
         # Deterministic — decided by WHICH TOOL ran, not guessed from the
