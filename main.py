@@ -567,11 +567,15 @@ async def admin_analytics_analyze(request: Request) -> dict:
 
 
 @app.get("/admin/analytics/perf", tags=["Analytics Admin"], include_in_schema=False)
-async def admin_analytics_perf(request: Request) -> dict:
-    """Return average processing-time breakdown by phase, grouped by query-type label."""
+async def admin_analytics_perf(request: Request, hours: float | None = None) -> dict:
+    """Return average processing-time breakdown by phase, grouped by query-type label.
+
+    `hours` (optional) restricts the average to requests logged in that many
+    past hours instead of the full stored history — see get_perf_stats().
+    """
     _check_analytics_auth(request)
     from services.analytics_service import get_perf_stats
-    return await get_perf_stats()
+    return await get_perf_stats(hours=hours)
 
 
 @app.get("/allegro/order-event-stats", tags=["Allegro"])
