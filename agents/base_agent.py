@@ -311,11 +311,26 @@ class BaseAgent(ABC):
         )
 
     def _get_model_pool(self) -> list[str]:
-        """Return rotation pool: starts with model_override/gemini_model, falls back to fast."""
+        """Return rotation pool: model_override first, then the rest of the fast
+        pool as real fallbacks.
+
+        AllegroAgent sets model_override = settings.gemini_model_fast, which used
+        to make this a single-model, zero-redundancy "pool": the old code only
+        appended settings.gemini_model_fast if it wasn't already in the pool, and
+        for AllegroAgent it always was (same value) — so a rate-limited/erroring
+        call on that one model had nothing to rotate to and just re-tried itself
+        with growing backoff delays (2s/4s/8s per round, agents.base_agent
+        _call_with_retry). The query-performance-by-phase chart's production data
+        showed exactly this: AllegroAgent's tool-select/interpret LLM calls (both
+        model_override-based) regularly taking tens of seconds despite being
+        capped at 400 tokens / reasoning disabled — while Orchestrator's classify
+        call, which already got the full multi-model pool, did not. Falling back
+        through the rest of model_fast_pool() (same pool Orchestrator uses) fixes
+        that without changing which model is tried first under normal conditions.
+        """
         if self.model_override:
             pool = [self.model_override]
-            if self._settings.gemini_model_fast not in pool:
-                pool.append(self._settings.gemini_model_fast)
+            pool.extend(m for m in self._settings.model_fast_pool() if m not in pool)
             return pool
         return self._settings.model_pool()
 

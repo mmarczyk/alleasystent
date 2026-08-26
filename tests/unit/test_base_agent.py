@@ -360,3 +360,40 @@ class TestGetModelPool:
             agent = OverrideAgent()
         pool = agent._get_model_pool()
         assert pool[0] == "my-special-model"
+
+    def test_override_gets_real_fallbacks_not_just_itself(self):
+        """Regression test: AllegroAgent sets model_override =
+        settings.gemini_model_fast, which used to collapse the "pool" down to
+        that single model with zero rotation on failure (see _get_model_pool's
+        docstring) — production phase-timing data showed AllegroAgent's
+        tool-select/interpret calls taking tens of seconds as a result, while
+        Orchestrator's classify call (full multi-model pool) did not. The pool
+        must contain more than just the override model, drawn from the same
+        fast pool Orchestrator uses.
+        """
+        from agents.base_agent import BaseAgent
+        from config.settings import get_settings
+
+        class FastOverrideAgent(BaseAgent):
+            agent_name = "fast_override"
+            system_prompt = "prompt"
+
+            def __init__(self):
+                super().__init__()
+                self.model_override = self._settings.gemini_model_fast
+
+            def _get_tools(self):
+                return []
+
+            async def _execute_tool(self, t, i):
+                return ""
+
+        with patch("agents.base_agent.AsyncOpenAI"):
+            agent = FastOverrideAgent()
+        pool = agent._get_model_pool()
+        settings = get_settings()
+
+        assert pool[0] == settings.gemini_model_fast
+        assert len(pool) > 1, "override model must have real fallbacks, not just itself"
+        assert len(pool) == len(set(pool)), "pool must not contain duplicates"
+        assert set(pool) == set(settings.model_fast_pool())
