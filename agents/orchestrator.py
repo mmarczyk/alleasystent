@@ -36,7 +36,7 @@ from openai import (
     NotFoundError,
     RateLimitError,
 )
-from agents.base_agent import _call_with_retry
+from agents.base_agent import _call_for_reply, _call_with_retry
 
 from agents.allegro.allegro_agent import AllegroAgent
 from agents.base_agent import BaseAgent
@@ -276,8 +276,11 @@ class Orchestrator:
         # blank bubble, and above all never store it — see _EMPTY_REPLY_FALLBACK.
         if not (response.text or "").strip():
             logger.warning(
-                "Empty reply from source=%s — substituting fallback | query=%.200r",
-                data_source, message.text,
+                "Empty reply from source=%s (agent=%s, tools=%s) — substituting fallback | query=%.200r",
+                data_source,
+                response.agent_type,
+                ",".join(response.metadata.get("tools") or []) or "none",
+                message.text,
             )
             response.text = _EMPTY_REPLY_FALLBACK
 
@@ -527,7 +530,7 @@ class Orchestrator:
             *list(history),
             {"role": "user", "content": query},
         ]
-        resp = await _call_with_retry(
+        resp = await _call_for_reply(
             self._client,
             self._settings.model_fast_pool(),
             "orchestrator/chitchat",

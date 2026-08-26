@@ -82,6 +82,97 @@ class TestCallWithRetry:
                 await _call_with_retry(client, [], "test", messages=[])
 
 
+class TestCallForReply:
+    """A 200 OK carrying neither text nor a tool call is not an exception, so none
+    of the rotation above fires for it — the blank travels to the user as the
+    orchestrator's generic apology. _call_for_reply gives another model a turn."""
+
+    @staticmethod
+    def _blank():
+        resp = _make_response("")
+        resp.model = "model-a"
+        resp.usage = None
+        resp.choices[0].finish_reason = "length"
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_returns_first_reply_when_it_has_text(self):
+        from agents.base_agent import _call_for_reply
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=_make_response("ok"))
+        result = await _call_for_reply(client, ["model-a", "model-b"], "test", messages=[])
+        assert result.choices[0].message.content == "ok"
+        assert client.chat.completions.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retries_a_blank_reply_on_another_model(self):
+        from agents.base_agent import _call_for_reply
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[self._blank(), _make_response("wreszcie")]
+        )
+        result = await _call_for_reply(client, ["model-a", "model-b"], "test", messages=[])
+        assert result.choices[0].message.content == "wreszcie"
+        assert client.chat.completions.create.call_args.kwargs["model"] == "model-b"
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_without_text_is_not_blank(self):
+        from agents.base_agent import _call_for_reply
+        client = MagicMock()
+        resp = _make_response("")
+        resp.choices[0].message.tool_calls = [MagicMock()]
+        client.chat.completions.create = AsyncMock(return_value=resp)
+        await _call_for_reply(client, ["model-a", "model-b"], "test", messages=[])
+        assert client.chat.completions.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_single_model_pool_does_not_retry_itself(self):
+        from agents.base_agent import _call_for_reply
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._blank())
+        result = await _call_for_reply(client, ["model-a"], "test", messages=[])
+        assert client.chat.completions.create.await_count == 1
+        assert not result.choices[0].message.content
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_one_rotation(self):
+        from agents.base_agent import _call_for_reply
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[self._blank(), self._blank()])
+        result = await _call_for_reply(client, ["model-a", "model-b"], "test", messages=[])
+        assert client.chat.completions.create.await_count == 2
+        assert not result.choices[0].message.content
+
+
+class TestBlankReplyLogging:
+    def test_shape_reports_what_the_api_said(self):
+        from agents.base_agent import _blank_reply_shape
+        resp = _make_response("")
+        resp.model = "gemini-3.5-flash-lite"
+        resp.choices[0].finish_reason = "length"
+        resp.usage.prompt_tokens = 4200
+        resp.usage.completion_tokens = 16000
+        resp.usage.completion_tokens_details.reasoning_tokens = 16000
+        shape = _blank_reply_shape(resp)
+        assert "model=gemini-3.5-flash-lite" in shape
+        assert "finish_reason=length" in shape
+        assert "reasoning_tokens=16000" in shape
+
+    def test_shape_survives_a_response_without_usage(self):
+        from agents.base_agent import _blank_reply_shape
+        resp = _make_response("")
+        resp.model = "m"
+        resp.usage = None
+        resp.choices[0].finish_reason = None
+        assert "completion_tokens=?" in _blank_reply_shape(resp)
+
+    def test_is_blank_reply_on_a_response_with_no_choices(self):
+        from agents.base_agent import is_blank_reply
+        resp = MagicMock()
+        resp.choices = []
+        assert is_blank_reply(resp) is True
+
+
 def _status_error(status: int):
     """Build a real openai APIStatusError with the given HTTP status."""
     request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
