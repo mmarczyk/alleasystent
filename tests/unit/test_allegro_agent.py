@@ -169,3 +169,72 @@ class TestGetNewOrdersInterpretBypass:
 
         assert response.text == "combined answer"
         assert agent._client.chat.completions.create.call_count == 2
+
+
+class TestPassthroughGeneralizedToOtherTools:
+    """The get_new_orders bypass generalizes to every tool in
+    _PASSTHROUGH_TOOLS — spot-check a list tool with no dedicated
+    _TOOL_SPECIFIC_INSTRUCTIONS entry at all (unlike get_new_orders, so
+    count_only bypasses too) and an action-toggle tool, and confirm a tool
+    NOT in the set (get_message_threads — its raw pipe-delimited dispatch
+    output genuinely differs from its dedicated instruction) still uses the
+    interpret call."""
+
+    @pytest.mark.asyncio
+    async def test_get_new_returns_count_only_also_bypasses(self):
+        agent = _make_agent()
+        tool_select_resp = _tool_select_response(
+            [_tool_call("get_new_returns", {"count_only": True})]
+        )
+        agent._client.chat.completions.create = AsyncMock(return_value=tool_select_resp)
+        agent._dispatch = AsyncMock(return_value="Liczba zwrotów: 2.")
+
+        response = await agent.run("czy mam jakieś zwroty")
+
+        assert response.text == "Liczba zwrotów: 2."
+        assert agent._client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_monitoring_toggle_bypasses(self):
+        agent = _make_agent()
+        tool_select_resp = _tool_select_response(
+            [_tool_call("suggest_order_monitoring", {})]
+        )
+        agent._client.chat.completions.create = AsyncMock(return_value=tool_select_resp)
+        status_block = (
+            "💡 Mogę automatycznie sprawdzać nowe zamówienia...\n\n"
+            '<button onclick="OrderMonitor.enable()">🔔 Włącz</button>'
+        )
+        agent._dispatch = AsyncMock(return_value=status_block)
+
+        response = await agent.run("włącz monitoring zamówień")
+
+        assert response.text == status_block
+        assert agent._client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_not_in_passthrough_set_still_uses_interpret_call(self):
+        agent = _make_agent()
+        tool_select_resp = _tool_select_response(
+            [_tool_call("get_message_threads", {})]
+        )
+
+        interp_msg = MagicMock()
+        interp_msg.tool_calls = None
+        interp_msg.content = "- **jan_kowalski** — nieprzeczytana"
+        interp_choice = MagicMock()
+        interp_choice.message = interp_msg
+        interp_resp = MagicMock()
+        interp_resp.choices = [interp_choice]
+
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_select_resp, interp_resp]
+        )
+        agent._dispatch = AsyncMock(
+            return_value="Thread t1 | Buyer: jan_kowalski | Unread: True | Last message: 2026-08-26"
+        )
+
+        response = await agent.run("pokaż wiadomości")
+
+        assert response.text == "- **jan_kowalski** — nieprzeczytana"
+        assert agent._client.chat.completions.create.call_count == 2
