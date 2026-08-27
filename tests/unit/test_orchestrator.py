@@ -234,3 +234,36 @@ class TestEmptyReplyNeverPersisted:
         await orc.handle(self._message("i co dalej?"))
 
         assert len(orc._route.call_args[0][2]) == _HISTORY_TURNS
+
+
+class TestMarkRequest:
+    """See agents/orchestrator.py._mark_request — flags the first request
+    this process handles as a likely Cloud Run cold start (--min-instances=0)
+    for services.analytics_service.log_perf(), since that container-boot
+    time happens before any StageTimer starts."""
+
+    def test_first_call_is_cold(self, monkeypatch):
+        import agents.orchestrator as orch
+        monkeypatch.setattr(orch, "_requests_handled", 0)
+
+        is_cold, _ = orch._mark_request()
+
+        assert is_cold is True
+
+    def test_second_call_is_warm(self, monkeypatch):
+        import agents.orchestrator as orch
+        monkeypatch.setattr(orch, "_requests_handled", 0)
+
+        orch._mark_request()
+        is_cold, _ = orch._mark_request()
+
+        assert is_cold is False
+
+    def test_returns_seconds_since_process_start(self, monkeypatch):
+        import agents.orchestrator as orch
+        monkeypatch.setattr(orch, "_requests_handled", 0)
+        monkeypatch.setattr(orch, "_PROCESS_STARTED_AT", orch.time.time() - 5)
+
+        _, since_start_s = orch._mark_request()
+
+        assert since_start_s >= 5

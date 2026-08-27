@@ -112,3 +112,61 @@ class TestGetPerfStats:
 
         result = await svc.get_perf_stats()
         assert result["series"][0]["count"] == 2
+
+
+class TestColdStartStats:
+    """See services/analytics_service._cold_start_stats and
+    agents/orchestrator.py._mark_request — a Cloud Run cold start
+    (--min-instances=0) happens entirely before any StageTimer starts, so
+    it's otherwise invisible in the phase breakdown."""
+
+    @pytest.mark.asyncio
+    async def test_splits_cold_and_warm_averages(self, monkeypatch):
+        async def fake_fetch():
+            return [
+                {"label": "Nowe zamówienia", "total_ms": 12000, "phases": {}, "cold": True},
+                {"label": "Nowe zamówienia", "total_ms": 2000, "phases": {}, "cold": False},
+                {"label": "Nowe zamówienia", "total_ms": 3000, "phases": {}, "cold": False},
+            ]
+        monkeypatch.setattr(svc, "_fetch_perf", fake_fetch)
+
+        result = await svc.get_perf_stats()
+        cold_start = result["cold_start"]
+        assert cold_start["cold_count"] == 1
+        assert cold_start["warm_count"] == 2
+        assert cold_start["cold_avg_total_ms"] == 12000.0
+        assert cold_start["warm_avg_total_ms"] == 2500.0
+
+    @pytest.mark.asyncio
+    async def test_no_cold_entries_gives_none_average(self, monkeypatch):
+        async def fake_fetch():
+            return [{"label": "Nowe zamówienia", "total_ms": 2000, "phases": {}, "cold": False}]
+        monkeypatch.setattr(svc, "_fetch_perf", fake_fetch)
+
+        result = await svc.get_perf_stats()
+        assert result["cold_start"]["cold_count"] == 0
+        assert result["cold_start"]["cold_avg_total_ms"] is None
+
+    @pytest.mark.asyncio
+    async def test_missing_cold_field_treated_as_warm(self, monkeypatch):
+        """Entries logged before this field existed have no 'cold' key at
+        all — must not crash and must count as warm, not cold."""
+        async def fake_fetch():
+            return [{"label": "Nowe zamówienia", "total_ms": 2000, "phases": {}}]
+        monkeypatch.setattr(svc, "_fetch_perf", fake_fetch)
+
+        result = await svc.get_perf_stats()
+        assert result["cold_start"]["cold_count"] == 0
+        assert result["cold_start"]["warm_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_present_even_when_no_data(self, monkeypatch):
+        async def fake_fetch():
+            return []
+        monkeypatch.setattr(svc, "_fetch_perf", fake_fetch)
+
+        result = await svc.get_perf_stats()
+        assert result["cold_start"] == {
+            "cold_count": 0, "warm_count": 0,
+            "cold_avg_total_ms": None, "warm_avg_total_ms": None,
+        }
