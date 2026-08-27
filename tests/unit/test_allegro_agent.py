@@ -85,10 +85,13 @@ def _make_agent():
 class TestGetNewOrdersInterpretBypass:
     @pytest.mark.asyncio
     async def test_polish_query_skips_interpret_call(self):
+        # "jakie mam nowe zamówienia" is also a deterministic-dispatch match
+        # (see agents/allegro/deterministic_dispatch.py) — the tool-select
+        # LLM call is skipped too, on top of the interpret bypass this class
+        # is about, so call_count is 0 rather than needing a mocked response.
         agent = _make_agent()
-        tool_select_resp = _tool_select_response([_tool_call("get_new_orders", {})])
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, _no_more_tools_response()]
+            side_effect=AssertionError("no LLM call expected — deterministic match")
         )
 
         raw_text = "**Zamówienie** `X`\n- Zamawiający: **jan_kowalski**"
@@ -97,7 +100,7 @@ class TestGetNewOrdersInterpretBypass:
         response = await agent.run("jakie mam nowe zamówienia")
 
         assert response.text == raw_text
-        assert agent._client.chat.completions.create.call_count == 2
+        assert agent._client.chat.completions.create.call_count == 0
         assert "interpret_llm" not in response.metadata["perf_stages"]
         assert response.metadata["tools"] == ["get_new_orders"]
 
@@ -197,28 +200,25 @@ class TestPassthroughGeneralizedToOtherTools:
 
     @pytest.mark.asyncio
     async def test_get_new_returns_count_only_also_bypasses(self):
+        # Also a deterministic-dispatch match — see comment on
+        # test_polish_query_skips_interpret_call in test_allegro_agent.py.
         agent = _make_agent()
-        tool_select_resp = _tool_select_response(
-            [_tool_call("get_new_returns", {"count_only": True})]
-        )
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, _no_more_tools_response()]
+            side_effect=AssertionError("no LLM call expected — deterministic match")
         )
         agent._dispatch = AsyncMock(return_value="Liczba zwrotów: 2.")
 
         response = await agent.run("czy mam jakieś zwroty")
 
         assert response.text == "Liczba zwrotów: 2."
-        assert agent._client.chat.completions.create.call_count == 2
+        assert agent._client.chat.completions.create.call_count == 0
 
     @pytest.mark.asyncio
     async def test_monitoring_toggle_bypasses(self):
+        # Also a deterministic-dispatch match — see comment above.
         agent = _make_agent()
-        tool_select_resp = _tool_select_response(
-            [_tool_call("suggest_order_monitoring", {})]
-        )
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, _no_more_tools_response()]
+            side_effect=AssertionError("no LLM call expected — deterministic match")
         )
         status_block = (
             "💡 Mogę automatycznie sprawdzać nowe zamówienia...\n\n"
@@ -229,7 +229,7 @@ class TestPassthroughGeneralizedToOtherTools:
         response = await agent.run("włącz monitoring zamówień")
 
         assert response.text == status_block
-        assert agent._client.chat.completions.create.call_count == 2
+        assert agent._client.chat.completions.create.call_count == 0
 
     @pytest.mark.asyncio
     async def test_tool_not_in_passthrough_set_still_uses_interpret_call(self):

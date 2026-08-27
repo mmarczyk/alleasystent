@@ -1139,11 +1139,16 @@ def matched_labels(text: str) -> set[str]:
     return found
 
 
+def tools_for_labels(labels: set[str]) -> list[dict]:
+    """Subset of ALLEGRO_TOOLS belonging to any of `labels`."""
+    return [t for t in ALLEGRO_TOOLS if _TOOL_LABELS.get(t["function"]["name"]) in labels]
+
+
 def select_tools_for_context(text: str) -> list[dict] | None:
     """Subset of ALLEGRO_TOOLS whose label was found in `text`, or None if no
-    label matched at all — the caller's cue to ask the user to clarify
-    instead of guessing from the full, unfiltered tool list."""
+    label matched at all — the caller's cue to fall back to the full,
+    unfiltered tool list rather than guessing from a wrongly-narrowed one."""
     labels = matched_labels(text)
     if not labels:
         return None
-    return [t for t in ALLEGRO_TOOLS if _TOOL_LABELS.get(t["function"]["name"]) in labels]
+    return tools_for_labels(labels)
