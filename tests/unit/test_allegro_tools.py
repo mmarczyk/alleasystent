@@ -63,3 +63,129 @@ class TestAllegroTools:
         props = tool["function"]["parameters"]["properties"]
         assert "status" in props
         assert "enum" in props["status"]
+
+
+class TestToolLabelCoverage:
+    """Every tool must be reachable through the label filter — an orphaned
+    tool (no label, or a label with no stems) would silently vanish from
+    every tool-select call regardless of what the user asks."""
+
+    def test_every_tool_has_a_label(self):
+        from agents.allegro.allegro_tools import ALLEGRO_TOOLS, _TOOL_LABELS
+        names = {t["function"]["name"] for t in ALLEGRO_TOOLS}
+        assert names == set(_TOOL_LABELS.keys())
+
+    def test_every_label_has_stems(self):
+        from agents.allegro.allegro_tools import _LABEL_STEMS, _TOOL_LABELS
+        used_labels = set(_TOOL_LABELS.values())
+        assert used_labels <= set(_LABEL_STEMS.keys())
+        for label in used_labels:
+            assert _LABEL_STEMS[label], f"Label '{label}' has no stems"
+
+
+class TestMatchedLabels:
+    def test_finds_label_from_stem_prefix(self):
+        from agents.allegro.allegro_tools import matched_labels
+        assert "zamowienia" in matched_labels("jakie mam nowe zamówienia")
+
+    def test_diacritic_free_query_still_matches(self):
+        from agents.allegro.allegro_tools import matched_labels
+        assert "zamowienia" in matched_labels("ile mam zamowien")
+
+    def test_handles_inflected_forms(self):
+        from agents.allegro.allegro_tools import matched_labels
+        for word in ("zamówienie", "zamówienia", "zamówień", "zamówieniem", "zamówieniu"):
+            assert "zamowienia" in matched_labels(word), word
+
+    def test_unrelated_text_matches_nothing(self):
+        from agents.allegro.allegro_tools import matched_labels
+        assert matched_labels("jaka jest dzisiaj pogoda") == set()
+
+    def test_multiple_labels_in_one_query(self):
+        from agents.allegro.allegro_tools import matched_labels
+        found = matched_labels("wystaw fakturę dla ostatniego zamówienia")
+        assert {"zamowienia", "faktury"} <= found
+
+    def test_english_query_matches(self):
+        from agents.allegro.allegro_tools import matched_labels
+        assert "zamowienia" in matched_labels("show me my new orders")
+
+
+class TestSelectToolsForContext:
+    def test_no_label_match_returns_none(self):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        assert select_tools_for_context("jaka jest dzisiaj pogoda") is None
+
+    def test_domain_query_excludes_unrelated_tools(self):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        names = {t["function"]["name"] for t in select_tools_for_context("jakie mam nowe zamówienia")}
+        assert "get_new_orders" in names
+        assert "issue_invoice_for_order" not in names
+        assert "get_message_threads" not in names
+
+    def test_multi_topic_query_includes_both_domains(self):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        names = {t["function"]["name"] for t in select_tools_for_context("nowe zamówienia i moje konto")}
+        assert "get_new_orders" in names
+        assert "get_account_info" in names
+
+    def test_returned_tools_are_well_formed(self):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        for tool in select_tools_for_context("jakie mam oferty"):
+            assert tool["type"] == "function"
+            assert "name" in tool["function"]
+
+
+class TestLabelPhraseCoverage:
+    """Sample realistic Polish (and one English) phrasing per tool — mostly
+    lifted straight from that tool's own description — and confirm it
+    survives the label filter. A tool missing here would be unreachable for
+    a completely ordinary query."""
+
+    _CASES = [
+        ("jakie mam nowe zamówienia", "get_new_orders"),
+        ("pokaż listę zamówień z tego miesiąca", "get_orders"),
+        ("jaki jest status tego zamówienia", "get_order_details"),
+        ("jakie kurierzy w zamówieniach do wysyłki", "get_orders_delivery"),
+        ("pokaż moje oferty", "get_active_offers"),
+        ("podsumowanie moich ofert", "get_offers_summary"),
+        ("oferty z niskim stanem magazynowym", "query_offers_by_stock"),
+        ("oferty poniżej 50 zł", "query_offers_by_price"),
+        ("przygotuj zamówienie uzupełniające do dostawcy", "get_products_to_reorder"),
+        ("szczegóły tej oferty", "get_offer_details"),
+        ("zmień cenę oferty", "update_offer_price"),
+        ("zmień stan magazynowy oferty", "update_offer_stock"),
+        ("odpisz kupującemu na wiadomość", "send_message_to_buyer"),
+        ("czy mam nowe wiadomości", "get_message_threads"),
+        ("przeczytaj treść wiadomości od Jana", "get_thread_messages"),
+        ("moje konto allegro", "get_account_info"),
+        ("jakie opłaty miałem w tym miesiącu", "get_billing_summary"),
+        ("ile zarobiłem w tym tygodniu", "get_sales_summary"),
+        ("jakie zamówienia czekają na fakturę", "get_orders_pending_invoice"),
+        ("dane do faktury dla tego zamówienia", "get_order_invoice_data"),
+        ("wystaw brakujące faktury za ten miesiąc", "preview_pending_invoices"),
+        ("wystaw fakturę dla tego zamówienia", "issue_invoice_for_order"),
+        ("załącz fakturę do zamówienia w allegro", "attach_invoice_to_allegro_order"),
+        ("wyślij fakturę do ksef", "send_invoice_to_ksef"),
+        ("czy mam jakieś zwroty", "get_new_returns"),
+        ("zwroty do obsłużenia", "get_returns_to_process"),
+        ("jakie mam reklamacje", "get_new_complaints"),
+        ("włącz monitoring zamówień", "suggest_order_monitoring"),
+        ("wyłącz monitoring zamówień", "disable_order_monitoring"),
+        ("włącz powiadomienia o fakturach", "suggest_invoice_monitoring"),
+        ("wyłącz powiadomienia o fakturach", "disable_invoice_monitoring"),
+        ("chcę przypomnienia o niewystawionych fakturach", "suggest_invoice_reminder"),
+        ("wyłącz przypomnienia o fakturach", "disable_invoice_reminder"),
+        ("powiadamiaj mnie o nowych wiadomościach", "suggest_message_monitoring"),
+        ("wyłącz monitoring wiadomości", "disable_message_monitoring"),
+        ("powiadamiaj mnie o zwrotach i reklamacjach", "suggest_returns_monitoring"),
+        ("wyłącz monitoring zwrotów", "disable_returns_monitoring"),
+    ]
+
+    @pytest.mark.parametrize("query,tool_name", _CASES)
+    def test_query_surfaces_expected_tool(self, query, tool_name):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        tools = select_tools_for_context(query)
+        assert tools is not None, f"No label matched for: {query!r}"
+        names = {t["function"]["name"] for t in tools}
+        assert tool_name in names, f"{tool_name!r} missing for query {query!r} (got {sorted(names)})"

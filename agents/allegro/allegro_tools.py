@@ -1036,3 +1036,114 @@ def resolve_output_format(tool_names: list[str]) -> str:
         if fmt in formats:
             return fmt
     return "chat"
+
+
+# ── Tool-select context filter ──────────────────────────────────────────────
+# Every turn's tool-selection call sends all ~37 tool schemas regardless of
+# what the query is actually about — most of that is dead weight the model
+# has to read (and pay tokens for) just to conclude it doesn't apply. Each
+# tool belongs to one topic; if the conversation text names that topic, the
+# tool stays a candidate, otherwise it's dropped before the LLM ever sees it.
+#
+# Matching is stem-prefix based rather than whole-word, specifically to
+# survive Polish declension without enumerating every inflected form:
+# "zamówienie/zamówienia/zamówień/zamówieniem/zamówieniu" all start with the
+# same 6-letter stem. Diacritics are stripped on both sides first so e.g.
+# "zamowienia" (no diacritics, common in quick typing) still matches.
+_TOOL_LABELS: dict[str, str] = {
+    # zamowienia
+    "get_new_orders":                  "zamowienia",
+    "get_orders":                      "zamowienia",
+    "get_order_details":               "zamowienia",
+    "get_orders_delivery":             "zamowienia",
+    # oferty
+    "get_active_offers":               "oferty",
+    "get_offers_summary":              "oferty",
+    "query_offers_by_stock":           "oferty",
+    "query_offers_by_price":           "oferty",
+    "get_products_to_reorder":         "oferty",
+    "get_offer_details":               "oferty",
+    "update_offer_price":              "oferty",
+    "update_offer_stock":              "oferty",
+    # wiadomosci
+    "send_message_to_buyer":           "wiadomosci",
+    "get_message_threads":             "wiadomosci",
+    "get_thread_messages":             "wiadomosci",
+    # konto
+    "get_account_info":                "konto",
+    # finanse
+    "get_billing_summary":             "finanse",
+    "get_sales_summary":               "finanse",
+    # faktury
+    "get_orders_pending_invoice":      "faktury",
+    "get_order_invoice_data":          "faktury",
+    "preview_pending_invoices":        "faktury",
+    "issue_invoice_for_order":         "faktury",
+    "attach_invoice_to_allegro_order": "faktury",
+    "send_invoice_to_ksef":            "faktury",
+    # zwroty (incl. reklamacje — Allegro treats them as related but distinct
+    # processes, see get_new_returns/get_new_complaints descriptions above,
+    # but they share one monitoring toggle and one query-label here)
+    "get_new_returns":                 "zwroty",
+    "get_returns_to_process":          "zwroty",
+    "get_new_complaints":              "zwroty",
+    # monitoring (background checks + chat-based reminders, all UI-action
+    # tools — kept as their own label rather than under each domain so a
+    # plain domain question, e.g. "nowe zamówienia", doesn't drag in 10
+    # near-identical toggle schemas it has no reason to call; get_new_orders
+    # et al. already append their own monitoring suggestion automatically)
+    "suggest_order_monitoring":        "monitoring",
+    "disable_order_monitoring":        "monitoring",
+    "suggest_invoice_monitoring":      "monitoring",
+    "disable_invoice_monitoring":      "monitoring",
+    "suggest_invoice_reminder":        "monitoring",
+    "disable_invoice_reminder":        "monitoring",
+    "suggest_message_monitoring":      "monitoring",
+    "disable_message_monitoring":      "monitoring",
+    "suggest_returns_monitoring":      "monitoring",
+    "disable_returns_monitoring":      "monitoring",
+}
+
+# Stems are deliberately generous (biased toward recall over precision):
+# including an irrelevant tool costs a bit of prompt size, but missing a
+# relevant one means select_tools_for_context() finds no label at all and
+# AllegroAgent.run() asks the user to clarify instead of answering — the
+# more expensive mistake by far. Mined from each tool's own description
+# above (the words already given there as the phrases that should trigger
+# it) plus the label's own name and its common alternate spelling.
+_LABEL_STEMS: dict[str, tuple[str, ...]] = {
+    "zamowienia": ("zamow", "zamaw", "order", "paczk", "przesyl", "wysylk", "kurier", "dostaw"),
+    "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj"),
+    "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
+    "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),
+    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz", "bilans"),
+    "faktury":    ("faktur", "nip", "ksef", "vat"),
+    "zwroty":     ("zwrot", "reklamacj", "spor"),
+    "monitoring": ("monitor", "powiad", "notyfikacj", "przypomn", "wlacz", "wylacz"),
+}
+
+_DIACRITICS = str.maketrans("ąćęłńóśźż", "acelnoszz")
+
+
+def _normalize(text: str) -> str:
+    return text.lower().translate(_DIACRITICS)
+
+
+def matched_labels(text: str) -> set[str]:
+    """Labels whose stems appear as a word-prefix anywhere in `text`."""
+    words = _normalize(text).split()
+    found: set[str] = set()
+    for label, stems in _LABEL_STEMS.items():
+        if any(word.startswith(stem) for word in words for stem in stems):
+            found.add(label)
+    return found
+
+
+def select_tools_for_context(text: str) -> list[dict] | None:
+    """Subset of ALLEGRO_TOOLS whose label was found in `text`, or None if no
+    label matched at all — the caller's cue to ask the user to clarify
+    instead of guessing from the full, unfiltered tool list."""
+    labels = matched_labels(text)
+    if not labels:
+        return None
+    return [t for t in ALLEGRO_TOOLS if _TOOL_LABELS.get(t["function"]["name"]) in labels]

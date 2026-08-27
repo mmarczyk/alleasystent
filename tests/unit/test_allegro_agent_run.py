@@ -241,3 +241,60 @@ class TestFormatInstruction:
         assert response.metadata["output_format"] == "chat"
         sent = json.dumps(agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False)
         assert "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]" in sent
+
+
+class TestToolContextFilter:
+    """See agents/allegro/allegro_tools.py select_tools_for_context() — most
+    turns are about one topic, so the tool-select call doesn't need to see
+    all ~37 schemas."""
+
+    @pytest.mark.asyncio
+    async def test_domain_query_sends_a_trimmed_tool_list(self):
+        agent = _agent({"get_new_orders": "- Zamówienie: 1"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_new_orders", {})]),
+            _resp(),
+            _resp("Masz jedno zamówienie."),
+        ])
+
+        await agent.run("jakie mam nowe zamówienia")
+
+        sent_tools = agent._client.chat.completions.create.call_args_list[0].kwargs["tools"]
+        names = {t["function"]["name"] for t in sent_tools}
+        assert "get_new_orders" in names
+        assert "issue_invoice_for_order" not in names
+        assert len(names) < 37
+
+    @pytest.mark.asyncio
+    async def test_unrecognized_query_falls_back_to_full_tool_list(self):
+        from agents.allegro.allegro_tools import ALLEGRO_TOOLS
+        agent = _agent()
+        agent._client.chat.completions.create = AsyncMock(side_effect=[_resp("Nie ma za co!")])
+
+        await agent.run("dzięki wielkie!")
+
+        sent_tools = agent._client.chat.completions.create.call_args_list[0].kwargs["tools"]
+        assert len(sent_tools) == len(ALLEGRO_TOOLS)
+
+    @pytest.mark.asyncio
+    async def test_message_followup_with_no_stem_in_context_still_gets_the_tool(self):
+        """The word that makes _wants_message_content fire can be tucked
+        inside punctuation ("(wiadomości)") in a way the word-prefix label
+        matcher alone would miss — the explicit force-include in run() is
+        what keeps get_thread_messages reachable regardless."""
+        agent = _agent({"get_thread_messages": "Treść: cześć!"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_thread_messages", {})]),
+            _resp(),
+            _resp("Treść: cześć!"),
+        ])
+        history = [
+            {"role": "user", "content": "sprawdź"},
+            {"role": "assistant", "content": "Masz 2 (wiadomości) od jan_kowalski."},
+        ]
+
+        await agent.run("pokaż to jeszcze raz", conversation_history=history)
+
+        sent_tools = agent._client.chat.completions.create.call_args_list[0].kwargs["tools"]
+        names = {t["function"]["name"] for t in sent_tools}
+        assert "get_thread_messages" in names

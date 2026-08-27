@@ -17,6 +17,7 @@ from models.allegro import (
 )
 from models.conversation import (
     ChannelType,
+    ConversationMessage,
     ConversationSession,
     MessageRole,
 )
@@ -207,6 +208,37 @@ class TestConversationSession:
         session = self._make_session()
         session.add_message(MessageRole.USER, "hi")
         assert len(session.to_anthropic_messages(limit=50)) == 1
+
+    def test_to_anthropic_messages_max_age_drops_old_turns(self):
+        session = self._make_session()
+        session.messages.append(ConversationMessage(
+            role=MessageRole.USER, content="old", timestamp=datetime.utcnow() - timedelta(hours=13),
+        ))
+        session.messages.append(ConversationMessage(
+            role=MessageRole.USER, content="recent", timestamp=datetime.utcnow() - timedelta(hours=1),
+        ))
+        msgs = session.to_anthropic_messages(max_age_hours=12)
+        assert msgs == [{"role": "user", "content": "recent"}]
+
+    def test_to_anthropic_messages_max_age_none_keeps_everything(self):
+        session = self._make_session()
+        session.messages.append(ConversationMessage(
+            role=MessageRole.USER, content="old", timestamp=datetime.utcnow() - timedelta(days=10),
+        ))
+        assert len(session.to_anthropic_messages()) == 1
+
+    def test_to_anthropic_messages_max_age_and_limit_combine(self):
+        session = self._make_session()
+        now = datetime.utcnow()
+        for i in range(3):
+            session.messages.append(ConversationMessage(
+                role=MessageRole.USER, content=f"recent{i}", timestamp=now - timedelta(minutes=i),
+            ))
+        session.messages.insert(0, ConversationMessage(
+            role=MessageRole.USER, content="old", timestamp=now - timedelta(hours=20),
+        ))
+        msgs = session.to_anthropic_messages(limit=2, max_age_hours=12)
+        assert [m["content"] for m in msgs] == ["recent1", "recent2"]
 
     def test_channel_type_values(self):
         assert ChannelType.FACEBOOK == "facebook"

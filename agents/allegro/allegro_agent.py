@@ -16,7 +16,12 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from agents.allegro.allegro_tools import ALLEGRO_TOOLS, TOOL_OUTPUT_FORMAT, resolve_output_format
+from agents.allegro.allegro_tools import (
+    ALLEGRO_TOOLS,
+    TOOL_OUTPUT_FORMAT,
+    resolve_output_format,
+    select_tools_for_context,
+)
 from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
@@ -493,7 +498,26 @@ class AllegroAgent(BaseAgent):
                     perf.log(result="auth_expired")
                     return self._request_auth()
 
-        tools = self._get_tools()
+        # ── Tool-select context filter ──────────────────────────────────────────
+        # Sending all ~37 tool schemas to every tool-select call is dead weight
+        # for the overwhelming majority of turns, which are about exactly one
+        # topic — see select_tools_for_context()'s docstring in allegro_tools.py
+        # for the labeling/stem-matching design. No label found at all falls
+        # back to the full, unfiltered list rather than asking the user to
+        # clarify — a truly topic-less turn (chit-chat riding on an
+        # already-Allegro-classified conversation, or phrasing the stems
+        # don't cover) still needs the model to see everything it might need,
+        # exactly as before this filter existed; only the common, clearly-
+        # labeled majority gets the trimmed prompt.
+        wants_msg_content = _wants_message_content(query, conversation_history)
+        history_text = "\n".join(m.get("content", "") for m in (conversation_history or []))
+        # Forces the "wiadomosci" label in even when the trigger was a bare
+        # follow-up like "przeczytaj jeszcze raz" that names no topic word
+        # itself — see _wants_message_content's docstring for why detecting
+        # that doesn't always hinge on the literal word being present.
+        label_text = f"{query}\n{history_text}" + ("\nwiadomość" if wants_msg_content else "")
+        tools = select_tools_for_context(label_text) or self._get_tools()
+
         model_pool = self._get_model_pool()
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._build_system_prompt(context)},
@@ -501,7 +525,7 @@ class AllegroAgent(BaseAgent):
             {"role": "user", "content": query},
         ]
 
-        if _wants_message_content(query, conversation_history):
+        if wants_msg_content:
             messages.append({
                 "role": "user",
                 "content": (
