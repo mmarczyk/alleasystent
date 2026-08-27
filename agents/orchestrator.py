@@ -26,6 +26,7 @@ Routing model:
 
 import asyncio
 import logging
+import time
 
 from openai import (
     AsyncOpenAI,
@@ -48,6 +49,27 @@ from services import analytics_service
 from services.gcp_service import SessionStore
 
 logger = logging.getLogger(__name__)
+
+# ── Cold-start visibility ────────────────────────────────────────────────────
+# Cloud Run runs this service with --min-instances=0 (cloudbuild.yaml,
+# deploy-backend.yml), so a request after an idle period can hit a container
+# that just booted — image pull, Python startup, module imports — all of
+# which happens before this module's StageTimer ever starts timing. That
+# delay was invisible in the analytics dashboard's phase chart, prompting the
+# question of whether it's real. This doesn't fix it — it just tags the first
+# request this process handles so it's visible in the logged perf data
+# instead of silently inflating (or explaining) an otherwise-unaccounted-for
+# total_ms on whatever query happened to land first.
+_PROCESS_STARTED_AT = time.time()
+_requests_handled = 0
+
+
+def _mark_request() -> tuple[bool, float]:
+    """Returns (is_first_request_this_process, seconds_since_process_start)."""
+    global _requests_handled
+    _requests_handled += 1
+    return _requests_handled == 1, time.time() - _PROCESS_STARTED_AT
+
 
 # ── Context-aware data-source classifier prompt ────────────────────────────────
 # Single LLM call with full conversation history → returns the data source label.
@@ -196,6 +218,12 @@ class Orchestrator:
 
     async def handle(self, message: IncomingMessage, user_id: str | None = None) -> AgentResponse:
         """Main entry point — classify, route, persist, return."""
+        is_cold_start, since_process_start_s = _mark_request()
+        if is_cold_start:
+            logger.info(
+                "First request handled %.1fs after process start — likely a Cloud Run cold start",
+                since_process_start_s,
+            )
         perf = StageTimer("orchestrator.handle")
 
         # Give the invoice reminder first look at every incoming message: if it
@@ -318,7 +346,7 @@ class Orchestrator:
         combined_phases = {**own_stages, **response.metadata.get("perf_stages", {})}
         perf_label = analytics_service.label_for_perf(data_source, response.metadata.get("tools"))
         asyncio.create_task(
-            analytics_service.log_perf(perf_label, combined_phases, perf.elapsed_ms())
+            analytics_service.log_perf(perf_label, combined_phases, perf.elapsed_ms(), cold=is_cold_start)
         )
 
         return response
