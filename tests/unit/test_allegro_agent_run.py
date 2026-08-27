@@ -98,7 +98,10 @@ class TestToolChaining:
             _resp("gotowe"),
         ])
 
-        await agent.run("ile mam nowych zamówień?")
+        # "z dzisiaj" bails deterministic dispatch (see deterministic_dispatch.
+        # _ORDERS_BAIL_RE) so this still goes through the LLM tool-select loop
+        # this test exercises.
+        await agent.run("ile mam nowych zamówień z dzisiaj?")
 
         choices = [
             call.kwargs.get("tool_choice")
@@ -115,7 +118,10 @@ class TestToolChaining:
             _resp(tool_calls=[_tool_call(f"c{i}", "get_new_orders", {"limit": i})]) for i in range(3)
         ] + [_resp("podsumowanie")])
 
-        response = await agent.run("pokaż nowe zamówienia")
+        # "z tego miesiąca" bails deterministic dispatch (see
+        # deterministic_dispatch._ORDERS_BAIL_RE) so this still exercises the
+        # LLM tool-select loop's round cap.
+        response = await agent.run("pokaż zamówienia z tego miesiąca")
 
         assert response.text == "podsumowanie"
         assert agent._execute_tool.await_count == 3
@@ -229,6 +235,9 @@ class TestFormatInstruction:
         # _PASSTHROUGH_TOOLS (see AllegroAgent.run's interpret-bypass), so a
         # single Polish-language get_new_orders call would skip the interpret
         # round covered here entirely — a different, already-tested behavior.
+        # "treść" also bails this out of deterministic dispatch (see
+        # deterministic_dispatch._MESSAGES_CONTENT_BAIL_RE / AllegroAgent.run's
+        # wants_msg_content check) so it still goes through the LLM.
         agent = _agent()
         agent._client.chat.completions.create = AsyncMock(side_effect=[
             _resp(tool_calls=[_tool_call("c1", "get_message_threads", {})]),
@@ -236,7 +245,7 @@ class TestFormatInstruction:
             _resp("- Kupujący: jan"),
         ])
 
-        response = await agent.run("pokaż wiadomości")
+        response = await agent.run("sprawdź treść wiadomości")
 
         assert response.metadata["output_format"] == "chat"
         sent = json.dumps(agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False)
@@ -257,7 +266,10 @@ class TestToolContextFilter:
             _resp("Masz jedno zamówienie."),
         ])
 
-        await agent.run("jakie mam nowe zamówienia")
+        # "z tego miesiąca" bails deterministic dispatch (see
+        # deterministic_dispatch._ORDERS_BAIL_RE) so the call actually reaches
+        # the LLM, letting this test inspect what tool schemas it was sent.
+        await agent.run("jakie mam zamówienia z tego miesiąca")
 
         sent_tools = agent._client.chat.completions.create.call_args_list[0].kwargs["tools"]
         names = {t["function"]["name"] for t in sent_tools}
@@ -298,3 +310,23 @@ class TestToolContextFilter:
         sent_tools = agent._client.chat.completions.create.call_args_list[0].kwargs["tools"]
         names = {t["function"]["name"] for t in sent_tools}
         assert "get_thread_messages" in names
+
+    @pytest.mark.asyncio
+    async def test_deterministic_dispatch_ignores_unrelated_history_topic(self):
+        """Deterministic-dispatch confidence is judged from the current query
+        alone, not the (history-inclusive) Layer 1 label set — an earlier
+        turn about an unrelated topic must not turn an unambiguous current
+        query into a false 'multi-topic, skip this layer' read."""
+        agent = _agent({"get_new_orders": "- Zamówienie: 1"})
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match")
+        )
+        history = [
+            {"role": "user", "content": "jakie mam opłaty w tym miesiącu"},
+            {"role": "assistant", "content": "Suma opłat: 42,00 zł."},
+        ]
+
+        response = await agent.run("jakie mam nowe zamówienia", conversation_history=history)
+
+        assert response.text == "- Zamówienie: 1"
+        assert agent._client.chat.completions.create.call_count == 0

@@ -19,9 +19,11 @@ from zoneinfo import ZoneInfo
 from agents.allegro.allegro_tools import (
     ALLEGRO_TOOLS,
     TOOL_OUTPUT_FORMAT,
+    matched_labels,
     resolve_output_format,
-    select_tools_for_context,
+    tools_for_labels,
 )
+from agents.allegro.deterministic_dispatch import resolve_deterministic
 from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
@@ -516,7 +518,8 @@ class AllegroAgent(BaseAgent):
         # itself — see _wants_message_content's docstring for why detecting
         # that doesn't always hinge on the literal word being present.
         label_text = f"{query}\n{history_text}" + ("\nwiadomość" if wants_msg_content else "")
-        tools = select_tools_for_context(label_text) or self._get_tools()
+        labels = matched_labels(label_text)
+        tools = tools_for_labels(labels) if labels else self._get_tools()
 
         model_pool = self._get_model_pool()
         messages: list[dict[str, Any]] = [
@@ -538,13 +541,19 @@ class AllegroAgent(BaseAgent):
                 ),
             })
 
-        # ── Step 1: force tool call(s) ────────────────────────────────────────
-        # The LLM MUST pick a real tool — it cannot answer from memory.
-        # We allow up to MAX_TOOL_ROUNDS sequential tool calls (rare: e.g. look up
-        # a thread ID then send a message), but stop as soon as the model signals
-        # it has enough data (no new tool calls after a round).
-        MAX_TOOL_ROUNDS = 3
-        tool_rounds = 0
+        # ── Step 1: resolve the tool call — deterministically if possible ───────
+        # Layer 2/3 of the tool-select pipeline (Layer 1 = the label filter
+        # above): see agents/allegro/deterministic_dispatch.py for the
+        # matchers and the conservative-by-design rationale — a confident
+        # match skips the tool-select LLM call entirely. Never attempted for
+        # a message-content request: get_thread_messages' correct arguments
+        # depend on conversational context this layer doesn't parse.
+        #
+        # Judged from the CURRENT query alone, not `labels` above (which also
+        # scans history for Layer 1's broader recall) — older turns on a
+        # different topic would otherwise make a perfectly unambiguous
+        # current query look multi-topic and needlessly skip this layer.
+        query_labels = matched_labels(query)
         called_tools: list[str] = []
         new_orders_count_only = False
         message_threads_count_only = False
@@ -553,122 +562,161 @@ class AllegroAgent(BaseAgent):
         # already given costs no second Allegro API round-trip.
         tool_results: dict[str, str] = {}
 
-        while tool_rounds < MAX_TOOL_ROUNDS:
-            # A reply with neither text nor a tool call means something went
-            # wrong in round 1 (it was asked for a tool and produced nothing) but
-            # is the normal "I have everything I need" signal from round 2 on —
-            # so only round 1 gets the blank-reply model rotation.
-            select_call = _call_for_reply if tool_rounds == 0 else _call_with_retry
-            with perf.stage("tool_select_llm"):
-                resp = await select_call(
-                    self._client,
-                    model_pool,
-                    f"allegro/tool-select-{tool_rounds + 1}",
-                    messages=messages,
-                    tools=tools,
-                    # Round 1 must produce data — the model may not answer store
-                    # questions from memory. From round 2 on it is "auto": the
-                    # model has results in hand and signals it is done by
-                    # returning no further tool calls (with "required" it could
-                    # never say that, and would be forced to call something).
-                    tool_choice="required" if tool_rounds == 0 else "auto",
-                    max_tokens=400,
-                    # This call only ever needs to pick a tool + arguments per the
-                    # MANDATORY TOOL CALLS rules above — no open-ended reasoning is
-                    # needed. Without this, thinking-capable models (gemini-3.5-flash,
-                    # 2.5-flash) burn seconds of invisible reasoning tokens before
-                    # emitting the tool call (same issue as orchestrator._classify_with_llm
-                    # — see the comment there), which was the single biggest contributor
-                    # to the 30s-60s response times reported for e.g. "new orders" queries.
-                    reasoning_effort="none",
-                )
-            msg = resp.choices[0].message
-
-            if not msg.tool_calls:
-                if tool_rounds > 0:
-                    # The model has its data and wants no more tools — that is the
-                    # normal way out of a multi-round chain. Go format the answer.
-                    break
-                # Round 1 with no tool call: the model ignored tool_choice=required.
-                # Interpret whatever it said — but never hand back an empty reply
-                # (the user would just see the orchestrator's generic "nie udało
-                # się wygenerować odpowiedzi"), so fall through to Step 2 instead
-                # and let the interpret call answer from the conversation.
-                logger.warning("AllegroAgent: model skipped tool_choice=required (round %d)", tool_rounds + 1)
-                if (msg.content or "").strip():
-                    perf.log(result="no_tool_call")
-                    return AgentResponse(text=msg.content, agent_type=self.agent_name, metadata={"output_format": "chat"})
-                logger.warning("AllegroAgent: no tool call and no text — falling through to interpret")
-                break
-
+        det_match = None if wants_msg_content else resolve_deterministic(query, query_labels)
+        if det_match is not None:
+            det_tool, det_input = det_match
+            called_tools.append(det_tool)
+            if det_tool == "get_new_orders" and det_input.get("count_only"):
+                new_orders_count_only = True
+            if det_tool == "get_message_threads" and det_input.get("count_only"):
+                message_threads_count_only = True
+            logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
+            try:
+                with perf.stage(f"tool:{det_tool}"):
+                    result = await self._execute_tool(det_tool, det_input)
+            except Exception as exc:
+                logger.exception("[allegro] tool %s failed: %s", det_tool, exc)
+                result = "An internal error occurred. Please try again."
+            single_tool_raw_result = result
+            tool_results[f"{det_tool}:{json.dumps(det_input, sort_keys=True, default=str)}"] = result
+            # Same assistant/tool message shape a real LLM tool call would
+            # produce (see the loop below) — the interpret call, if it runs,
+            # needs this history to look identical either way.
             messages.append({
                 "role": "assistant",
-                "content": msg.content,
-                "tool_calls": [tc.model_dump(exclude_none=True) for tc in msg.tool_calls],
+                "content": None,
+                "tool_calls": [{
+                    "id": "det-1",
+                    "type": "function",
+                    "function": {"name": det_tool, "arguments": json.dumps(det_input)},
+                }],
             })
+            messages.append({"role": "tool", "tool_call_id": "det-1", "content": result})
+        else:
+            # ── Force tool call(s) via the LLM ───────────────────────────────
+            # The LLM MUST pick a real tool — it cannot answer from memory.
+            # We allow up to MAX_TOOL_ROUNDS sequential tool calls (rare: e.g. look up
+            # a thread ID then send a message), but stop as soon as the model signals
+            # it has enough data (no new tool calls after a round).
+            MAX_TOOL_ROUNDS = 3
+            tool_rounds = 0
 
-            for tc in msg.tool_calls:
-                tool_name = tc.function.name
-                called_tools.append(tool_name)
-                try:
-                    tool_input = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    tool_input = {}
-                if tool_name == "get_new_orders" and tool_input.get("count_only"):
-                    new_orders_count_only = True
-                if tool_name == "get_message_threads":
-                    # The user's wording overrides whatever the model decided for
-                    # count_only (see _wants_message_count_only above).
-                    if _MESSAGE_LIST_OVERRIDE_RE.search(query):
-                        tool_input["count_only"] = False
-                    elif _wants_message_count_only(query):
-                        tool_input["count_only"] = True
-                    if tool_input.get("count_only"):
-                        message_threads_count_only = True
-                logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
-                signature = f"{tool_name}:{json.dumps(tool_input, sort_keys=True, default=str)}"
-                if signature in tool_results:
-                    logger.info("[allegro] repeat call to %s — reusing the previous result", tool_name)
-                    result = tool_results[signature]
-                else:
-                    try:
-                        with perf.stage(f"tool:{tool_name}"):
-                            result = await self._execute_tool(tool_name, tool_input)
-                    except Exception as exc:
-                        logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
-                        result = "An internal error occurred. Please try again."
-                    tool_results[signature] = result
-                single_tool_raw_result = result if len(msg.tool_calls) == 1 else None
+            while tool_rounds < MAX_TOOL_ROUNDS:
+                # A reply with neither text nor a tool call means something went
+                # wrong in round 1 (it was asked for a tool and produced nothing) but
+                # is the normal "I have everything I need" signal from round 2 on —
+                # so only round 1 gets the blank-reply model rotation.
+                select_call = _call_for_reply if tool_rounds == 0 else _call_with_retry
+                with perf.stage("tool_select_llm"):
+                    resp = await select_call(
+                        self._client,
+                        model_pool,
+                        f"allegro/tool-select-{tool_rounds + 1}",
+                        messages=messages,
+                        tools=tools,
+                        # Round 1 must produce data — the model may not answer store
+                        # questions from memory. From round 2 on it is "auto": the
+                        # model has results in hand and signals it is done by
+                        # returning no further tool calls (with "required" it could
+                        # never say that, and would be forced to call something).
+                        tool_choice="required" if tool_rounds == 0 else "auto",
+                        max_tokens=400,
+                        # This call only ever needs to pick a tool + arguments per the
+                        # MANDATORY TOOL CALLS rules above — no open-ended reasoning is
+                        # needed. Without this, thinking-capable models (gemini-3.5-flash,
+                        # 2.5-flash) burn seconds of invisible reasoning tokens before
+                        # emitting the tool call (same issue as orchestrator._classify_with_llm
+                        # — see the comment there), which was the single biggest contributor
+                        # to the 30s-60s response times reported for e.g. "new orders" queries.
+                        reasoning_effort="none",
+                    )
+                msg = resp.choices[0].message
+
+                if not msg.tool_calls:
+                    if tool_rounds > 0:
+                        # The model has its data and wants no more tools — that is the
+                        # normal way out of a multi-round chain. Go format the answer.
+                        break
+                    # Round 1 with no tool call: the model ignored tool_choice=required.
+                    # Interpret whatever it said — but never hand back an empty reply
+                    # (the user would just see the orchestrator's generic "nie udało
+                    # się wygenerować odpowiedzi"), so fall through to Step 2 instead
+                    # and let the interpret call answer from the conversation.
+                    logger.warning("AllegroAgent: model skipped tool_choice=required (round %d)", tool_rounds + 1)
+                    if (msg.content or "").strip():
+                        perf.log(result="no_tool_call")
+                        return AgentResponse(text=msg.content, agent_type=self.agent_name, metadata={"output_format": "chat"})
+                    logger.warning("AllegroAgent: no tool call and no text — falling through to interpret")
+                    break
+
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [tc.model_dump(exclude_none=True) for tc in msg.tool_calls],
                 })
 
-            tool_rounds += 1
+                for tc in msg.tool_calls:
+                    tool_name = tc.function.name
+                    called_tools.append(tool_name)
+                    try:
+                        tool_input = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        tool_input = {}
+                    if tool_name == "get_new_orders" and tool_input.get("count_only"):
+                        new_orders_count_only = True
+                    if tool_name == "get_message_threads":
+                        # The user's wording overrides whatever the model decided for
+                        # count_only (see _wants_message_count_only above).
+                        if _MESSAGE_LIST_OVERRIDE_RE.search(query):
+                            tool_input["count_only"] = False
+                        elif _wants_message_count_only(query):
+                            tool_input["count_only"] = True
+                        if tool_input.get("count_only"):
+                            message_threads_count_only = True
+                    logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
+                    signature = f"{tool_name}:{json.dumps(tool_input, sort_keys=True, default=str)}"
+                    if signature in tool_results:
+                        logger.info("[allegro] repeat call to %s — reusing the previous result", tool_name)
+                        result = tool_results[signature]
+                    else:
+                        try:
+                            with perf.stage(f"tool:{tool_name}"):
+                                result = await self._execute_tool(tool_name, tool_input)
+                        except Exception as exc:
+                            logger.exception("[allegro] tool %s failed: %s", tool_name, exc)
+                            result = "An internal error occurred. Please try again."
+                        tool_results[signature] = result
+                    single_tool_raw_result = result if len(msg.tool_calls) == 1 else None
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
 
-            # Cost guard on the follow-up round: it re-sends every tool result
-            # collected so far alongside all ~30 tool schemas, so for a query
-            # that already pulled a big listing (all offers, a 50-row order
-            # table) asking "need anything else?" is both expensive and
-            # pointless — that dump IS the answer. Chaining is for lookups,
-            # whose results are small.
-            collected = sum(len(r) for r in tool_results.values())
-            if collected > _CHAIN_RESULT_BUDGET:
-                logger.info(
-                    "[allegro] %d chars of tool results after round %d — formatting instead of chaining",
-                    collected, tool_rounds,
-                )
-                break
-            # No break here: most queries are satisfied by round 1 and the model
-            # ends the loop itself by asking for no further tools (above). Some
-            # genuinely need a chain, and cutting the loop off after round 1 left
-            # those unanswerable — "szczegóły ostatniego nowego zamówienia" needs
-            # get_new_orders to learn the order's UUID before get_order_details
-            # can be called with it (that tool has no "latest" mode), so the model
-            # was forced to either guess an ID or call the listing tool alone, and
-            # the interpret step then had nothing that matched what was asked and
-            # sometimes replied with nothing at all. MAX_TOOL_ROUNDS still caps it.
+                tool_rounds += 1
+
+                # Cost guard on the follow-up round: it re-sends every tool result
+                # collected so far alongside all ~30 tool schemas, so for a query
+                # that already pulled a big listing (all offers, a 50-row order
+                # table) asking "need anything else?" is both expensive and
+                # pointless — that dump IS the answer. Chaining is for lookups,
+                # whose results are small.
+                collected = sum(len(r) for r in tool_results.values())
+                if collected > _CHAIN_RESULT_BUDGET:
+                    logger.info(
+                        "[allegro] %d chars of tool results after round %d — formatting instead of chaining",
+                        collected, tool_rounds,
+                    )
+                    break
+                # No break here: most queries are satisfied by round 1 and the model
+                # ends the loop itself by asking for no further tools (above). Some
+                # genuinely need a chain, and cutting the loop off after round 1 left
+                # those unanswerable — "szczegóły ostatniego nowego zamówienia" needs
+                # get_new_orders to learn the order's UUID before get_order_details
+                # can be called with it (that tool has no "latest" mode), so the model
+                # was forced to either guess an ID or call the listing tool alone, and
+                # the interpret step then had nothing that matched what was asked and
+                # sometimes replied with nothing at all. MAX_TOOL_ROUNDS still caps it.
 
         # ── Skip the interpret call entirely when it would be pure passthrough ──
         # See _PASSTHROUGH_TOOLS above for which tools and why. count_only
