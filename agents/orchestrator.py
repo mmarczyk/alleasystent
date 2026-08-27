@@ -130,11 +130,17 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
 ]
 
 
-# How many of the most recent conversation turns are replayed into each request.
-# Sessions live for 30 days (services/gcp_service.py), so without a cap an old
-# thread grows unboundedly and every message re-sends the whole thing — including
-# past order/offer listings, which are the largest turns by far.
-_HISTORY_TURNS = 20
+# How many of the most recent conversation turns are replayed into each request,
+# and how far back those turns may be. Sessions live for 30 days (services/
+# gcp_service.py), so without a cap an old thread grows unboundedly and every
+# message re-sends the whole thing — including past order/offer listings, which
+# are the largest turns by far. The age cap matters independently of the count
+# cap: a seller returning after a multi-hour gap doesn't need that stale
+# context re-sent into the tool-selection/interpret prompts on their next
+# query — it was still costing full _HISTORY_TURNS-worth of tokens even
+# though it had nothing to do with a fresh question.
+_HISTORY_TURNS = 10
+_HISTORY_MAX_AGE_HOURS = 12
 
 # Shown instead of an empty reply. A blank assistant turn must never reach the
 # user OR the session store: replayed as history it makes Gemini reject every
@@ -233,7 +239,7 @@ class Orchestrator:
             with perf.stage("classify"):
                 data_source = await self._classify(
                     message.text,
-                    session.to_anthropic_messages(limit=_HISTORY_TURNS),
+                    session.to_anthropic_messages(limit=_HISTORY_TURNS, max_age_hours=_HISTORY_MAX_AGE_HOURS),
                     last_source=session.metadata.get("last_data_source"),
                 )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
@@ -254,7 +260,7 @@ class Orchestrator:
         try:
             with perf.stage("route"):
                 response = await self._route(
-                    data_source, message, session.to_anthropic_messages(limit=_HISTORY_TURNS), user_id,
+                    data_source, message, session.to_anthropic_messages(limit=_HISTORY_TURNS, max_age_hours=_HISTORY_MAX_AGE_HOURS), user_id,
                 )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
