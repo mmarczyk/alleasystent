@@ -187,25 +187,18 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "dokładnie jak w danych narzędzia. NIE skracaj, nie streszczaj i nie parafrazuj treści."
     ),
     "get_order_details": (
-        "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]\n"
-        "Odpowiedź MUSI składać się z dwóch części, w tej kolejności:\n"
-        "1. Na samym początku, jako PIERWSZA rzecz w odpowiedzi (bez żadnego wstępu) — "
-        "blok kodu oznaczony jako 'summary' z krótkim podsumowaniem w formie listy "
-        "punktowanej, dokładnie te pola:\n"
-        "```summary\n"
-        "- Zamówienie: `ID zamówienia`\n"
-        "- Kupujący: ...\n"
-        "- Status: ...\n"
-        "- Wysyłka do: ...\n"
-        "- Wartość: ...\n"
-        "- Faktura: ...\n"
-        "```\n"
-        "   Pole 'Faktura' musi jasno mówić, czy kupujący poprosił o fakturę, a jeśli "
-        "tak — czy została już wystawiona (dane z narzędzia to mówią wprost).\n"
-        "2. Zaraz po tym bloku — pełny dokument szczegółów: pierwsza linia # Szczegóły "
-        "zamówienia {ID}, a w nim sekcje ## Produkty (KAŻDY produkt osobno, z ilością i "
-        "ceną), ## Dostawa (metoda, tracking), ## Rozliczenie (wszystkie wpisy "
-        "billingowe osobno, jeśli są w danych, plus zysk netto).\n"
+        "[FORMAT ODPOWIEDZI: ZWYKŁY TEKST — NIGDY DOKUMENT]\n"
+        "Odpowiedz zwykłym tekstem w formie listy punktowanej — bez nagłówków (#, ##), "
+        "bez tabel i bez bloków kodu. Całość ma się zmieścić w dymku czatu. Bez wstępu "
+        "ani potwierdzenia przed listą.\n"
+        "Zacznij od pól podstawowych, każde w osobnym punkcie: Zamówienie (ID), Kupujący, "
+        "Status, Wysyłka do, Wartość, Faktura. Pole 'Faktura' musi jasno mówić, czy "
+        "kupujący poprosił o fakturę, a jeśli tak — czy została już wystawiona (dane z "
+        "narzędzia mówią to wprost).\n"
+        "Dalej, jako kolejne punkty tej samej listy (z zagnieżdżonymi podpunktami, nie "
+        "jako osobne sekcje z nagłówkami): Produkty — KAŻDY produkt osobno, z ilością i "
+        "ceną; Dostawa — metoda i tracking; Rozliczenie — wszystkie wpisy billingowe "
+        "osobno, jeśli są w danych, plus zysk netto.\n"
         "Użyj WYŁĄCZNIE danych zwróconych przez narzędzie powyżej — nigdy nie zmyślaj "
         "produktów, cen ani statusu faktury."
     ),
@@ -781,22 +774,22 @@ class AllegroAgent(BaseAgent):
             else t
             for t in called_tools
         ]
-        # With a chain of tools (get_new_orders → get_order_details), the last
-        # tool is the one that answered the question, and resolve_output_format
-        # already picked its format — so prefer the instruction belonging to a
-        # tool whose own format IS the resolved one, rather than whichever tool
-        # happened to run first (that would tell the model to render an order
-        # details document as the bullet list get_new_orders asks for). With a
-        # single tool called — the overwhelming majority — this picks the same
-        # instruction it always did.
+        # With a chain of tools (get_new_orders → get_order_details), the LAST
+        # tool is the one that answered the question — the earlier ones only fed
+        # it an ID — so walk the chain backwards and take the instruction of the
+        # last tool whose own format IS the resolved one (both formats matching
+        # is the common case now that get_order_details is "chat" too, and then
+        # only recency separates them; picking the first would render an order's
+        # details as the new-orders bullet list). With a single tool called — the
+        # overwhelming majority — this picks the same instruction it always did.
         available = [
             (key, TOOL_OUTPUT_FORMAT.get(tool, "chat"))
             for key, tool in zip(instruction_keys, called_tools)
             if key in _TOOL_SPECIFIC_INSTRUCTIONS
         ]
         tool_instruction = next(
-            (_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, fmt in available if fmt == output_format),
-            next((_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, _ in available), None),
+            (_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, fmt in reversed(available) if fmt == output_format),
+            next((_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, _ in reversed(available)), None),
         )
         format_instruction = tool_instruction or _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
         if format_instruction:
@@ -825,8 +818,8 @@ class AllegroAgent(BaseAgent):
         # Last resort before the user gets the orchestrator's generic apology:
         # the tool data IS in `messages`, so a blank reply here means the model
         # balked at the format instruction — typically one demanding a full
-        # document (get_order_details) from a tool result that turned out to be
-        # an error or an empty list. Ask once more for a plain answer instead of
+        # document (get_products_to_reorder) from a tool result that turned out
+        # to be an error or an empty list. Ask once more for a plain answer instead of
         # returning nothing.
         if not final_text.strip() and format_instruction:
             logger.warning(
