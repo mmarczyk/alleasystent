@@ -844,6 +844,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Use for 'nowe zwroty', 'jakie mam zwroty', 'czy są jakieś zwroty', 'ile zwrotów'. "
                 "COUNT-ONLY: for 'ile zwrotów', 'ile mam zwrotów' (user wants a NUMBER, not the "
                 "list) — set count_only=true. "
+                "PERIOD: whenever the user names a time window — 'w tym miesiącu', 'w zeszłym "
+                "miesiącu', 'w marcu', 'w tym tygodniu', 'dzisiaj', 'od 1 do 15 maja' — you MUST "
+                "pass date_from_local/date_to_local, computed from the current date in your "
+                "context. Without them the tool answers about the most recent returns regardless "
+                "of date, which silently turns 'ile zwrotów w tym miesiącu' into a wrong number. "
                 "Do NOT use this for complaints/disputes ('reklamacje', 'spory') — use "
                 "get_new_complaints for those; a return and a complaint are different Allegro "
                 "processes even though the user may casually call either one a 'zwrot'."
@@ -859,6 +864,23 @@ ALLEGRO_TOOLS: list[dict] = [
                             "count, not list individual returns."
                         ),
                         "default": False,
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": (
+                            "Start of the period as a Warsaw-local calendar date, 'YYYY-MM-DD'. "
+                            "Optional — pass it together with date_to_local whenever the user "
+                            "names a period ('w tym miesiącu', 'w zeszłym tygodniu', 'w marcu', "
+                            "'dzisiaj'), computed from the current date given in your context. "
+                            "Omitted (both dates) = most recent returns regardless of date."
+                        ),
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": (
+                            "End of the period as a Warsaw-local calendar date, 'YYYY-MM-DD' "
+                            "(inclusive). Pass together with date_from_local."
+                        ),
                     },
                 },
             },
@@ -880,7 +902,10 @@ ALLEGRO_TOOLS: list[dict] = [
                 "returns regardless of whether the parcel has arrived yet (most haven't, so it "
                 "answers a different, broader question than 'what needs my attention'). "
                 "COUNT-ONLY: for 'ile zwrotów do obsłużenia', 'ile mam zwrotów czekających' "
-                "(user wants a NUMBER, not the list) — set count_only=true."
+                "(user wants a NUMBER, not the list) — set count_only=true. "
+                "PERIOD: if the user names a time window ('w tym miesiącu', 'w marcu', 'dzisiaj'), "
+                "pass date_from_local/date_to_local — without them the answer covers all recent "
+                "returns awaiting action, not the period asked about."
             ),
             "parameters": {
                 "type": "object",
@@ -893,6 +918,23 @@ ALLEGRO_TOOLS: list[dict] = [
                             "returns."
                         ),
                         "default": False,
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": (
+                            "Start of the period as a Warsaw-local calendar date, 'YYYY-MM-DD'. "
+                            "Optional — pass it together with date_to_local whenever the user "
+                            "names a period ('w tym miesiącu', 'w zeszłym tygodniu', 'w marcu', "
+                            "'dzisiaj'), computed from the current date given in your context. "
+                            "Omitted (both dates) = most recent returns awaiting action regardless of date."
+                        ),
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": (
+                            "End of the period as a Warsaw-local calendar date, 'YYYY-MM-DD' "
+                            "(inclusive). Pass together with date_from_local."
+                        ),
                     },
                 },
             },
@@ -908,6 +950,10 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'reklamacje kupujących', 'ile reklamacji'. "
                 "COUNT-ONLY: for 'ile reklamacji', 'ile mam reklamacji' (user wants a NUMBER, not "
                 "the list) — set count_only=true. "
+                "PERIOD: whenever the user names a time window ('w tym miesiącu', 'w marcu', "
+                "'dzisiaj'), you MUST pass date_from_local/date_to_local, computed from the "
+                "current date in your context — without them the count covers all recent "
+                "complaints, not the period asked about. "
                 "Do NOT use this for product returns with no dispute ('zwroty') — use "
                 "get_new_returns for those."
             ),
@@ -922,6 +968,23 @@ ALLEGRO_TOOLS: list[dict] = [
                             "the count, not list individual complaints."
                         ),
                         "default": False,
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": (
+                            "Start of the period as a Warsaw-local calendar date, 'YYYY-MM-DD'. "
+                            "Optional — pass it together with date_to_local whenever the user "
+                            "names a period ('w tym miesiącu', 'w zeszłym tygodniu', 'w marcu', "
+                            "'dzisiaj'), computed from the current date given in your context. "
+                            "Omitted (both dates) = most recent complaints regardless of date."
+                        ),
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": (
+                            "End of the period as a Warsaw-local calendar date, 'YYYY-MM-DD' "
+                            "(inclusive). Pass together with date_from_local."
+                        ),
                     },
                 },
             },
