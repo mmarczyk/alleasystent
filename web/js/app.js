@@ -210,6 +210,64 @@ function renderMarkdown(text) {
   return marked.parse(text);
 }
 
+// Action buttons (monitoring toggle etc.) are always appended at the very end of
+// bot content — pull them out so they never get sliced apart by preview truncation
+// or hoisted around by the doc-viewer reordering below.
+function extractTrailingHtml(content) {
+  const m = content.match(/<button[\s\S]*$/);
+  if (!m) return { text: content, html: null };
+  return { text: content.slice(0, m.index).trimEnd(), html: m[0] };
+}
+
+// Some replies lead with a ```summary fenced block — a short bulleted summary
+// meant for the chat bubble (see get_order_details in
+// agents/allegro/allegro_agent.py), with the fuller detail (products, billing,
+// ...) reserved for the doc viewer. Pulls it out and returns the remaining text
+// separately so it isn't rendered twice or shown as a raw code block.
+function extractSummaryBlock(content) {
+  const m = content.match(/```summary\r?\n([\s\S]*?)```[ \t]*\r?\n?/);
+  if (!m) return { summary: null, rest: content };
+  const summary = m[1].trim();
+  const rest = (content.slice(0, m.index) + content.slice(m.index + m[0].length)).replace(/^\s+/, '');
+  return { summary, rest };
+}
+
+const _isTableLine = (l) => /^\s*\|.*\|\s*$/.test(l);
+
+// A table-format reply opens with the table and closes with the summary
+// sentence (that is what _OUTPUT_FORMAT_INSTRUCTIONS["table"] asks the model
+// for). On the full screen that sentence is what orients the reader, so it is
+// split off to be shown first. Only fires when the reply really opens on the
+// table — prose the model already put first stays exactly where it is.
+function _splitTrailingProse(text) {
+  const lines = text.split('\n');
+  const first = lines.findIndex(_isTableLine);
+  if (first === -1) return { lead: '', body: text };
+  if (lines.slice(0, first).join('\n').trim()) return { lead: '', body: text };
+  let last = first;
+  for (let i = lines.length - 1; i > first; i--) {
+    if (_isTableLine(lines[i])) { last = i; break; }
+  }
+  const lead = lines.slice(last + 1).join('\n').trim();
+  if (!lead) return { lead: '', body: text };
+  return { lead, body: lines.slice(first, last + 1).join('\n').trim() };
+}
+
+// What the full-screen viewer shows: the reply's own words first, then the
+// artifact they describe, separated by a rule. Both shapes the agent produces
+// need the reorder — a leading ```summary block (which the viewer used to drop
+// entirely, and the sidebar used to render as a raw code block) and a table
+// with its summary sentence trailing it. Any action button stays pinned to the
+// bottom, where it belongs.
+function docViewContent(rawContent) {
+  const { text, html } = extractTrailingHtml(rawContent);
+  const { summary, rest } = extractSummaryBlock(text);
+  const { lead: trailingProse, body } = _splitTrailingProse(rest);
+  const lead = [summary, trailingProse].filter(Boolean).join('\n\n');
+  const doc = lead ? `${lead}\n\n---\n\n${body}` : body;
+  return html ? `${doc}\n\n${html}` : doc;
+}
+
 // ── Document Viewer ──────────────────────────────
 // Full-screen tab-based viewer for long responses (> 500 chars).
 const DocViewer = (() => {
@@ -740,7 +798,7 @@ const Sidebar = (() => {
   function openDoc(i) {
     const d = _docsCache[i];
     if (!d) return;
-    DocViewer.open(d.title, d.content, d.format);
+    DocViewer.open(d.title, docViewContent(d.content), d.format);
     document.getElementById('sidebar').classList.remove('open');
   }
 
@@ -1787,27 +1845,6 @@ const Chat = (() => {
     return `📊 Tabela — ${stats.dataRows} ${noun}. Kliknij „Pełny widok”, aby zobaczyć szczegóły.`;
   }
 
-  // Action buttons (monitoring toggle etc.) are always appended at the very end of
-  // bot content — pull them out so they never get sliced apart by preview truncation.
-  function _extractTrailingHtml(content) {
-    const m = content.match(/<button[\s\S]*$/);
-    if (!m) return { text: content, html: null };
-    return { text: content.slice(0, m.index).trimEnd(), html: m[0] };
-  }
-
-  // Some document-format replies lead with a ```summary fenced block — a short
-  // bulleted summary meant for the chat bubble (see get_order_details in
-  // agents/allegro/allegro_agent.py), with the fuller detail (products,
-  // billing, ...) reserved for the doc viewer. Pulls it out and returns the
-  // remaining text separately so it isn't shown twice / rendered as a raw code block.
-  function _extractSummaryBlock(content) {
-    const m = content.match(/```summary\r?\n([\s\S]*?)```[ \t]*\r?\n?/);
-    if (!m) return { summary: null, rest: content };
-    const summary = m[1].trim();
-    const rest = (content.slice(0, m.index) + content.slice(m.index + m[0].length)).replace(/^\s+/, '');
-    return { summary, rest };
-  }
-
   // Formats that always belong in the full-window doc viewer, the same way
   // Claude pops a description into an artifact instead of dumping it in the
   // chat bubble: tables get a chat summary + full table doc, documents and
@@ -1832,13 +1869,13 @@ const Chat = (() => {
     const isUser = role === 'user';
     const { text: bodyTextRaw, html: trailingHtml } = isUser
       ? { text: content, html: null }
-      : _extractTrailingHtml(content);
+      : extractTrailingHtml(content);
     // Pull out a leading ```summary block, if any — it's the chat-bubble
     // preview; the doc viewer only gets the remaining detail content, so the
     // summary isn't shown twice or rendered as a raw code block there.
     const { summary: summaryBlock, rest: bodyText } = isUser
       ? { summary: null, rest: bodyTextRaw }
-      : _extractSummaryBlock(bodyTextRaw);
+      : extractSummaryBlock(bodyTextRaw);
     // A "table" reply only counts as an artifact when it actually contains rows —
     // an empty/no-results table (e.g. "brak nowych wiadomości") must render as a
     // normal short chat reply, not get hidden behind a doc-viewer link.
@@ -1858,8 +1895,10 @@ const Chat = (() => {
     const time = ts ? new Date(ts).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '';
 
     // Register long bot responses so "Pełny widok" button can re-open the doc viewer.
-    // Doc content = detail body (summary block stripped) + any trailing button HTML.
-    const docContent = trailingHtml ? bodyText + '\n\n' + trailingHtml : bodyText;
+    // docViewContent puts the reply's own words (summary block, or the sentence
+    // the model trails a table with) above the artifact — on the full screen the
+    // text is what tells the reader what they are looking at.
+    const docContent = docViewContent(content);
     const docKey = isLong ? DocViewer.register(docContent, format) : null;
 
     // Long responses: show a compact preview in the bubble — full content is in the doc viewer
