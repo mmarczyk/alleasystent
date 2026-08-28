@@ -330,3 +330,78 @@ class TestToolContextFilter:
 
         assert response.text == "- Zamówienie: 1"
         assert agent._client.chat.completions.create.call_count == 0
+
+
+class TestLatestOrderChain:
+    """See AllegroAgent._resolve_latest_order_chain — "szczegóły ostatniego
+    zamówienia" mechanically needs get_new_orders(limit=1) to learn which
+    order before get_order_details can run. That two-hop lookup used to cost
+    2-3 tool-select LLM rounds (round 1 forced, round 2+ "need more?" checks)
+    even though which two tools run, and in what order, was never actually
+    in doubt — this resolves it with one direct Allegro API call instead."""
+
+    @pytest.mark.asyncio
+    async def test_resolves_directly_to_order_details_when_an_order_exists(self):
+        agent = _agent({"get_order_details": "# Szczegóły zamówienia abc-123"})
+        agent._allegro.get_orders = AsyncMock(return_value=[MagicMock(order_id="abc-123")])
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[_resp("# Szczegóły zamówienia abc-123")]
+        )
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        agent._allegro.get_orders.assert_awaited_once_with(
+            status="READY_FOR_PROCESSING", fulfillment_status="NEW", limit=1,
+        )
+        agent._execute_tool.assert_awaited_once_with("get_order_details", {"order_id": "abc-123"})
+        assert response.text == "# Szczegóły zamówienia abc-123"
+        # Zero tool-select rounds — only the interpret call remains, since
+        # get_order_details' "document" format isn't a passthrough tool.
+        assert agent._client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_bare_new_orders_when_none_exist(self):
+        agent = _agent({"get_new_orders": "Brak nowych zamówień.\n\n💡 ..."})
+        agent._allegro.get_orders = AsyncMock(return_value=[])
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match")
+        )
+
+        response = await agent.run("status ostatniego nowego zamówienia")
+
+        agent._execute_tool.assert_awaited_once_with("get_new_orders", {"limit": 1})
+        assert response.text == "Brak nowych zamówień.\n\n💡 ..."
+        # get_new_orders is a passthrough tool for a single, confidently
+        # Polish-language call — no interpret call either.
+        assert agent._client.chat.completions.create.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_lookup_error_falls_back_to_the_llm_path(self):
+        agent = _agent({"get_new_orders": "- Zamówienie: 1", "get_order_details": "# Szczegóły"})
+        agent._allegro.get_orders = AsyncMock(side_effect=RuntimeError("Allegro API down"))
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_new_orders", {})]),
+            _resp(tool_calls=[_tool_call("c2", "get_order_details", {"order_id": "x"})]),
+            _resp(),
+            _resp("# Szczegóły zamówienia x"),
+        ])
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text == "# Szczegóły zamówienia x"
+        assert agent._client.chat.completions.create.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_plain_listing_query_does_not_trigger_the_chain(self):
+        """No detail-intent word — must not call the extra lookup at all."""
+        agent = _agent({"get_new_orders": "- Zamówienie: 1"})
+        agent._allegro.get_orders = AsyncMock(
+            side_effect=AssertionError("chain lookup should not run for a plain listing")
+        )
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match")
+        )
+
+        response = await agent.run("jakie mam nowe zamówienia")
+
+        assert response.text == "- Zamówienie: 1"
