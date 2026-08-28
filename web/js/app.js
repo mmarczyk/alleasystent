@@ -1795,11 +1795,12 @@ const Chat = (() => {
     return { text: content.slice(0, m.index).trimEnd(), html: m[0] };
   }
 
-  // Some document-format replies lead with a ```summary fenced block — a short
-  // bulleted summary meant for the chat bubble (see get_order_details in
-  // agents/allegro/allegro_agent.py), with the fuller detail (products,
-  // billing, ...) reserved for the doc viewer. Pulls it out and returns the
-  // remaining text separately so it isn't shown twice / rendered as a raw code block.
+  // Legacy/defensive: a reply may lead with a ```summary fenced block — a short
+  // bulleted summary meant for the chat bubble, with the fuller detail reserved
+  // for the doc viewer. No agent asks for one any more (get_order_details used
+  // to, and now answers as plain chat text), but old stored messages still carry
+  // them. Pulls it out and returns the remaining text separately so it isn't
+  // shown twice / rendered as a raw code block.
   function _extractSummaryBlock(content) {
     const m = content.match(/```summary\r?\n([\s\S]*?)```[ \t]*\r?\n?/);
     if (!m) return { summary: null, rest: content };
