@@ -1039,7 +1039,10 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # Zamówienia
     "get_new_orders": "chat",
     "get_orders": "table",
-    "get_order_details": "document",
+    # "chat" (not "document") — a single order's details are a short, factual
+    # answer to a question the user just asked; wrapping them in a document
+    # artifact hid them behind a "zobacz pełną odpowiedź" click for no gain.
+    "get_order_details": "chat",
     "get_orders_delivery": "table",
     # Oferty
     "get_active_offers": "table",

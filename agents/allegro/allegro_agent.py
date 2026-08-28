@@ -187,25 +187,18 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "dokładnie jak w danych narzędzia. NIE skracaj, nie streszczaj i nie parafrazuj treści."
     ),
     "get_order_details": (
-        "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]\n"
-        "Odpowiedź MUSI składać się z dwóch części, w tej kolejności:\n"
-        "1. Na samym początku, jako PIERWSZA rzecz w odpowiedzi (bez żadnego wstępu) — "
-        "blok kodu oznaczony jako 'summary' z krótkim podsumowaniem w formie listy "
-        "punktowanej, dokładnie te pola:\n"
-        "```summary\n"
-        "- Zamówienie: `ID zamówienia`\n"
-        "- Kupujący: ...\n"
-        "- Status: ...\n"
-        "- Wysyłka do: ...\n"
-        "- Wartość: ...\n"
-        "- Faktura: ...\n"
-        "```\n"
-        "   Pole 'Faktura' musi jasno mówić, czy kupujący poprosił o fakturę, a jeśli "
-        "tak — czy została już wystawiona (dane z narzędzia to mówią wprost).\n"
-        "2. Zaraz po tym bloku — pełny dokument szczegółów: pierwsza linia # Szczegóły "
-        "zamówienia {ID}, a w nim sekcje ## Produkty (KAŻDY produkt osobno, z ilością i "
-        "ceną), ## Dostawa (metoda, tracking), ## Rozliczenie (wszystkie wpisy "
-        "billingowe osobno, jeśli są w danych, plus zysk netto).\n"
+        "[FORMAT ODPOWIEDZI: ZWYKŁY TEKST — NIGDY DOKUMENT]\n"
+        "Odpowiedz zwykłym tekstem w formie listy punktowanej — bez nagłówków (#, ##), "
+        "bez tabel i bez bloków kodu. Całość ma się zmieścić w dymku czatu. Bez wstępu "
+        "ani potwierdzenia przed listą.\n"
+        "Zacznij od pól podstawowych, każde w osobnym punkcie: Zamówienie (ID), Kupujący, "
+        "Status, Wysyłka do, Wartość, Faktura. Pole 'Faktura' musi jasno mówić, czy "
+        "kupujący poprosił o fakturę, a jeśli tak — czy została już wystawiona (dane z "
+        "narzędzia mówią to wprost).\n"
+        "Dalej, jako kolejne punkty tej samej listy (z zagnieżdżonymi podpunktami, nie "
+        "jako osobne sekcje z nagłówkami): Produkty — KAŻDY produkt osobno, z ilością i "
+        "ceną; Dostawa — metoda i tracking; Rozliczenie — wszystkie wpisy billingowe "
+        "osobno, jeśli są w danych, plus zysk netto.\n"
         "Użyj WYŁĄCZNIE danych zwróconych przez narzędzie powyżej — nigdy nie zmyślaj "
         "produktów, cen ani statusu faktury."
     ),
@@ -834,22 +827,22 @@ class AllegroAgent(BaseAgent):
             else t
             for t in called_tools
         ]
-        # With a chain of tools (get_new_orders → get_order_details), the last
-        # tool is the one that answered the question, and resolve_output_format
-        # already picked its format — so prefer the instruction belonging to a
-        # tool whose own format IS the resolved one, rather than whichever tool
-        # happened to run first (that would tell the model to render an order
-        # details document as the bullet list get_new_orders asks for). With a
-        # single tool called — the overwhelming majority — this picks the same
-        # instruction it always did.
+        # With a chain of tools (get_new_orders → get_order_details), the LAST
+        # tool is the one that answered the question — the earlier ones only fed
+        # it an ID — so walk the chain backwards and take the instruction of the
+        # last tool whose own format IS the resolved one (both formats matching
+        # is the common case now that get_order_details is "chat" too, and then
+        # only recency separates them; picking the first would render an order's
+        # details as the new-orders bullet list). With a single tool called — the
+        # overwhelming majority — this picks the same instruction it always did.
         available = [
             (key, TOOL_OUTPUT_FORMAT.get(tool, "chat"))
             for key, tool in zip(instruction_keys, called_tools)
             if key in _TOOL_SPECIFIC_INSTRUCTIONS
         ]
         tool_instruction = next(
-            (_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, fmt in available if fmt == output_format),
-            next((_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, _ in available), None),
+            (_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, fmt in reversed(available) if fmt == output_format),
+            next((_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, _ in reversed(available)), None),
         )
         format_instruction = tool_instruction or _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
         if format_instruction:
@@ -883,8 +876,8 @@ class AllegroAgent(BaseAgent):
         # Last resort before the user gets the orchestrator's generic apology:
         # the tool data IS in `messages`, so a blank reply here means the model
         # balked at the format instruction — typically one demanding a full
-        # document (get_order_details) from a tool result that turned out to be
-        # an error or an empty list. Ask once more for a plain answer instead of
+        # document (get_products_to_reorder) from a tool result that turned out
+        # to be an error or an empty list. Ask once more for a plain answer instead of
         # returning nothing.
         if not final_text.strip() and format_instruction:
             logger.warning(
@@ -1684,11 +1677,10 @@ class AllegroAgent(BaseAgent):
                 self._dig(d, "smart", "trackingCode", default=None)
                 or self._dig(d, "trackingCode", default="N/A")
             )
-            billing_section = ""
+            billing_lines = []
             if billing_entries:
                 total_fees = 0.0
                 total_credits = 0.0
-                fee_lines = []
                 for e in billing_entries:
                     amount = float((e.get("value") or {}).get("amount", 0) or 0)
                     desc = (e.get("type") or {}).get("description", "Inne")
@@ -1696,51 +1688,50 @@ class AllegroAgent(BaseAgent):
                     occurred = e.get("occurredAt", "")[:10]
                     offer_part = f" — {offer_name}" if offer_name else ""
                     sign = "+" if amount > 0 else "-"
-                    fee_lines.append(f"- {occurred} | {desc}{offer_part} | {sign}{abs(amount):.2f} PLN")
+                    billing_lines.append(f"  - {occurred} | {desc}{offer_part} | {sign}{abs(amount):.2f} PLN")
                     if amount < 0:
                         total_fees += abs(amount)
                     else:
                         total_credits += amount
                 net = order.total_price - total_fees + total_credits
-                billing_section = (
-                    "## Rozliczenie\n"
-                    + "\n".join(fee_lines)
-                    + f"\n- **Suma opłat:** -{total_fees:.2f} PLN"
-                    + (f" | **Zwroty:** +{total_credits:.2f} PLN" if total_credits else "")
-                    + f"\n- **Zysk netto:** {net:.2f} PLN"
+                billing_lines.append(
+                    f"  - Suma opłat: -{total_fees:.2f} PLN"
+                    + (f" | Zwroty: +{total_credits:.2f} PLN" if total_credits else "")
                 )
+                billing_lines.append(f"  - Zysk netto: {net:.2f} PLN")
 
-            # Final, ready-to-display document — built here instead of handed
-            # to the interpret LLM as raw data, because _TOOL_SPECIFIC_INSTRUCTIONS
-            # for this tool already fully prescribes the shape (exact fields,
-            # exact section order, "use ONLY the data above, never invent") —
-            # there was never any real judgment left for the LLM to apply, just
-            # mechanical field-copying it was doing worse (slower, and with a
-            # nonzero chance of skipping a billing row) than Python can. See
-            # _PASSTHROUGH_TOOLS for how this reaches the user with zero LLM calls.
-            summary_block = (
-                "```summary\n"
-                f"- Zamówienie: `{order.order_id}`\n"
-                f"- Kupujący: {order.buyer_login}\n"
-                f"- Status: {self._fulfillment_pl(order.fulfillment_status)}\n"
-                f"- Wysyłka do: {self._dispatch_deadline_pl(order)}\n"
-                f"- Wartość: {self._format_price(order.total_price, order.currency)}\n"
-                f"- Faktura: {invoice_str}\n"
-                "```"
-            )
-            products_section = "## Produkty\n" + "\n".join(
-                f"- {li.offer_name} (ID: {li.offer_id}): {li.quantity} × "
+            # Final, ready-to-display plain-text bullet list — built here
+            # instead of handed to the interpret LLM as raw data, because
+            # _TOOL_SPECIFIC_INSTRUCTIONS for this tool already fully
+            # prescribes the shape (exact fields, exact bullet order, "use
+            # ONLY the data above, never invent") — there was never any real
+            # judgment left for the LLM to apply, just mechanical field-
+            # copying it was doing worse (slower, and with a nonzero chance
+            # of skipping a billing row) than Python can. See
+            # _PASSTHROUGH_TOOLS for how this reaches the user with zero
+            # LLM calls.
+            product_lines = [
+                f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} × "
                 f"{self._format_price(li.price, li.currency)}"
                 for li in order.line_items
-            )
-            delivery_section = f"## Dostawa\n- Metoda: {method_name}\n- Tracking: {tracking}"
-            document = "\n\n".join(filter(None, [
-                f"# Szczegóły zamówienia {order.order_id}",
-                products_section,
-                delivery_section,
-                billing_section,
-            ]))
-            return summary_block + "\n\n" + document
+            ]
+            lines = [
+                f"- Zamówienie: `{order.order_id}`",
+                f"- Kupujący: {order.buyer_login}",
+                f"- Status: {self._fulfillment_pl(order.fulfillment_status)}",
+                f"- Wysyłka do: {self._dispatch_deadline_pl(order)}",
+                f"- Wartość: {self._format_price(order.total_price, order.currency)}",
+                f"- Faktura: {invoice_str}",
+                "- Produkty:",
+                *product_lines,
+                "- Dostawa:",
+                f"  - Metoda: {method_name}",
+                f"  - Tracking: {tracking}",
+            ]
+            if billing_lines:
+                lines.append("- Rozliczenie:")
+                lines.extend(billing_lines)
+            return "\n".join(lines)
 
         if tool_name == "get_order_invoice_data":
             inv = await self._allegro.get_order_invoice_data(tool_input["order_id"])

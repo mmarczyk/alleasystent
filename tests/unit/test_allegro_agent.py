@@ -261,8 +261,8 @@ class TestPassthroughGeneralizedToOtherTools:
 
 class TestGetOrderDetailsDispatch:
     """_dispatch's get_order_details branch now builds the final, ready-to-
-    display document directly in Python instead of handing raw fields to
-    the interpret LLM — _TOOL_SPECIFIC_INSTRUCTIONS["get_order_details"]
+    display plain-text bullet list directly in Python instead of handing
+    raw fields to the interpret LLM — _TOOL_SPECIFIC_INSTRUCTIONS["get_order_details"]
     already fully prescribed the shape, so there was no real judgment left
     for the LLM to apply. See _PASSTHROUGH_TOOLS."""
 
@@ -296,22 +296,22 @@ class TestGetOrderDetailsDispatch:
         return agent
 
     @pytest.mark.asyncio
-    async def test_document_has_summary_block_and_sections(self):
+    async def test_plain_text_bullet_list_no_headers_or_code_fences(self):
         order = self._make_order()
         agent = self._make_agent_with_order(order)
 
         result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
 
-        assert result.startswith("```summary\n")
+        assert "```" not in result
+        assert "#" not in result
         assert "- Zamówienie: `abc-123`" in result
         assert "- Kupujący: jan_kowalski" in result
         assert "- Wartość: 189,98 PLN" in result
-        assert "# Szczegóły zamówienia abc-123" in result
-        assert "## Produkty" in result
-        assert "- Sweter wełniany M (ID: 111): 1 × 129,99 PLN" in result
-        assert "## Dostawa" in result
-        assert "- Metoda: InPost Paczkomaty" in result
-        assert "- Tracking: PL123456789" in result
+        assert "- Produkty:" in result
+        assert "  - Sweter wełniany M (ID: 111): 1 × 129,99 PLN" in result
+        assert "- Dostawa:" in result
+        assert "  - Metoda: InPost Paczkomaty" in result
+        assert "  - Tracking: PL123456789" in result
 
     @pytest.mark.asyncio
     async def test_no_billing_entries_omits_billing_section(self):
@@ -320,7 +320,7 @@ class TestGetOrderDetailsDispatch:
 
         result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
 
-        assert "## Rozliczenie" not in result
+        assert "Rozliczenie" not in result
 
     @pytest.mark.asyncio
     async def test_every_billing_entry_shown_separately(self):
@@ -334,11 +334,11 @@ class TestGetOrderDetailsDispatch:
 
         result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
 
-        assert "## Rozliczenie" in result
+        assert "- Rozliczenie:" in result
         assert result.count("Prowizja od sprzedaży") == 2
         assert "Opłata za wystawienie oferty" in result
-        assert "**Suma opłat:** -19.99 PLN" in result
-        assert "**Zysk netto:** 169.99 PLN" in result
+        assert "Suma opłat: -19.99 PLN" in result
+        assert "Zysk netto: 169.99 PLN" in result
 
     @pytest.mark.asyncio
     async def test_invoice_status_variants(self):

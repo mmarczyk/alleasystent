@@ -216,9 +216,9 @@ class TestEmptyReplyGuards:
 class TestFormatInstruction:
     @pytest.mark.asyncio
     async def test_chain_uses_the_instruction_of_the_tool_that_answered(self):
-        """get_new_orders asks for a bullet list, get_order_details for a document.
-        The chain resolves to 'document', so the document instruction must win —
-        the listing tool only supplied the ID."""
+        """get_new_orders asks for a new-orders bullet list, get_order_details for
+        a plain-text order summary. Both are 'chat', so the LAST tool's
+        instruction must win — the listing tool only supplied the ID."""
         agent = _agent()
         agent._client.chat.completions.create = AsyncMock(side_effect=[
             _resp(tool_calls=[_tool_call("c1", "get_new_orders", {})]),
@@ -229,9 +229,9 @@ class TestFormatInstruction:
 
         response = await agent.run("szczegóły ostatniego nowego zamówienia")
 
-        assert response.metadata["output_format"] == "document"
+        assert response.metadata["output_format"] == "chat"
         sent = json.dumps(agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False)
-        assert "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]" in sent
+        assert "[FORMAT ODPOWIEDZI: ZWYKŁY TEKST — NIGDY DOKUMENT]" in sent
         assert "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]" not in sent
 
     @pytest.mark.asyncio
@@ -376,7 +376,7 @@ class TestLatestOrderChain:
 
     @pytest.mark.asyncio
     async def test_resolves_directly_to_order_details_when_an_order_exists(self):
-        agent = _agent({"get_order_details": "# Szczegóły zamówienia abc-123"})
+        agent = _agent({"get_order_details": "- Zamówienie: abc-123"})
         agent._allegro.get_orders = AsyncMock(return_value=[MagicMock(order_id="abc-123")])
         agent._client.chat.completions.create = AsyncMock(
             side_effect=AssertionError("no LLM call expected — deterministic chain + passthrough")
@@ -388,11 +388,12 @@ class TestLatestOrderChain:
             status="READY_FOR_PROCESSING", fulfillment_status="NEW", limit=1,
         )
         agent._execute_tool.assert_awaited_once_with("get_order_details", {"order_id": "abc-123"})
-        assert response.text == "# Szczegóły zamówienia abc-123"
-        assert response.metadata["output_format"] == "document"
+        assert response.text == "- Zamówienie: abc-123"
+        assert response.metadata["output_format"] == "chat"
         # Zero LLM calls at all: the chain resolver skips tool-select, and
         # get_order_details is now in _PASSTHROUGH_TOOLS (its dispatch
-        # already builds the final document) so interpret is skipped too.
+        # already builds the final plain-text reply) so interpret is
+        # skipped too.
         assert agent._client.chat.completions.create.call_count == 0
 
     @pytest.mark.asyncio
