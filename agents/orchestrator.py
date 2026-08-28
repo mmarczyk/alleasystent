@@ -26,6 +26,7 @@ Routing model:
 
 import asyncio
 import logging
+import time
 
 from openai import (
     AsyncOpenAI,
@@ -36,7 +37,7 @@ from openai import (
     NotFoundError,
     RateLimitError,
 )
-from agents.base_agent import _call_with_retry
+from agents.base_agent import _call_for_reply, _call_with_retry
 
 from agents.allegro.allegro_agent import AllegroAgent
 from agents.base_agent import BaseAgent
@@ -48,6 +49,27 @@ from services import analytics_service
 from services.gcp_service import SessionStore
 
 logger = logging.getLogger(__name__)
+
+# ── Cold-start visibility ────────────────────────────────────────────────────
+# Cloud Run runs this service with --min-instances=0 (cloudbuild.yaml,
+# deploy-backend.yml), so a request after an idle period can hit a container
+# that just booted — image pull, Python startup, module imports — all of
+# which happens before this module's StageTimer ever starts timing. That
+# delay was invisible in the analytics dashboard's phase chart, prompting the
+# question of whether it's real. This doesn't fix it — it just tags the first
+# request this process handles so it's visible in the logged perf data
+# instead of silently inflating (or explaining) an otherwise-unaccounted-for
+# total_ms on whatever query happened to land first.
+_PROCESS_STARTED_AT = time.time()
+_requests_handled = 0
+
+
+def _mark_request() -> tuple[bool, float]:
+    """Returns (is_first_request_this_process, seconds_since_process_start)."""
+    global _requests_handled
+    _requests_handled += 1
+    return _requests_handled == 1, time.time() - _PROCESS_STARTED_AT
+
 
 # ── Context-aware data-source classifier prompt ────────────────────────────────
 # Single LLM call with full conversation history → returns the data source label.
@@ -130,11 +152,17 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
 ]
 
 
-# How many of the most recent conversation turns are replayed into each request.
-# Sessions live for 30 days (services/gcp_service.py), so without a cap an old
-# thread grows unboundedly and every message re-sends the whole thing — including
-# past order/offer listings, which are the largest turns by far.
-_HISTORY_TURNS = 20
+# How many of the most recent conversation turns are replayed into each request,
+# and how far back those turns may be. Sessions live for 30 days (services/
+# gcp_service.py), so without a cap an old thread grows unboundedly and every
+# message re-sends the whole thing — including past order/offer listings, which
+# are the largest turns by far. The age cap matters independently of the count
+# cap: a seller returning after a multi-hour gap doesn't need that stale
+# context re-sent into the tool-selection/interpret prompts on their next
+# query — it was still costing full _HISTORY_TURNS-worth of tokens even
+# though it had nothing to do with a fresh question.
+_HISTORY_TURNS = 10
+_HISTORY_MAX_AGE_HOURS = 12
 
 # Shown instead of an empty reply. A blank assistant turn must never reach the
 # user OR the session store: replayed as history it makes Gemini reject every
@@ -164,6 +192,10 @@ class Orchestrator:
         self._client = AsyncOpenAI(
             api_key=self._settings.google_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            # See agents/base_agent.py BaseAgent.__init__ for why this matters:
+            # without it a degraded-but-not-erroring model can sit inside one
+            # call for up to the SDK's 600s default with no rotation.
+            timeout=30.0,
         )
         self._session_store = SessionStore()
         self._allegro_agents: dict[str, AllegroAgent] = {}
@@ -186,6 +218,12 @@ class Orchestrator:
 
     async def handle(self, message: IncomingMessage, user_id: str | None = None) -> AgentResponse:
         """Main entry point — classify, route, persist, return."""
+        is_cold_start, since_process_start_s = _mark_request()
+        if is_cold_start:
+            logger.info(
+                "First request handled %.1fs after process start — likely a Cloud Run cold start",
+                since_process_start_s,
+            )
         perf = StageTimer("orchestrator.handle")
 
         # Give the invoice reminder first look at every incoming message: if it
@@ -229,7 +267,7 @@ class Orchestrator:
             with perf.stage("classify"):
                 data_source = await self._classify(
                     message.text,
-                    session.to_anthropic_messages(limit=_HISTORY_TURNS),
+                    session.to_anthropic_messages(limit=_HISTORY_TURNS, max_age_hours=_HISTORY_MAX_AGE_HOURS),
                     last_source=session.metadata.get("last_data_source"),
                 )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
@@ -250,7 +288,7 @@ class Orchestrator:
         try:
             with perf.stage("route"):
                 response = await self._route(
-                    data_source, message, session.to_anthropic_messages(limit=_HISTORY_TURNS), user_id,
+                    data_source, message, session.to_anthropic_messages(limit=_HISTORY_TURNS, max_age_hours=_HISTORY_MAX_AGE_HOURS), user_id,
                 )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during routing (source=%s): %s", data_source, exc)
@@ -276,8 +314,11 @@ class Orchestrator:
         # blank bubble, and above all never store it — see _EMPTY_REPLY_FALLBACK.
         if not (response.text or "").strip():
             logger.warning(
-                "Empty reply from source=%s — substituting fallback | query=%.200r",
-                data_source, message.text,
+                "Empty reply from source=%s (agent=%s, tools=%s) — substituting fallback | query=%.200r",
+                data_source,
+                response.agent_type,
+                ",".join(response.metadata.get("tools") or []) or "none",
+                message.text,
             )
             response.text = _EMPTY_REPLY_FALLBACK
 
@@ -305,7 +346,7 @@ class Orchestrator:
         combined_phases = {**own_stages, **response.metadata.get("perf_stages", {})}
         perf_label = analytics_service.label_for_perf(data_source, response.metadata.get("tools"))
         asyncio.create_task(
-            analytics_service.log_perf(perf_label, combined_phases, perf.elapsed_ms())
+            analytics_service.log_perf(perf_label, combined_phases, perf.elapsed_ms(), cold=is_cold_start)
         )
 
         return response
@@ -387,13 +428,19 @@ class Orchestrator:
         Strategy:
           1. Always compute a keyword-based source guess. Domain nouns like
              "faktur" or "zamówien" are unambiguous regardless of sentence length.
-          2. If the query is long/self-contained AND matches keywords, skip the
-             LLM entirely (cheap fast-path).
-          3. Otherwise call the LLM — but never let it silently override an
-             unambiguous keyword match. The classifier occasionally defaults an
-             obvious topic to "none" (flaky output, timeout, parse edge case),
-             which used to leak straight to the user as "I don't have access to
-             your data" even though the query clearly named e.g. invoices.
+          2. Any keyword match skips the LLM entirely (cheap fast-path). This used
+             to be gated on the query being long/self-contained, but a keyword
+             match was ALWAYS trusted over the LLM's answer when they disagreed —
+             so for a short-but-unambiguous query ("nowe zamówienia", "moje
+             oferty": 2 words, always kw-matched — the single most common
+             phrasing for a direct command) the LLM call ran, its result got
+             thrown away the moment it disagreed with the keyword, and even
+             agreeing was a wasted round-trip that changed nothing. There's no
+             query shape where consulting the LLM changes the returned value once
+             a keyword has matched, so the call is skipped outright now.
+          3. No keyword match → call the LLM. A keyword-less query is exactly
+             the case where the LLM's own judgment (and conversation history)
+             is what decides, so nothing here is skippable.
           4. Keyword-less follow-ups ("sprawdź jeszcze raz", "spróbuj ponownie")
              that the LLM defaults to "none" almost always mean "continue the
              previous topic", not a genuine switch to chitchat — anchor to the
@@ -402,22 +449,16 @@ class Orchestrator:
         known_sources = list(self._KNOWN_SOURCES)
         kw_source = self._keyword_source(query)
 
-        if self._is_self_contained(query) and kw_source is not None:
+        if kw_source is not None:
             logger.info("Keyword fast-path: src=%s | %.60s", kw_source, query)
             return kw_source
 
         source = await self._classify_with_llm(query, history, known_sources)
 
-        if kw_source is not None and source != kw_source:
-            logger.warning(
-                "LLM source (%s) overridden by keyword match (%s) | %.60s",
-                source, kw_source, query,
-            )
-            source = kw_source
-
+        # kw_source is always None here (the fast-path above already returned
+        # otherwise), so the LLM's own answer stands unless overridden below.
         if (
             source == "none"
-            and kw_source is None
             and last_source
             and last_source != "none"
             and not self._is_self_contained(query)
@@ -527,7 +568,7 @@ class Orchestrator:
             *list(history),
             {"role": "user", "content": query},
         ]
-        resp = await _call_with_retry(
+        resp = await _call_for_reply(
             self._client,
             self._settings.model_fast_pool(),
             "orchestrator/chitchat",

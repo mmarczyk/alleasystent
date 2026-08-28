@@ -225,12 +225,18 @@ async def log_gap(tool_name: str, description: str, query: str, examples: list[s
         logger.debug("analytics.log_gap failed (non-critical): %s", exc)
 
 
-async def log_perf(label: str, phases: dict[str, float], total_ms: float) -> None:
+async def log_perf(label: str, phases: dict[str, float], total_ms: float, cold: bool = False) -> None:
     """Append one request's phase-timing breakdown to Redis. Non-blocking, never raises.
 
     `phases` comes straight from agents.perf.StageTimer.snapshot() (raw stage
     names, e.g. "tool:get_new_orders") — bucketing into the chart's canonical
     phases happens in get_perf_stats(), not here, so this stays a dumb log.
+
+    `cold` marks the first request Orchestrator.handle() served since process
+    start (see agents/orchestrator.py._mark_request) — a likely Cloud Run
+    cold start (--min-instances=0), whose container-boot/import time happens
+    entirely before any StageTimer starts and would otherwise silently
+    inflate (or go unexplained in) this entry's total_ms.
     """
     from config.settings import get_settings
     settings = get_settings()
@@ -245,6 +251,7 @@ async def log_perf(label: str, phases: dict[str, float], total_ms: float) -> Non
                 "label": label,
                 "total_ms": round(total_ms, 1),
                 "phases": {k: round(v, 1) for k, v in phases.items()},
+                "cold": cold,
             }, ensure_ascii=False)
             await r.lpush(_PERF_KEY, entry)
             await r.ltrim(_PERF_KEY, 0, _MAX_PERF - 1)
@@ -372,15 +379,26 @@ async def _fetch_all() -> tuple[list[dict], list[dict]]:
         return [], []
 
 
-async def get_perf_stats() -> dict:
+async def get_perf_stats(hours: float | None = None) -> dict:
     """Average phase-timing breakdown (ms) per query-type label, for the
-    analytics dashboard's query-performance chart."""
+    analytics dashboard's query-performance chart.
+
+    `hours`, when given, restricts the average to entries logged in the last
+    `hours` — the stored list otherwise holds up to _MAX_PERF requests with
+    no time bound, so right after a latency fix ships the chart would still
+    mostly reflect pre-fix requests until enough new ones pushed old entries
+    out of the window (which for a low-traffic tool label can take days).
+    """
     raw = await _fetch_perf()
 
     phase_keys = list(_PHASE_ORDER)
     phase_labels = [_PHASE_LABELS[p] for p in phase_keys]
+    if hours is not None:
+        cutoff = time.time() - hours * 3600
+        raw = [e for e in raw if e.get("ts", 0) >= cutoff]
+    cold_start = _cold_start_stats(raw)
     if not raw:
-        return {"phase_keys": phase_keys, "phase_labels": phase_labels, "series": []}
+        return {"phase_keys": phase_keys, "phase_labels": phase_labels, "series": [], "cold_start": cold_start}
 
     by_label: dict[str, list[dict]] = defaultdict(list)
     for entry in raw:
@@ -405,7 +423,22 @@ async def get_perf_stats() -> dict:
         })
     series.sort(key=lambda s: -s["count"])
 
-    return {"phase_keys": phase_keys, "phase_labels": phase_labels, "series": series}
+    return {"phase_keys": phase_keys, "phase_labels": phase_labels, "series": series, "cold_start": cold_start}
+
+
+def _cold_start_stats(raw: list[dict]) -> dict:
+    """Compare cold- vs warm-container requests — a container boot (Cloud Run
+    --min-instances=0) happens entirely before any phase in `raw` starts
+    timing, so a gap here shows up as a higher total_ms with no matching
+    phase to explain it. See log_perf()'s `cold` parameter."""
+    cold = [e for e in raw if e.get("cold")]
+    warm = [e for e in raw if not e.get("cold")]
+    return {
+        "cold_count": len(cold),
+        "warm_count": len(warm),
+        "cold_avg_total_ms": round(sum(e.get("total_ms", 0.0) for e in cold) / len(cold), 1) if cold else None,
+        "warm_avg_total_ms": round(sum(e.get("total_ms", 0.0) for e in warm) / len(warm), 1) if warm else None,
+    }
 
 
 async def _fetch_perf() -> list[dict]:

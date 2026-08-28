@@ -298,6 +298,94 @@ async def _call_with_retry(
         await asyncio.sleep(delay)
 
 
+# ── Blank replies ─────────────────────────────────────────────────────────────
+# A 200 OK whose message carries neither text nor a tool call. Gemini returns
+# one when the visible answer never got emitted: the budget went on invisible
+# reasoning and finish_reason came back "length" (thinking-capable models —
+# gemini-3.5-flash, 2.5-flash — do this whenever reasoning_effort="none" was
+# rejected and dropped by the quirk ladder above), a safety filter dropped the
+# candidate, or the model simply had nothing to say about the tool results it
+# was handed. It is not an exception, so none of the rotation/backoff above ever
+# fires — the empty string travels all the way to the user as "Przepraszam, nie
+# udało się wygenerować odpowiedzi…" (agents/orchestrator.py), with a single
+# WARNING that says nothing about the cause. Hence both halves below: log what
+# the API actually reported, and give another model in the pool a turn.
+
+
+def is_blank_reply(response: Any) -> bool:
+    """True when the model returned neither text nor a tool call."""
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return True
+    msg = getattr(choices[0], "message", None)
+    if getattr(msg, "tool_calls", None):
+        return False
+    content = getattr(msg, "content", None)
+    return not (content or "").strip()
+
+
+def _blank_reply_shape(response: Any) -> str:
+    """What the API said it did with the token budget — the why-was-it-blank log line."""
+    choice = (getattr(response, "choices", None) or [None])[0]
+    usage = getattr(response, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None)
+
+    def _num(obj: Any, attr: str) -> Any:
+        value = getattr(obj, attr, None)
+        return value if isinstance(value, int) else "?"
+
+    model = getattr(response, "model", None)
+    finish = getattr(choice, "finish_reason", None)
+    return (
+        f"model={model if isinstance(model, str) else '?'} "
+        f"finish_reason={finish if isinstance(finish, str) else '?'} "
+        f"prompt_tokens={_num(usage, 'prompt_tokens')} "
+        f"completion_tokens={_num(usage, 'completion_tokens')} "
+        f"reasoning_tokens={_num(details, 'reasoning_tokens')}"
+    )
+
+
+async def _call_for_reply(
+    client: AsyncOpenAI,
+    model_pool: list[str],
+    label: str,
+    **api_kwargs,
+):
+    """`_call_with_retry` for calls that must come back with something.
+
+    Same rotation/backoff on errors, plus one extra attempt on a *different*
+    model when the reply is blank (see above) — a blank reply is a property of
+    the model that produced it, so re-sending to the same one is pointless, and
+    the pool already exists precisely so one model's bad day is not the answer's.
+    """
+    pool = list(model_pool)
+    response = await _call_with_retry(client, pool, label, **api_kwargs)
+    if not is_blank_reply(response):
+        return response
+
+    served = getattr(response, "model", None)
+    rest = [m for m in pool if m != served] if isinstance(served, str) else pool[1:]
+    rest = rest or pool[1:]
+    if not rest:
+        logger.warning(
+            "%s: blank reply and no other model to try | %s",
+            label, _blank_reply_shape(response),
+        )
+        return response
+
+    logger.warning(
+        "%s: blank reply — retrying on %s | %s",
+        label, rest[0], _blank_reply_shape(response),
+    )
+    retry = await _call_with_retry(client, rest, f"{label}-blank-retry", **api_kwargs)
+    if is_blank_reply(retry):
+        logger.warning(
+            "%s: blank reply again after rotating models | %s",
+            label, _blank_reply_shape(retry),
+        )
+    return retry
+
+
 class BaseAgent(ABC):
     agent_name: str = "base"
     system_prompt: str = "You are a helpful AI assistant for an e-commerce store owner."
@@ -308,14 +396,40 @@ class BaseAgent(ABC):
         self._client = AsyncOpenAI(
             api_key=self._settings.google_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            # The openai SDK's default is 600s. A model that's degraded (not
+            # outright erroring, just slow) would sit inside a single
+            # chat.completions.create() call for up to 10 minutes with no
+            # exception raised — _call_with_retry only rotates to the next
+            # model on _RETRYABLE errors, so a merely-slow call never rotates
+            # away on its own. 30s matches the timeout already used for other
+            # external API calls in this codebase (services/allegro_service.py)
+            # and turns a stuck/degraded model into an APITimeoutError (which
+            # IS retryable) that fails over to the next model in the pool
+            # instead of one request eating tens of seconds on its own.
+            timeout=30.0,
         )
 
     def _get_model_pool(self) -> list[str]:
-        """Return rotation pool: starts with model_override/gemini_model, falls back to fast."""
+        """Return rotation pool: model_override first, then the rest of the fast
+        pool as real fallbacks.
+
+        AllegroAgent sets model_override = settings.gemini_model_fast, which used
+        to make this a single-model, zero-redundancy "pool": the old code only
+        appended settings.gemini_model_fast if it wasn't already in the pool, and
+        for AllegroAgent it always was (same value) — so a rate-limited/erroring
+        call on that one model had nothing to rotate to and just re-tried itself
+        with growing backoff delays (2s/4s/8s per round, agents.base_agent
+        _call_with_retry). The query-performance-by-phase chart's production data
+        showed exactly this: AllegroAgent's tool-select/interpret LLM calls (both
+        model_override-based) regularly taking tens of seconds despite being
+        capped at 400 tokens / reasoning disabled — while Orchestrator's classify
+        call, which already got the full multi-model pool, did not. Falling back
+        through the rest of model_fast_pool() (same pool Orchestrator uses) fixes
+        that without changing which model is tried first under normal conditions.
+        """
         if self.model_override:
             pool = [self.model_override]
-            if self._settings.gemini_model_fast not in pool:
-                pool.append(self._settings.gemini_model_fast)
+            pool.extend(m for m in self._settings.model_fast_pool() if m not in pool)
             return pool
         return self._settings.model_pool()
 
@@ -362,7 +476,7 @@ class BaseAgent(ABC):
                 api_kwargs["tools"] = tools
 
             with perf.stage(f"llm_iter{iteration+1}"):
-                response = await _call_with_retry(
+                response = await _call_for_reply(
                     self._client,
                     model_pool,
                     f"{self.agent_name}/iter{iteration+1}",

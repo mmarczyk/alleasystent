@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Conversation and message data models."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -60,7 +60,9 @@ class ConversationSession(BaseModel):
         )
         self.updated_at = datetime.utcnow()
 
-    def to_anthropic_messages(self, limit: int | None = None) -> list[dict[str, str]]:
+    def to_anthropic_messages(
+        self, limit: int | None = None, max_age_hours: float | None = None,
+    ) -> list[dict[str, str]]:
         """Convert to Anthropic API messages format (user/assistant alternation).
 
         Blank turns are skipped: a stored empty assistant reply makes Gemini
@@ -71,9 +73,21 @@ class ConversationSession(BaseModel):
         `limit` keeps only the most recent N turns. Sessions live for 30 days,
         so an old thread otherwise replays hundreds of turns (including full
         order/offer listings) into every single request.
+
+        `max_age_hours`, when given, additionally drops any turn older than
+        that — a seller returning after a long gap doesn't need days-old
+        order listings replayed into the tool-selection/interpret prompts,
+        and a stale thread was otherwise still paying full `limit` turns of
+        token cost for context that's no longer relevant to a fresh query.
+        Applied before `limit`, so the final result is at most `limit` turns
+        that are also within the age window.
         """
+        messages = self.messages
+        if max_age_hours is not None:
+            cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+            messages = [m for m in messages if m.timestamp >= cutoff]
         result = []
-        for msg in self.messages:
+        for msg in messages:
             if msg.role in (MessageRole.USER, MessageRole.ASSISTANT) and msg.content.strip():
                 result.append({"role": msg.role.value, "content": msg.content})
         return result[-limit:] if limit else result

@@ -1254,9 +1254,9 @@ const MessageMonitor = (() => {
     fetch(Settings.api('/allegro/message-monitor/enable'), {
       method: 'POST', credentials: 'include', headers: Auth.headers(),
     }).catch(() => {});
-    _startPolling(); // first check notifies about ALL currently unread threads
+    _startPolling(); // first check toasts about ALL currently unread threads
     if (pushOk) {
-      UI.toast('✓ Monitoring wiadomości włączony (co 10 minut)');
+      UI.toast('✓ Monitoring wiadomości włączony (także gdy aplikacja jest zamknięta)');
     } else {
       UI.toast('⚠️ Monitoring włączony, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
     }
@@ -1292,11 +1292,13 @@ const MessageMonitor = (() => {
       const msg = count === 1
         ? '1 nowa nieprzeczytana wiadomość od kupującego.'
         : `${count} nowych nieprzeczytanych wiadomości od kupujących.`;
-      const prompt = count === 1
-        ? 'Pokaż mi tę nową wiadomość od kupującego.'
-        : `Pokaż mi te ${count} nowe wiadomości od kupujących.`;
+      // In-app toast only — no WebPush.sendNotification() here. The server-side
+      // Cloud Run pass (services/message_monitor.py) detects the same unread
+      // threads and already sends the real push + inbox entry, and it keeps
+      // working when this tab is closed or the PWA is backgrounded (iOS suspends
+      // JS then, which is why a client-only push missed overnight messages
+      // entirely); firing one from here as well would just duplicate it.
       UI.toast(`💬 ${msg}`, 10000);
-      WebPush.sendNotification('AllEasystent — Nowa wiadomość!', msg, true, '/?open=notifications', prompt);
       Notifications.refresh();
     } catch (e) {}
   }
@@ -1315,6 +1317,14 @@ const MessageMonitor = (() => {
     if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       WebPush.subscribe().catch(() => {});
     }
+    // Re-assert the server-side flag on every start. enable()'s POST is
+    // fire-and-forget with a silent .catch(), so one lost to a flaky network
+    // left monitoring reading "on" in this tab while the server never enabled
+    // it — and the server-side pass is what actually notifies now, so that
+    // mismatch means silence. The endpoint is idempotent, so repeating it is free.
+    fetch(Settings.api('/allegro/message-monitor/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
     _startPolling(skipInitialCheck);
   }
 

@@ -913,6 +913,10 @@ class AllegroService:
 
     # ── Returns & complaints ─────────────────────────────────────────────────
 
+    # /order/customer-returns is still a beta resource — the default
+    # public.v1 Accept header gets a 406 NotAcceptableException.
+    _RETURNS_ACCEPT = "application/vnd.allegro.beta.v1+json"
+
     async def get_customer_returns(self, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
         """Return recent customer returns (zwroty) — GET /order/customer-returns.
 
@@ -926,11 +930,11 @@ class AllegroService:
         params: dict[str, Any] = {"limit": limit}
         if status:
             params["status"] = status
-        data = await self._get("/order/customer-returns", params=params)
+        data = await self._get("/order/customer-returns", params=params, accept=self._RETURNS_ACCEPT)
         return data.get("customerReturns", [])
 
     async def get_customer_return(self, return_id: str) -> dict[str, Any]:
-        return await self._get(f"/order/customer-returns/{return_id}")
+        return await self._get(f"/order/customer-returns/{return_id}", accept=self._RETURNS_ACCEPT)
 
     # /sale/issues is the beta.v1 successor to the removed /sale/disputes —
     # covers both buyer disputes and formal claims (reklamacje).
