@@ -30,6 +30,22 @@ from typing import Callable
 
 # ── Shared building blocks ──────────────────────────────────────────────────
 _COUNT_QUESTION_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
+# Any wording that scopes the question to a time window. This layer resolves
+# arguments from the query text alone and has no clock, so it can't turn
+# "w tym miesiącu" into concrete dates — every matcher must bail on a hit here
+# and let the LLM (which is given the current date) fill in the period. Missing
+# this is worse than a wrong tool: "ile miałem zwrotów w tym miesiącu" came back
+# as the unfiltered all-time count, which reads as a real answer.
+_PERIOD_RE = re.compile(
+    r"\d{1,2}[./]\d{1,2}|\d{4}-\d{2}-\d{2}|"
+    r"stycz|lut[ye]|marc|kwiet|\bmaj\b|czerw|lipc|sierp|wrze[śs]|pa[źz]dzier|listopad|grudni|"
+    r"tego\s+(miesi[ąa]ca|tygodnia|roku)|w\s+tym\s+(miesi[ąa]cu|tygodniu|roku)|"
+    r"zesz[łl]|ubieg[łl]|poprzedni\w*\s+(miesi[ąa]c\w*|tygodni\w*|rok\w*)|"
+    r"ostatni\w*\s+(\d+\s+)?(dni\w*|tygodni\w*|miesi[ąa]c\w*|godzin\w*)|"
+    r"dzisiaj|dzi[śs]\b|wczoraj|przedwczoraj|\btoday\b|\bthis\s+month\b|"
+    r"od\s+\d|do\s+\d|okres[uie]|zakres",
+    re.IGNORECASE,
+)
 _LIST_OVERRIDE_RE = re.compile(r"poka[żz]|wyświetl|wypisz|\blista\b|jakie\s+(są|mam)|zobacz", re.IGNORECASE)
 
 
@@ -51,10 +67,7 @@ _ORDERS_SINGULAR_RE = re.compile(r"ostatni[eaąm]|najnowsz[ea]|\blast\b", re.IGN
 # listing call this layer can't perform) or a date range (get_orders).
 _ORDERS_BAIL_RE = re.compile(
     r"szczegó[łl]|status\b|adres\b|dane\s+do|kiedy\s+wys[łl]a|co\s+si[eę]\s+dzieje|"
-    r"koszt(y)?\s+(tego|przy)|faktur|wysy[łl]k[aąi]\s+do\b|"
-    r"\d{1,2}[./]\d{1,2}|stycz|lut[ye]|marc|kwiet|\bmaj\b|czerw|lipc|sierp|wrze[śs]|"
-    r"pa[źz]dzier|listopad|grudni|tego\s+(miesi[ąa]ca|tygodnia)|dzisiaj|wczoraj|"
-    r"od\s+\d|do\s+\d|okresu|zakres|kurier",
+    r"koszt(y)?\s+(tego|przy)|faktur|wysy[łl]k[aąi]\s+do\b|kurier|" + _PERIOD_RE.pattern,
     re.IGNORECASE,
 )
 
@@ -145,6 +158,8 @@ _RETURNS_TO_PROCESS_SIGNAL_RE = re.compile(
 def _match_get_returns_to_process(query: str) -> dict | None:
     if not (_RETURNS_TOPIC_RE.search(query) and _RETURNS_TO_PROCESS_SIGNAL_RE.search(query)):
         return None
+    if _PERIOD_RE.search(query):
+        return None  # needs date_from_local/date_to_local this layer can't compute
     if _is_count_only(query, _RETURNS_TOPIC_RE):
         return {"count_only": True}
     return {}
@@ -153,6 +168,8 @@ def _match_get_returns_to_process(query: str) -> dict | None:
 def _match_get_new_returns(query: str) -> dict | None:
     if not _RETURNS_TOPIC_RE.search(query) or _RETURNS_TO_PROCESS_SIGNAL_RE.search(query):
         return None
+    if _PERIOD_RE.search(query):
+        return None  # needs date_from_local/date_to_local this layer can't compute
     if _COMPLAINTS_TOPIC_RE.search(query):
         return None  # names both — let the LLM sort out one vs two calls
     if _is_count_only(query, _RETURNS_TOPIC_RE):
@@ -163,6 +180,8 @@ def _match_get_new_returns(query: str) -> dict | None:
 def _match_get_new_complaints(query: str) -> dict | None:
     if not _COMPLAINTS_TOPIC_RE.search(query) or _RETURNS_TOPIC_RE.search(query):
         return None
+    if _PERIOD_RE.search(query):
+        return None  # needs date_from_local/date_to_local this layer can't compute
     if _is_count_only(query, _COMPLAINTS_TOPIC_RE):
         return {"count_only": True}
     return {}

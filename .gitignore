@@ -15,3 +15,5 @@ venv/
 .claude/
 web/js/vendor/
 web/css/vendor/
+artifacts/
+.venv-test/

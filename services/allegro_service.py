@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -43,6 +43,46 @@ class _TTLCache:
 
     def clear(self) -> None:
         self._store.clear()
+
+
+def _parse_iso_utc(value: str | None) -> datetime | None:
+    """Parse an Allegro ISO 8601 timestamp into an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _in_utc_period(value: str | None, date_from: str, date_to: str) -> bool:
+    """True when `value` falls inside [date_from, date_to] (UTC ISO 8601 bounds).
+
+    Compared as instants, not strings: an item timestamped '+02:00' and a bound
+    written as 'Z' are the same clock read two ways, and a lexicographic
+    comparison of the two would silently drop it from the period.
+    """
+    moment = _parse_iso_utc(value)
+    if moment is None:
+        return False
+    start, end = _parse_iso_utc(date_from), _parse_iso_utc(date_to)
+    if start is None or end is None:
+        return False
+    return start <= moment <= end
+
+
+def return_created_at(item: dict[str, Any]) -> str | None:
+    """When a customer return was reported. Read defensively across the
+    candidate keys — the beta resource's exact shape isn't fully documented
+    (AllegroAgent._return_bullet reads the same set for display)."""
+    reception = item.get("reception") if isinstance(item.get("reception"), dict) else {}
+    return item.get("createdAt") or item.get("receivedAt") or reception.get("createdAt")
+
+
+def issue_opened_at(item: dict[str, Any]) -> str | None:
+    """When a dispute/claim was opened — openedDate per Allegro's /sale/issues docs."""
+    return item.get("openedDate") or item.get("createdAt")
 
 
 class AllegroAuthError(Exception):
@@ -913,33 +953,145 @@ class AllegroService:
 
     # ── Returns & complaints ─────────────────────────────────────────────────
 
-    async def get_customer_returns(self, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
+    # /order/customer-returns is still a beta resource — the default
+    # public.v1 Accept header gets a 406 NotAcceptableException.
+    _RETURNS_ACCEPT = "application/vnd.allegro.beta.v1+json"
+
+    # One period query must never be answered from a single page: "ile zwrotów
+    # w tym miesiącu" has to count every return in the window, not the first
+    # page of them (that bug reported the page size, 50, as the count).
+    _RETURNS_PAGE_SIZE = 50
+    _RETURNS_MAX_PAGES = 20
+
+    async def get_customer_returns(
+        self,
+        limit: int = 50,
+        status: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return recent customer returns (zwroty) — GET /order/customer-returns.
 
         `status`, if given, filters server-side (e.g. status="DELIVERED" for
         returns whose parcel has arrived back and is awaiting a seller
         decision — accept/refund or reject).
 
+        `date_from`/`date_to` (UTC ISO 8601, both required together) restrict
+        the result to returns created in that window. The window is paged
+        through to the end and filtered client-side on createdAt as well, so
+        the returned list is the COMPLETE set for the period — callers can
+        count it. Without a period the call stays a single `limit`-sized page,
+        as the returns monitor and the plain "nowe zwroty" listing want.
+
         Newest first isn't guaranteed by the API, so callers that need "most
         recent" should sort client-side by whatever date field is present.
         """
-        params: dict[str, Any] = {"limit": limit}
-        if status:
-            params["status"] = status
-        data = await self._get("/order/customer-returns", params=params)
-        return data.get("customerReturns", [])
+        if not (date_from and date_to):
+            params: dict[str, Any] = {"limit": limit}
+            if status:
+                params["status"] = status
+            data = await self._get("/order/customer-returns", params=params, accept=self._RETURNS_ACCEPT)
+            return data.get("customerReturns", [])
+
+        base: dict[str, Any] = {"status": status} if status else {}
+        try:
+            fetched = await self._fetch_customer_return_pages(
+                {**base, "createdAt.gte": date_from, "createdAt.lte": date_to}
+            )
+        except AllegroAPIError as exc:
+            if exc.status_code != 400:
+                raise
+            # customer-returns is a beta resource; if it rejects the createdAt
+            # filters, page through unfiltered and rely on the client-side
+            # filter below rather than failing the whole query.
+            logger.warning(
+                "get_customer_returns: createdAt filter rejected (400), falling back to client-side filtering"
+            )
+            fetched = await self._fetch_customer_return_pages(base)
+
+        result = [
+            item for item in fetched
+            if _in_utc_period(return_created_at(item), date_from, date_to)
+        ]
+        logger.info(
+            "get_customer_returns: %d fetched → %d in period %s – %s (status=%s)",
+            len(fetched), len(result), date_from, date_to, status or "any",
+        )
+        return result
+
+    async def _fetch_customer_return_pages(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Page through /order/customer-returns with `params` until exhausted."""
+        collected: list[dict[str, Any]] = []
+        offset = 0
+        for _ in range(self._RETURNS_MAX_PAGES):
+            data = await self._get(
+                "/order/customer-returns",
+                params={**params, "limit": self._RETURNS_PAGE_SIZE, "offset": offset},
+                accept=self._RETURNS_ACCEPT,
+            )
+            page = data.get("customerReturns", [])
+            collected.extend(page)
+            if len(page) < self._RETURNS_PAGE_SIZE:
+                break
+            offset += self._RETURNS_PAGE_SIZE
+        else:
+            logger.warning(
+                "_fetch_customer_return_pages: hit the %d-page cap — result may be truncated",
+                self._RETURNS_MAX_PAGES,
+            )
+        return collected
 
     async def get_customer_return(self, return_id: str) -> dict[str, Any]:
-        return await self._get(f"/order/customer-returns/{return_id}")
+        return await self._get(f"/order/customer-returns/{return_id}", accept=self._RETURNS_ACCEPT)
 
     # /sale/issues is the beta.v1 successor to the removed /sale/disputes —
     # covers both buyer disputes and formal claims (reklamacje).
     _ISSUES_ACCEPT = "application/vnd.allegro.beta.v1+json"
 
-    async def get_issues(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Return open disputes/claims (reklamacje) — GET /sale/issues."""
-        data = await self._get("/sale/issues", params={"limit": limit}, accept=self._ISSUES_ACCEPT)
-        return data.get("issues", [])
+    async def get_issues(
+        self,
+        limit: int = 50,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return open disputes/claims (reklamacje) — GET /sale/issues.
+
+        `date_from`/`date_to` (UTC ISO 8601, both required together) restrict
+        the result to issues opened in that window. /sale/issues exposes no
+        documented date filter, so the window is applied client-side over the
+        full paged listing — same contract as get_customer_returns: the list
+        is the COMPLETE set for the period and can be counted.
+        """
+        if not (date_from and date_to):
+            data = await self._get("/sale/issues", params={"limit": limit}, accept=self._ISSUES_ACCEPT)
+            return data.get("issues", [])
+
+        fetched: list[dict[str, Any]] = []
+        offset = 0
+        for _ in range(self._RETURNS_MAX_PAGES):
+            data = await self._get(
+                "/sale/issues",
+                params={"limit": self._RETURNS_PAGE_SIZE, "offset": offset},
+                accept=self._ISSUES_ACCEPT,
+            )
+            page = data.get("issues", [])
+            fetched.extend(page)
+            if len(page) < self._RETURNS_PAGE_SIZE:
+                break
+            offset += self._RETURNS_PAGE_SIZE
+        else:
+            logger.warning(
+                "get_issues: hit the %d-page cap — result may be truncated", self._RETURNS_MAX_PAGES
+            )
+
+        result = [
+            item for item in fetched
+            if _in_utc_period(issue_opened_at(item), date_from, date_to)
+        ]
+        logger.info(
+            "get_issues: %d fetched → %d in period %s – %s", len(fetched), len(result), date_from, date_to
+        )
+        return result
 
     async def get_issue(self, issue_id: str) -> dict[str, Any]:
         return await self._get(f"/sale/issues/{issue_id}", accept=self._ISSUES_ACCEPT)

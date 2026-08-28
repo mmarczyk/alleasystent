@@ -355,6 +355,13 @@ class AllegroAgent(BaseAgent):
         "• New/recent customer returns, ANY status — 'nowe zwroty', 'jakie mam zwroty', 'czy są "
         "jakieś zwroty', 'ile zwrotów' → get_new_returns (count_only=true for a plain number "
         "question). NEVER confuse this with complaints/disputes even if the user's wording is loose.\n"
+        "• RETURNS/COMPLAINTS FOR A PERIOD — 'ile miałem zwrotów w tym miesiącu', 'zwroty z marca', "
+        "'reklamacje z zeszłego tygodnia', 'zwroty do obsłużenia z tego tygodnia' → the SAME tool as "
+        "above (get_new_returns / get_returns_to_process / get_new_complaints), but you MUST pass "
+        "date_from_local and date_to_local as 'YYYY-MM-DD' Warsaw-local dates computed from the "
+        "current date given in your context (e.g. 'w tym miesiącu' = the 1st of the current month "
+        "through today). Omitting them answers a DIFFERENT question — all recent returns regardless "
+        "of date — and the resulting count is simply wrong for what was asked.\n"
         "• Returns that need SELLER ACTION right now (parcel already physically back, status "
         "DELIVERED, awaiting accept/refund or reject) — 'zwroty do obsłużenia', 'zwroty do "
         "rozpatrzenia', 'czy mam jakieś zwroty do obsłużenia', 'zwroty czekające na decyzję', "
@@ -1309,6 +1316,62 @@ class AllegroAgent(BaseAgent):
             f"- Opłacone: {cls._format_dt_pl(o.paid_at)}"
         )
 
+    # A period query lists everything in the window, which for a busy month can
+    # be hundreds of returns — far more than a chat reply should dump. 50 is the
+    # single-page size the dateless listing has always shown, so nothing that
+    # used to fit gets truncated now.
+    _RETURNS_LISTING_CAP = 50
+
+    @classmethod
+    def _optional_period(cls, tool_input: dict) -> tuple[str | None, str | None, str | None]:
+        """Resolve an optional date_from_local/date_to_local pair into UTC bounds.
+
+        Returns (date_from, date_to, label) — all None when the tool was called
+        without a period, which means "most recent, any date". A malformed date
+        degrades to no period rather than raising: answering about all recent
+        items is recoverable, erroring out on the user's question isn't.
+        """
+        date_from_local = tool_input.get("date_from_local")
+        date_to_local = tool_input.get("date_to_local")
+        if not (date_from_local and date_to_local):
+            return None, None, None
+        try:
+            date_from, date_to = cls._local_day_bounds_to_utc(date_from_local, date_to_local)
+        except (ValueError, TypeError):
+            logger.warning(
+                "_optional_period: unparseable period %r – %r, ignoring", date_from_local, date_to_local
+            )
+            return None, None, None
+        return date_from, date_to, f"{date_from_local} – {date_to_local}"
+
+    @classmethod
+    def _sorted_by_date_desc(cls, items: list[dict], date_of) -> list[dict]:
+        """Newest first — /order/customer-returns and /sale/issues don't promise
+        any order, so 'the latest ones' has to be established here."""
+        return sorted(items, key=lambda item: date_of(item) or "", reverse=True)
+
+    @classmethod
+    def _dated_listing(cls, items: list[dict], header: str, date_of, bullet) -> str:
+        ordered = cls._sorted_by_date_desc(items, date_of)
+        shown = ordered[: cls._RETURNS_LISTING_CAP]
+        lines = [f"**{header}** — {len(ordered)}", ""]
+        lines.append("\n\n".join(bullet(item) for item in shown))
+        if len(ordered) > len(shown):
+            lines.append(f"\n…i {len(ordered) - len(shown)} więcej.")
+        return "\n".join(lines)
+
+    @classmethod
+    def _returns_listing(cls, returns: list[dict], header: str) -> str:
+        from services.allegro_service import return_created_at
+
+        return cls._dated_listing(returns, header, return_created_at, cls._return_bullet)
+
+    @classmethod
+    def _complaints_listing(cls, issues: list[dict], header: str) -> str:
+        from services.allegro_service import issue_opened_at
+
+        return cls._dated_listing(issues, header, issue_opened_at, cls._complaint_bullet)
+
     @classmethod
     def _return_bullet(cls, item: dict) -> str:
         """Render one customer return (zwrot) from /order/customer-returns as a
@@ -1419,9 +1482,12 @@ class AllegroAgent(BaseAgent):
         header = (
             f"**Podgląd danych faktur dla {len(orders)} zamówień — NIC nie zostało wysłane do inFakt:**\n\n"
         )
+        # `<id>` has to stay inside backticks: the chat renders replies as markdown,
+        # and a bare <id> is parsed as an HTML tag and dropped, leaving the sentence
+        # ending in "…dla zamówienia ”".
         footer = (
             "\n\nSprawdź dane, a wystawienie w inFakt zrób ręcznie, albo poproś o wystawienie "
-            "konkretnego zamówienia pojedynczo (np. „wystaw fakturę dla zamówienia <id>”)."
+            "konkretnego zamówienia pojedynczo (np. „wystaw fakturę dla zamówienia `<id>`”)."
         )
         return header + "\n\n".join(blocks) + footer
 
@@ -1927,11 +1993,15 @@ class AllegroAgent(BaseAgent):
                             + (f", zwroty +{self._format_price(unattributed_refunds)}" if unattributed_refunds > 0.01 else "")
                             + ")."
                         )
+                # Each breakdown block follows the bullet it belongs to: the lines are
+                # indented, so markdown nests them under whatever bullet precedes them —
+                # listing both blocks after the refunds bullet filed the fee types
+                # (prowizja, abonament) under "Zwroty/rabaty".
                 billing_section = (
                     f"\n\n**Koszty Allegro** ({period_label})\n"
                     f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
-                    + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
+                    + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{refund_lines}\n" if refund_lines else "")
                     + (
                         "- w tym nieprzypisane do żadnego zamówienia (abonament, inne): "
@@ -2255,31 +2325,48 @@ class AllegroAgent(BaseAgent):
             return await self._message_monitoring_status_block()
 
         if tool_name == "get_new_returns":
-            returns = await self._allegro.get_customer_returns(limit=50)
+            date_from, date_to, period_label = self._optional_period(tool_input)
+            returns = await self._allegro.get_customer_returns(
+                limit=50, date_from=date_from, date_to=date_to
+            )
+            suffix = f" ({period_label})" if period_label else ""
             if tool_input.get("count_only"):
-                body = f"Liczba zwrotów: {len(returns)}."
+                body = f"Liczba zwrotów{suffix}: {len(returns)}."
             else:
-                body = "Brak zwrotów." if not returns else "\n\n".join(self._return_bullet(r) for r in returns)
+                body = (
+                    f"Brak zwrotów{suffix}." if not returns
+                    else self._returns_listing(returns, f"Zwroty{suffix}")
+                )
             return body + "\n\n" + await self._returns_monitoring_status_block()
 
         if tool_name == "get_returns_to_process":
-            returns = await self._allegro.get_customer_returns(limit=50, status="DELIVERED")
+            date_from, date_to, period_label = self._optional_period(tool_input)
+            returns = await self._allegro.get_customer_returns(
+                limit=50, status="DELIVERED", date_from=date_from, date_to=date_to
+            )
+            suffix = f" ({period_label})" if period_label else ""
             if tool_input.get("count_only"):
-                body = f"Liczba zwrotów do obsłużenia: {len(returns)}."
+                body = f"Liczba zwrotów do obsłużenia{suffix}: {len(returns)}."
             else:
                 body = (
-                    "Brak zwrotów do obsłużenia — żaden zwrócony towar nie dotarł jeszcze z powrotem."
+                    f"Brak zwrotów do obsłużenia{suffix} — żaden zwrócony towar nie dotarł jeszcze "
+                    "z powrotem."
                     if not returns else
-                    "\n\n".join(self._return_bullet(r) for r in returns)
+                    self._returns_listing(returns, f"Zwroty do obsłużenia{suffix}")
                 )
             return body + "\n\n" + await self._returns_monitoring_status_block()
 
         if tool_name == "get_new_complaints":
-            issues = await self._allegro.get_issues(limit=50)
+            date_from, date_to, period_label = self._optional_period(tool_input)
+            issues = await self._allegro.get_issues(limit=50, date_from=date_from, date_to=date_to)
+            suffix = f" ({period_label})" if period_label else ""
             if tool_input.get("count_only"):
-                body = f"Liczba reklamacji: {len(issues)}."
+                body = f"Liczba reklamacji{suffix}: {len(issues)}."
             else:
-                body = "Brak reklamacji." if not issues else "\n\n".join(self._complaint_bullet(i) for i in issues)
+                body = (
+                    f"Brak reklamacji{suffix}." if not issues
+                    else self._complaints_listing(issues, f"Reklamacje{suffix}")
+                )
             return body + "\n\n" + await self._returns_monitoring_status_block()
 
         if tool_name in ("suggest_returns_monitoring", "disable_returns_monitoring"):
