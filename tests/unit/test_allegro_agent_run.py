@@ -164,22 +164,27 @@ class TestEmptyReplyGuards:
 
     @pytest.mark.asyncio
     async def test_blank_interpret_retries_without_the_format_instruction(self):
-        agent = _agent({"get_order_details": "Nie znaleziono zamówienia o podanym ID."})
+        # get_billing_summary rather than get_order_details: the latter is
+        # now in _PASSTHROUGH_TOOLS (its dispatch builds the final document
+        # directly, see AllegroAgent._dispatch), so a single Polish-language
+        # call to it skips the interpret round entirely — a different,
+        # already-tested behavior (TestLatestOrderChain).
+        agent = _agent({"get_billing_summary": "Brak wpisów rozliczeniowych w tym okresie."})
         agent._client.chat.completions.create = AsyncMock(side_effect=[
-            _resp(tool_calls=[_tool_call("c1", "get_order_details", {"order_id": "x"})]),
+            _resp(tool_calls=[_tool_call("c1", "get_billing_summary", {})]),
             _resp(),                      # tool-select round 2: no more tools needed
             _resp(),                      # interpret: blank
             _resp(),                      # interpret: blank again on the other model
-            _resp("Nie udało się znaleźć tego zamówienia."),  # plain retry, no format instruction
+            _resp("Nie udało się ustalić rozliczeń dla tego okresu."),  # plain retry, no format instruction
         ])
 
-        response = await agent.run("szczegóły zamówienia x")
+        response = await agent.run("jakie miałem opłaty w tym miesiącu")
 
-        assert response.text == "Nie udało się znaleźć tego zamówienia."
+        assert response.text == "Nie udało się ustalić rozliczeń dla tego okresu."
         assert response.metadata["output_format"] == "chat"
         # The retry drops the format instruction that the model balked at.
         last_messages = agent._client.chat.completions.create.call_args.kwargs["messages"]
-        assert "[FORMAT ODPOWIEDZI: PODSUMOWANIE + DOKUMENT]" not in json.dumps(last_messages, ensure_ascii=False)
+        assert "[FORMAT ODPOWIEDZI: TABELA]" not in json.dumps(last_messages, ensure_ascii=False)
 
     @pytest.mark.asyncio
     async def test_no_tool_call_and_no_text_falls_through_to_interpret(self):
@@ -250,6 +255,35 @@ class TestFormatInstruction:
         assert response.metadata["output_format"] == "chat"
         sent = json.dumps(agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False)
         assert "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]" in sent
+
+    @pytest.mark.asyncio
+    async def test_interpret_call_gets_the_short_system_prompt(self):
+        """The tool-select system prompt (~17.5K chars of routing rules —
+        MANDATORY TOOL CALLS, chaining, billing/monitoring routing) has
+        nothing to do with formatting an already-fetched result — the
+        interpret call gets AllegroAgent._interpret_system_prompt instead,
+        swapped into messages[0] right before this call."""
+        agent = _agent()
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_message_threads", {})]),
+            _resp(),
+            _resp("- Kupujący: jan"),
+        ])
+
+        await agent.run("sprawdź treść wiadomości")
+
+        # First call (tool-select) still gets the full routing prompt.
+        first_system = agent._client.chat.completions.create.call_args_list[0].kwargs["messages"][0]
+        assert first_system["role"] == "system"
+        assert "MANDATORY TOOL CALLS" in first_system["content"]
+
+        # Last call (interpret) gets the short one instead.
+        last_system = agent._client.chat.completions.create.call_args_list[-1].kwargs["messages"][0]
+        assert last_system["role"] == "system"
+        assert "MANDATORY TOOL CALLS" not in last_system["content"]
+        assert "TWO-STEP LOOKUPS" not in last_system["content"]
+        assert "BILLING ENTRIES — CRITICAL" in last_system["content"]
+        assert len(last_system["content"]) < len(first_system["content"]) / 2
 
 
 class TestToolContextFilter:
@@ -345,7 +379,7 @@ class TestLatestOrderChain:
         agent = _agent({"get_order_details": "# Szczegóły zamówienia abc-123"})
         agent._allegro.get_orders = AsyncMock(return_value=[MagicMock(order_id="abc-123")])
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[_resp("# Szczegóły zamówienia abc-123")]
+            side_effect=AssertionError("no LLM call expected — deterministic chain + passthrough")
         )
 
         response = await agent.run("szczegóły ostatniego nowego zamówienia")
@@ -355,9 +389,11 @@ class TestLatestOrderChain:
         )
         agent._execute_tool.assert_awaited_once_with("get_order_details", {"order_id": "abc-123"})
         assert response.text == "# Szczegóły zamówienia abc-123"
-        # Zero tool-select rounds — only the interpret call remains, since
-        # get_order_details' "document" format isn't a passthrough tool.
-        assert agent._client.chat.completions.create.call_count == 1
+        assert response.metadata["output_format"] == "document"
+        # Zero LLM calls at all: the chain resolver skips tool-select, and
+        # get_order_details is now in _PASSTHROUGH_TOOLS (its dispatch
+        # already builds the final document) so interpret is skipped too.
+        assert agent._client.chat.completions.create.call_count == 0
 
     @pytest.mark.asyncio
     async def test_falls_back_to_bare_new_orders_when_none_exist(self):

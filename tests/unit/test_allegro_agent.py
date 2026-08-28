@@ -257,3 +257,100 @@ class TestPassthroughGeneralizedToOtherTools:
 
         assert response.text == "- **jan_kowalski** — nieprzeczytana"
         assert agent._client.chat.completions.create.call_count == 3
+
+
+class TestGetOrderDetailsDispatch:
+    """_dispatch's get_order_details branch now builds the final, ready-to-
+    display document directly in Python instead of handing raw fields to
+    the interpret LLM — _TOOL_SPECIFIC_INSTRUCTIONS["get_order_details"]
+    already fully prescribed the shape, so there was no real judgment left
+    for the LLM to apply. See _PASSTHROUGH_TOOLS."""
+
+    def _make_order(self, **overrides):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        defaults = dict(
+            order_id="abc-123",
+            buyer_login="jan_kowalski",
+            buyer_email="jan@example.com",
+            status="BOUGHT",
+            fulfillment_status="READY_FOR_PROCESSING",
+            total_price=189.98,
+            currency="PLN",
+            created_at="2026-08-27T10:15:00Z",
+            paid_at="2026-08-27T10:20:00Z",
+            delivery={"method": {"name": "InPost Paczkomaty"}, "trackingCode": "PL123456789"},
+            line_items=[
+                AllegroOrderLine(offer_id="111", offer_name="Sweter wełniany M", quantity=1, price=129.99),
+                AllegroOrderLine(offer_id="222", offer_name="Skarpety wełniane 3-pak", quantity=1, price=59.99),
+            ],
+            invoice_required=False,
+        )
+        defaults.update(overrides)
+        return AllegroOrder(**defaults)
+
+    def _make_agent_with_order(self, order, billing_entries=None, existing_invoices=None):
+        agent = _make_agent()
+        agent._allegro.get_order = AsyncMock(return_value=order)
+        agent._allegro.get_billing_entries_for_order = AsyncMock(return_value=billing_entries or [])
+        agent._allegro.get_order_invoices = AsyncMock(return_value=existing_invoices or [])
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_document_has_summary_block_and_sections(self):
+        order = self._make_order()
+        agent = self._make_agent_with_order(order)
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert result.startswith("```summary\n")
+        assert "- Zamówienie: `abc-123`" in result
+        assert "- Kupujący: jan_kowalski" in result
+        assert "- Wartość: 189,98 PLN" in result
+        assert "# Szczegóły zamówienia abc-123" in result
+        assert "## Produkty" in result
+        assert "- Sweter wełniany M (ID: 111): 1 × 129,99 PLN" in result
+        assert "## Dostawa" in result
+        assert "- Metoda: InPost Paczkomaty" in result
+        assert "- Tracking: PL123456789" in result
+
+    @pytest.mark.asyncio
+    async def test_no_billing_entries_omits_billing_section(self):
+        order = self._make_order()
+        agent = self._make_agent_with_order(order, billing_entries=[])
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "## Rozliczenie" not in result
+
+    @pytest.mark.asyncio
+    async def test_every_billing_entry_shown_separately(self):
+        order = self._make_order()
+        billing_entries = [
+            {"value": {"amount": "-12.99"}, "type": {"description": "Prowizja od sprzedaży"}, "offer": {"name": "Sweter"}, "occurredAt": "2026-08-27T00:00:00Z"},
+            {"value": {"amount": "-6.00"}, "type": {"description": "Prowizja od sprzedaży"}, "offer": {"name": "Skarpety"}, "occurredAt": "2026-08-27T00:00:00Z"},
+            {"value": {"amount": "-1.00"}, "type": {"description": "Opłata za wystawienie oferty"}, "occurredAt": "2026-08-27T00:00:00Z"},
+        ]
+        agent = self._make_agent_with_order(order, billing_entries=billing_entries)
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "## Rozliczenie" in result
+        assert result.count("Prowizja od sprzedaży") == 2
+        assert "Opłata za wystawienie oferty" in result
+        assert "**Suma opłat:** -19.99 PLN" in result
+        assert "**Zysk netto:** 169.99 PLN" in result
+
+    @pytest.mark.asyncio
+    async def test_invoice_status_variants(self):
+        cases = [
+            (dict(invoice_required=False), [], "Kupujący nie poprosił o fakturę."),
+            (dict(invoice_required=True), [{"id": "inv-1"}], "faktura już wystawiona."),
+            (dict(invoice_required=True), [], "NIE WYSTAWIONO jeszcze faktury."),
+        ]
+        for order_overrides, existing_invoices, expected_substr in cases:
+            order = self._make_order(**order_overrides)
+            agent = self._make_agent_with_order(order, existing_invoices=existing_invoices)
+
+            result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+            assert expected_substr in result, result

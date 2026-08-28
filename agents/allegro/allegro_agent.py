@@ -240,6 +240,7 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
 # call is pure passthrough and gets skipped.
 _PASSTHROUGH_TOOLS = frozenset({
     "get_new_orders",
+    "get_order_details",
     "get_new_returns",
     "get_returns_to_process",
     "get_new_complaints",
@@ -477,6 +478,53 @@ class AllegroAgent(BaseAgent):
         "this conversation can find the right invoice — losing it forces you to guess an ID later, which "
         "fails against the real inFakt API (404)."
     )
+
+    # `system_prompt` above (~17.5K chars) is almost entirely tool-ROUTING
+    # rules — which tool to call for which phrasing, chaining, billing/
+    # monitoring routing, anti-hallucination tool-name guardrails. None of
+    # that is relevant once a tool has already run and the only remaining
+    # job is turning its result into a reply — sending the full prompt to
+    # every interpret call was ~4300 tokens of pure dead weight on top of
+    # whatever the tool actually returned. This is the interpret step's own,
+    # much shorter prompt: just enough to format/preserve data faithfully.
+    _interpret_system_prompt = (
+        "You are formatting Allegro (Polish e-commerce) store data that has already been "
+        "fetched by a tool into a reply for the store owner. Use ONLY the data in the tool "
+        "result(s) above — never invent order IDs, prices, offer IDs, or any other data not "
+        "present there. When showing prices, always include the PLN currency.\n"
+        "ORDER FIELDS — ALWAYS PRESENT: every reply that lists or describes orders MUST show, "
+        "for each order, its current status and dispatch deadline ('Wysyłka do'), copied "
+        "VERBATIM from the tool data (including any '⚠️ po terminie' marker and the '—' used "
+        "when Allegro didn't return a deadline) — never compute, guess, or omit them.\n"
+        "BILLING ENTRIES — CRITICAL: list EVERY entry as its own separate line, exactly as "
+        "received. NEVER group, aggregate, merge, or summarize entries by type — if the tool "
+        "returned 5 entries, show 5 rows, not 2.\n"
+        "HTML — CRITICAL: HTML tags in a tool result (e.g. <button ...>) go into your reply "
+        "VERBATIM, character-for-character — never translate, paraphrase, or modify them.\n"
+        "JSON PREVIEWS — CRITICAL: ```json code blocks in a tool result go into your reply "
+        "VERBATIM — never summarize, reformat, or reorder the fields.\n"
+        "INVOICE UUID — CRITICAL: a line like 'ID faktury w inFakt: `...`' in a tool result "
+        "must stay VERBATIM in your reply, exact ID included — it's the only way a later "
+        "step in this conversation can find the right invoice."
+    )
+
+    def _build_interpret_system_prompt(self, context: str | None) -> str:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now_local = datetime.now(ZoneInfo("Europe/Warsaw"))
+        parts = [
+            self._interpret_system_prompt,
+            f"Current date and time: {now_local.strftime('%Y-%m-%d %H:%M %Z')}",
+        ]
+        if context:
+            parts.append(f"## Relevant context\n{context}")
+        parts.append(
+            "LANGUAGE RULE: Detect the language of the user's message. "
+            "If it is Polish, your ENTIRE response must be in Polish. "
+            "If it is English, respond in English. Never mix languages. "
+            "Tool results may be in English — ignore that and still reply in the user's language."
+        )
+        return "\n\n".join(parts)
 
     def __init__(self, user_id: str | None = None):
         super().__init__()
@@ -756,15 +804,20 @@ class AllegroAgent(BaseAgent):
             and single_tool_raw_result is not None
             and _is_confidently_polish(query)
         ):
+            # Not hardcoded "chat": get_order_details is "document" (see
+            # TOOL_OUTPUT_FORMAT) and the frontend renders that as a distinct
+            # artifact view (web/js/app.js _isDoc) — collapsing it into plain
+            # chat text here would silently drop that presentation.
+            bypass_format = resolve_output_format(called_tools)
             perf.log(
-                source=self.agent_name, output_format="chat",
+                source=self.agent_name, output_format=bypass_format,
                 tools=called_tools[0], bypassed_interpret=True,
             )
             return AgentResponse(
                 text=single_tool_raw_result,
                 agent_type=self.agent_name,
                 metadata={
-                    "output_format": "chat",
+                    "output_format": bypass_format,
                     "tools": called_tools,
                     "perf_stages": perf.snapshot(),
                     "perf_total_ms": perf.elapsed_ms(),
@@ -801,6 +854,11 @@ class AllegroAgent(BaseAgent):
         format_instruction = tool_instruction or _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
         if format_instruction:
             messages.append({"role": "user", "content": format_instruction})
+
+        # The tool-routing system prompt (messages[0], used above to pick a
+        # tool) no longer applies — swap in the much shorter interpret-only
+        # prompt before this and any retry below reads `messages`.
+        messages[0] = {"role": "system", "content": self._build_interpret_system_prompt(context)}
 
         # ── Step 2: interpret — NO tools ─────────────────────────────────────
         # The LLM now sees the real API results and formats the answer.
@@ -1620,58 +1678,69 @@ class AllegroAgent(BaseAgent):
                 invoice_str = "Kupujący poprosił o fakturę — faktura już wystawiona."
             else:
                 invoice_str = "Kupujący poprosił o fakturę — NIE WYSTAWIONO jeszcze faktury."
-            items_str = "\n".join(
-                f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} × {li.price} {li.currency}"
-                for li in order.line_items
-            )
             d = order.delivery if isinstance(order.delivery, dict) else {}
             method_name = self._dig(d, "method", "name", default="N/A")
             tracking = (
                 self._dig(d, "smart", "trackingCode", default=None)
                 or self._dig(d, "trackingCode", default="N/A")
             )
-            billing_str = ""
+            billing_section = ""
             if billing_entries:
                 total_fees = 0.0
                 total_credits = 0.0
                 fee_lines = []
-                for i, e in enumerate(billing_entries, 1):
+                for e in billing_entries:
                     amount = float((e.get("value") or {}).get("amount", 0) or 0)
                     desc = (e.get("type") or {}).get("description", "Inne")
                     offer_name = (e.get("offer") or {}).get("name", "")
                     occurred = e.get("occurredAt", "")[:10]
                     offer_part = f" — {offer_name}" if offer_name else ""
                     sign = "+" if amount > 0 else "-"
-                    fee_lines.append(
-                        f"  Wpis {i}/{len(billing_entries)}: {occurred} | {desc}{offer_part} | {sign}{abs(amount):.2f} PLN"
-                    )
+                    fee_lines.append(f"- {occurred} | {desc}{offer_part} | {sign}{abs(amount):.2f} PLN")
                     if amount < 0:
                         total_fees += abs(amount)
                     else:
                         total_credits += amount
                 net = order.total_price - total_fees + total_credits
-                billing_str = (
-                    f"\n[BILLING: {len(billing_entries)} osobnych wpisów — wyświetl każdy wiersz oddzielnie]\n"
+                billing_section = (
+                    "## Rozliczenie\n"
                     + "\n".join(fee_lines)
-                    + f"\n  SUMA OPŁAT: -{total_fees:.2f} PLN"
-                    + (f" | ZWROTY: +{total_credits:.2f} PLN" if total_credits else "")
-                    + f" | ZYSK NETTO: {net:.2f} PLN"
+                    + f"\n- **Suma opłat:** -{total_fees:.2f} PLN"
+                    + (f" | **Zwroty:** +{total_credits:.2f} PLN" if total_credits else "")
+                    + f"\n- **Zysk netto:** {net:.2f} PLN"
                 )
-            return (
-                f"Order ID: {order.order_id}\n"
-                f"Buyer: {order.buyer_login} ({order.buyer_email})\n"
-                f"Status: {order.status}\n"
-                f"Fulfillment status: {self._fulfillment_pl(order.fulfillment_status)}\n"
-                f"Wysyłka do (termin nadania paczki): {self._dispatch_deadline_pl(order)}\n"
-                f"Total: {order.total_price} {order.currency}\n"
-                f"Created: {order.created_at}\n"
-                f"Paid: {self._format_dt_pl(order.paid_at)}\n"
-                f"Invoice: {invoice_str}\n"
-                f"Delivery method: {method_name}\n"
-                f"Tracking: {tracking}\n"
-                f"Items:\n{items_str}"
-                f"{billing_str}"
+
+            # Final, ready-to-display document — built here instead of handed
+            # to the interpret LLM as raw data, because _TOOL_SPECIFIC_INSTRUCTIONS
+            # for this tool already fully prescribes the shape (exact fields,
+            # exact section order, "use ONLY the data above, never invent") —
+            # there was never any real judgment left for the LLM to apply, just
+            # mechanical field-copying it was doing worse (slower, and with a
+            # nonzero chance of skipping a billing row) than Python can. See
+            # _PASSTHROUGH_TOOLS for how this reaches the user with zero LLM calls.
+            summary_block = (
+                "```summary\n"
+                f"- Zamówienie: `{order.order_id}`\n"
+                f"- Kupujący: {order.buyer_login}\n"
+                f"- Status: {self._fulfillment_pl(order.fulfillment_status)}\n"
+                f"- Wysyłka do: {self._dispatch_deadline_pl(order)}\n"
+                f"- Wartość: {self._format_price(order.total_price, order.currency)}\n"
+                f"- Faktura: {invoice_str}\n"
+                "```"
             )
+            products_section = "## Produkty\n" + "\n".join(
+                f"- {li.offer_name} (ID: {li.offer_id}): {li.quantity} × "
+                f"{self._format_price(li.price, li.currency)}"
+                for li in order.line_items
+            )
+            delivery_section = f"## Dostawa\n- Metoda: {method_name}\n- Tracking: {tracking}"
+            document = "\n\n".join(filter(None, [
+                f"# Szczegóły zamówienia {order.order_id}",
+                products_section,
+                delivery_section,
+                billing_section,
+            ]))
+            return summary_block + "\n\n" + document
 
         if tool_name == "get_order_invoice_data":
             inv = await self._allegro.get_order_invoice_data(tool_input["order_id"])
