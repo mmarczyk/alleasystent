@@ -84,6 +84,27 @@ def _match_get_new_orders(query: str) -> dict | None:
     return {}
 
 
+# "Szczegóły/status/koszty/faktura ostatniego (nowego) zamówienia" — the
+# two-hop get_new_orders(limit=1) -> get_order_details chain (see
+# AllegroAgent._resolve_latest_order_chain). Deliberately narrower than a
+# bare _ORDERS_BAIL_RE hit above: requires the singular signal too, so a
+# plain listing/date-range/courier question (which also bails from
+# _match_get_new_orders) never gets treated as this specific chain.
+_ORDER_DETAIL_INTENT_RE = re.compile(
+    r"szczegó[łl]|status\b|adres\b|dane\s+do|kiedy\s+wys[łl]a|co\s+si[eę]\s+dzieje|"
+    r"koszt(y)?\s+(tego|przy)|faktur",
+    re.IGNORECASE,
+)
+
+
+def wants_latest_order_details(query: str) -> bool:
+    return bool(
+        _ORDERS_TOPIC_RE.search(query)
+        and _ORDERS_SINGULAR_RE.search(query)
+        and _ORDER_DETAIL_INTENT_RE.search(query)
+    )
+
+
 # ── wiadomosci: get_message_threads (list/count only — never content) ──────
 _MESSAGES_TOPIC_RE = re.compile(r"wiadomo", re.IGNORECASE)
 _MESSAGES_CONTENT_BAIL_RE = re.compile(

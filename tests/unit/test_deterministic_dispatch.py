@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agents.allegro.allegro_tools import matched_labels
-from agents.allegro.deterministic_dispatch import resolve_deterministic
+from agents.allegro.deterministic_dispatch import resolve_deterministic, wants_latest_order_details
 
 
 def _resolve(query: str):
@@ -122,3 +122,28 @@ class TestMultiTopicAndUnrelatedQueries:
 
     def test_empty_labels_returns_none(self):
         assert resolve_deterministic("cokolwiek", set()) is None
+
+
+class TestWantsLatestOrderDetails:
+    @pytest.mark.parametrize("query", [
+        "szczegóły ostatniego nowego zamówienia",
+        "jaki jest status ostatniego zamówienia",
+        "adres ostatniego zamówienia",
+        "dane do faktury ostatniego zamówienia",
+        "kiedy wysłane było ostatnie zamówienie",
+        "co się dzieje z ostatnim zamówieniem",
+        "koszty tego ostatniego zamówienia",
+        "faktura ostatniego zamówienia",
+        "najnowsze zamówienie — szczegóły",
+    ])
+    def test_matches(self, query):
+        assert wants_latest_order_details(query) is True
+
+    @pytest.mark.parametrize("query", [
+        "jakie mam nowe zamówienia",           # no detail intent, no singular
+        "szczegóły zamówienia z 15 czerwca",   # detail intent, not "latest"
+        "ostatnie nowe zamówienia",             # singular signal, no detail intent
+        "status mojego konta",                  # detail word, wrong topic
+    ])
+    def test_does_not_match(self, query):
+        assert wants_latest_order_details(query) is False

@@ -23,7 +23,7 @@ from agents.allegro.allegro_tools import (
     resolve_output_format,
     tools_for_labels,
 )
-from agents.allegro.deterministic_dispatch import resolve_deterministic
+from agents.allegro.deterministic_dispatch import resolve_deterministic, wants_latest_order_details
 from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
@@ -569,7 +569,19 @@ class AllegroAgent(BaseAgent):
         # already given costs no second Allegro API round-trip.
         tool_results: dict[str, str] = {}
 
-        det_match = None if wants_msg_content else resolve_deterministic(query, query_labels)
+        det_match = None
+        if not wants_msg_content:
+            # "Szczegóły ostatniego zamówienia" always needs get_new_orders
+            # to learn WHICH order before get_order_details can run — a
+            # mechanical two-hop lookup, but one _match_get_new_orders
+            # deliberately bails on (its detail-intent words are in
+            # _ORDERS_BAIL_RE) since a single-tool matcher can't chain.
+            # Resolve it here instead, before falling back to the
+            # single-tool matchers.
+            if wants_latest_order_details(query) and query_labels == {"zamowienia"}:
+                det_match = await self._resolve_latest_order_chain()
+            if det_match is None:
+                det_match = resolve_deterministic(query, query_labels)
         if det_match is not None:
             det_tool, det_input = det_match
             called_tools.append(det_tool)
@@ -881,6 +893,31 @@ class AllegroAgent(BaseAgent):
 
     def _get_tools(self) -> list[dict[str, Any]]:
         return ALLEGRO_TOOLS
+
+    async def _resolve_latest_order_chain(self) -> tuple[str, dict[str, Any]] | None:
+        """Deterministically resolve "szczegóły ostatniego (nowego)
+        zamówienia" without the tool-select LLM: look up which order is the
+        latest directly (one Allegro API call — cheap relative to an LLM
+        round-trip, see the "Zapytanie do Allegro" phase's share of total
+        latency in the analytics dashboard), then hand back a normal
+        single-tool det_match, reusing the existing deterministic-dispatch
+        execution path either way — get_order_details when a new order
+        exists, or get_new_orders bare (whose own dispatch already answers
+        "Brak nowych zamówień.") when there isn't one to chain from.
+
+        Returns None only on an unexpected error, falling through to the
+        normal LLM tool-select path.
+        """
+        try:
+            orders = await self._allegro.get_orders(
+                status="READY_FOR_PROCESSING", fulfillment_status="NEW", limit=1,
+            )
+        except Exception as exc:
+            logger.warning("[allegro] latest-order chain lookup failed, falling back to LLM: %s", exc)
+            return None
+        if not orders:
+            return "get_new_orders", {"limit": 1}
+        return "get_order_details", {"order_id": orders[0].order_id}
 
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:
