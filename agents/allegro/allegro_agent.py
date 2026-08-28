@@ -1382,9 +1382,12 @@ class AllegroAgent(BaseAgent):
         header = (
             f"**Podgląd danych faktur dla {len(orders)} zamówień — NIC nie zostało wysłane do inFakt:**\n\n"
         )
+        # `<id>` has to stay inside backticks: the chat renders replies as markdown,
+        # and a bare <id> is parsed as an HTML tag and dropped, leaving the sentence
+        # ending in "…dla zamówienia ”".
         footer = (
             "\n\nSprawdź dane, a wystawienie w inFakt zrób ręcznie, albo poproś o wystawienie "
-            "konkretnego zamówienia pojedynczo (np. „wystaw fakturę dla zamówienia <id>”)."
+            "konkretnego zamówienia pojedynczo (np. „wystaw fakturę dla zamówienia `<id>`”)."
         )
         return header + "\n\n".join(blocks) + footer
 
@@ -1890,11 +1893,15 @@ class AllegroAgent(BaseAgent):
                             + (f", zwroty +{self._format_price(unattributed_refunds)}" if unattributed_refunds > 0.01 else "")
                             + ")."
                         )
+                # Each breakdown block follows the bullet it belongs to: the lines are
+                # indented, so markdown nests them under whatever bullet precedes them —
+                # listing both blocks after the refunds bullet filed the fee types
+                # (prowizja, abonament) under "Zwroty/rabaty".
                 billing_section = (
                     f"\n\n**Koszty Allegro** ({period_label})\n"
                     f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
-                    + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{billing_lines}\n" if billing_lines else "")
+                    + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
                     + (f"{refund_lines}\n" if refund_lines else "")
                     + (
                         "- w tym nieprzypisane do żadnego zamówienia (abonament, inne): "

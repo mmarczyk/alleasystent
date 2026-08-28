@@ -120,10 +120,13 @@ class InfaktService:
         """
         task_ref = await self.create_invoice_async(invoice_payload)
         for attempt in range(max_attempts):
-            await asyncio.sleep(poll_interval)
+            # Check first, sleep only between checks — a small invoice is often
+            # already done, and sleeping up front added poll_interval to every
+            # issuance for nothing.
             status = await self.get_task_status(task_ref)
             code = status.get("processing_code")
             if code == _PROCESSING_CODE_PENDING:
+                await asyncio.sleep(poll_interval)
                 continue
             if code == _PROCESSING_CODE_SUCCESS:
                 return status
