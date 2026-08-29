@@ -306,7 +306,7 @@ const DocViewer = (() => {
 
   // ── Charts ────────────────────────────────────────
   // Dashboard-format replies may embed one or more ```chart fenced JSON blocks
-  // (see agents/orchestrator.py _FORMAT_PREFIXES["dashboard"]). Marked renders
+  // (built in Python by AllegroAgent._render_dashboard). Marked renders
   // those as <pre><code class="language-chart">...</code></pre> — swap each
   // one for a live Chart.js canvas instead of showing raw JSON.
   const CHART_PALETTE = ['#818cf8', '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16'];
@@ -1816,13 +1816,20 @@ const Chat = (() => {
   const _ARTIFACT_FORMATS = new Set(['table', 'document', 'dashboard']);
 
   // Short, human preview for document/dashboard replies: leading heading (if
-  // any) + the first line of body text — no raw markdown/table dump.
+  // any) + the first sentence of body text — no raw markdown/table dump.
   function _docPreview(bodyText, format) {
     if (format !== 'document' && format !== 'dashboard') return null;
     const heading = bodyText.match(/^#{1,2}\s+(.+)/m);
     const title = heading ? heading[1].replace(/[*`_]/g, '').trim() : null;
     const rest = heading ? bodyText.slice(bodyText.indexOf(heading[0]) + heading[0].length) : bodyText;
-    const lead = rest.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').replace(/\s+/g, ' ').trim();
+    // The first prose line only. Every backend view puts a summary sentence
+    // right under its heading (see AllegroAgent._render_* ) and the table,
+    // bullets and ```chart blocks below it are the document's body — flattening
+    // those into the bubble printed a line of garbled pipes.
+    const lead = (rest.split('\n')
+      .map(l => l.trim())
+      .find(l => l && !/^[|#>*-]/.test(l) && !l.startsWith('```')) || '')
+      .replace(/[*`_[\]]/g, '').replace(/\s+/g, ' ').trim();
     const leadShort = lead.slice(0, 160) + (lead.length > 160 ? '…' : '');
     const icon = format === 'dashboard' ? '📊' : '📄';
     if (title) return `${icon} ${title}${leadShort ? ' — ' + leadShort : ''}`;

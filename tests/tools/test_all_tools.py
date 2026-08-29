@@ -24,8 +24,15 @@ ERROR_MARKERS = (
 )
 
 
+# ask_clarifying_question never reaches _dispatch: AllegroAgent.run() answers it
+# with the model's own question and returns (see the clarify_call short-circuit),
+# so there is no tool execution for a case here to drive. Its behavior is covered
+# in tests/unit/test_allegro_agent_run.py instead.
+NOT_DISPATCHED = {"ask_clarifying_question"}
+
+
 def test_every_tool_has_a_case():
-    assert TOOL_NAMES - COVERED_TOOLS == set(), "tools with no test case"
+    assert TOOL_NAMES - COVERED_TOOLS - NOT_DISPATCHED == set(), "tools with no test case"
 
 
 def test_no_case_targets_an_unknown_tool():
