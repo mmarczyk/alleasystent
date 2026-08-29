@@ -132,17 +132,17 @@ class TestToolChaining:
         re-sends it plus every tool schema just to hear 'nothing else'."""
         from agents.allegro.allegro_agent import _CHAIN_RESULT_BUDGET
 
-        # get_billing_summary rather than get_active_offers: the latter is now
-        # in _PASSTHROUGH_TOOLS (its dispatch builds the finished table, see
-        # AllegroAgent._render_offers_table), so a Polish query to it skips the
-        # interpret round this test counts.
+        # An English query, so the interpret call still runs (every tool renders
+        # its own view now, and a Polish single-tool turn skips interpret
+        # entirely — see _PASSTHROUGH_TOOLS). Without the budget guard there
+        # would be a third call: the "anything else?" follow-up round.
         agent = _agent({"get_billing_summary": "x" * (_CHAIN_RESULT_BUDGET + 1)})
         agent._client.chat.completions.create = AsyncMock(side_effect=[
             _resp(tool_calls=[_tool_call("c1", "get_billing_summary", {})]),
             _resp("| Nazwa | Stan |"),
         ])
 
-        response = await agent.run("pokaż wszystkie opłaty z tego miesiąca")
+        response = await agent.run("show me all fees from this month")
 
         assert response.text == "| Nazwa | Stan |"
         assert agent._client.chat.completions.create.await_count == 2
@@ -168,11 +168,9 @@ class TestEmptyReplyGuards:
 
     @pytest.mark.asyncio
     async def test_blank_interpret_retries_without_the_format_instruction(self):
-        # get_billing_summary rather than get_order_details: the latter is
-        # now in _PASSTHROUGH_TOOLS (its dispatch builds the final document
-        # directly, see AllegroAgent._dispatch), so a single Polish-language
-        # call to it skips the interpret round entirely — a different,
-        # already-tested behavior (TestLatestOrderChain).
+        # An English query: every tool's dispatch now renders the finished view,
+        # so a Polish single-tool turn skips the interpret round this test is
+        # about (see _PASSTHROUGH_TOOLS / TestLatestOrderChain).
         agent = _agent({"get_billing_summary": "Brak wpisów rozliczeniowych w tym okresie."})
         agent._client.chat.completions.create = AsyncMock(side_effect=[
             _resp(tool_calls=[_tool_call("c1", "get_billing_summary", {})]),
@@ -182,13 +180,13 @@ class TestEmptyReplyGuards:
             _resp("Nie udało się ustalić rozliczeń dla tego okresu."),  # plain retry, no format instruction
         ])
 
-        response = await agent.run("jakie miałem opłaty w tym miesiącu")
+        response = await agent.run("what fees did I pay this month")
 
         assert response.text == "Nie udało się ustalić rozliczeń dla tego okresu."
         assert response.metadata["output_format"] == "chat"
         # The retry drops the format instruction that the model balked at.
         last_messages = agent._client.chat.completions.create.call_args.kwargs["messages"]
-        assert "[FORMAT ODPOWIEDZI: TABELA]" not in json.dumps(last_messages, ensure_ascii=False)
+        assert "[GOTOWA ODPOWIEDŹ — PRZEPISZ BEZ ZMIAN]" not in json.dumps(last_messages, ensure_ascii=False)
 
     @pytest.mark.asyncio
     async def test_no_tool_call_and_no_text_falls_through_to_interpret(self):
@@ -218,47 +216,43 @@ class TestEmptyReplyGuards:
 
 
 class TestFormatInstruction:
+    """Every tool's dispatch renders the finished view (table, document,
+    dashboard, bullet list) in Python — see _RENDERED_VIEW_TOOLS. So when the
+    interpret call does run (English query, or several tools in one turn) it
+    gets one instruction: hand the view back unchanged."""
+
     @pytest.mark.asyncio
-    async def test_chain_uses_the_instruction_of_the_tool_that_answered(self):
-        """get_new_orders asks for a new-orders bullet list, get_order_details for
-        a plain-text order summary. Both are 'chat', so the LAST tool's
-        instruction must win — the listing tool only supplied the ID."""
+    async def test_chained_turn_is_told_to_hand_the_rendered_view_back(self):
         agent = _agent()
         agent._client.chat.completions.create = AsyncMock(side_effect=[
             _resp(tool_calls=[_tool_call("c1", "get_new_orders", {})]),
             _resp(tool_calls=[_tool_call("c2", "get_order_details", {"order_id": "x"})]),
             _resp(),
-            _resp("# Szczegóły zamówienia x"),
+            _resp("- Zamówienie: `x`"),
         ])
 
         response = await agent.run("szczegóły ostatniego nowego zamówienia")
 
         assert response.metadata["output_format"] == "chat"
         sent = json.dumps(agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False)
-        assert "[FORMAT ODPOWIEDZI: ZWYKŁY TEKST — NIGDY DOKUMENT]" in sent
-        assert "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]" not in sent
+        assert "[GOTOWA ODPOWIEDŹ — PRZEPISZ BEZ ZMIAN]" in sent
+        # Nothing tells the model to build a view out of the data any more.
+        assert "Zbuduj tabelę" not in sent
 
     @pytest.mark.asyncio
-    async def test_single_tool_keeps_its_own_instruction(self):
-        # get_message_threads rather than get_new_orders: the latter is in
-        # _PASSTHROUGH_TOOLS (see AllegroAgent.run's interpret-bypass), so a
-        # single Polish-language get_new_orders call would skip the interpret
-        # round covered here entirely — a different, already-tested behavior.
-        # "treść" also bails this out of deterministic dispatch (see
-        # deterministic_dispatch._MESSAGES_CONTENT_BAIL_RE / AllegroAgent.run's
-        # wants_msg_content check) so it still goes through the LLM.
+    async def test_english_single_tool_turn_gets_the_same_instruction(self):
         agent = _agent()
         agent._client.chat.completions.create = AsyncMock(side_effect=[
-            _resp(tool_calls=[_tool_call("c1", "get_message_threads", {})]),
+            _resp(tool_calls=[_tool_call("c1", "get_active_offers", {})]),
             _resp(),
-            _resp("- Kupujący: jan"),
+            _resp("# Active offers"),
         ])
 
-        response = await agent.run("sprawdź treść wiadomości")
+        response = await agent.run("show me my active offers")
 
-        assert response.metadata["output_format"] == "chat"
+        assert response.metadata["output_format"] == "table"
         sent = json.dumps(agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False)
-        assert "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]" in sent
+        assert "[GOTOWA ODPOWIEDŹ — PRZEPISZ BEZ ZMIAN]" in sent
 
     @pytest.mark.asyncio
     async def test_interpret_call_gets_the_short_system_prompt(self):
@@ -267,6 +261,8 @@ class TestFormatInstruction:
         nothing to do with formatting an already-fetched result — the
         interpret call gets AllegroAgent._interpret_system_prompt instead,
         swapped into messages[0] right before this call."""
+        # English, so the interpret call runs at all (a Polish single-tool turn
+        # hands the rendered view straight back — see _PASSTHROUGH_TOOLS).
         agent = _agent()
         agent._client.chat.completions.create = AsyncMock(side_effect=[
             _resp(tool_calls=[_tool_call("c1", "get_message_threads", {})]),
@@ -274,7 +270,7 @@ class TestFormatInstruction:
             _resp("- Kupujący: jan"),
         ])
 
-        await agent.run("sprawdź treść wiadomości")
+        await agent.run("show me the message threads")
 
         # First call (tool-select) still gets the full routing prompt.
         first_system = agent._client.chat.completions.create.call_args_list[0].kwargs["messages"][0]

@@ -131,33 +131,21 @@ class TestGetNewOrdersInterpretBypass:
         assert "interpret_llm" in response.metadata["perf_stages"]
 
     @pytest.mark.asyncio
-    async def test_count_only_still_uses_interpret_call(self):
-        """count_only's raw dispatch text ("Liczba nowych zamówień: N.") differs
-        in wording from what the tool instruction asks for ("Masz N nowych
-        zamówień.") — real transformation, not passthrough, so it must not
-        bypass even for a Polish query."""
+    async def test_count_only_bypasses_too(self):
+        """count_only used to be the one get_new_orders case that still needed
+        the interpret call, because the dispatch said "Liczba nowych zamówień: 3."
+        and the tool instruction asked for "Masz 3 nowe zamówienia." — the
+        dispatch now words it that way itself, so there is nothing left to do."""
         agent = _make_agent()
-        tool_select_resp = _tool_select_response(
-            [_tool_call("get_new_orders", {"count_only": True})]
-        )
-
-        interp_msg = MagicMock()
-        interp_msg.tool_calls = None
-        interp_msg.content = "Masz 3 nowe zamówienia."
-        interp_choice = MagicMock()
-        interp_choice.message = interp_msg
-        interp_resp = MagicMock()
-        interp_resp.choices = [interp_choice]
-
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_select_resp, _no_more_tools_response(), interp_resp]
+            side_effect=AssertionError("no LLM call expected — deterministic match")
         )
-        agent._dispatch = AsyncMock(return_value="Liczba nowych zamówień: 3.")
+        agent._dispatch = AsyncMock(return_value="Masz **3** nowe zamówienia.")
 
         response = await agent.run("ile mam nowych zamówień")
 
-        assert response.text == "Masz 3 nowe zamówienia."
-        assert agent._client.chat.completions.create.call_count == 3
+        assert response.text == "Masz **3** nowe zamówienia."
+        assert agent._client.chat.completions.create.call_count == 0
 
     @pytest.mark.asyncio
     async def test_multi_tool_turn_still_uses_interpret_call(self):
@@ -191,12 +179,10 @@ class TestGetNewOrdersInterpretBypass:
 
 class TestPassthroughGeneralizedToOtherTools:
     """The get_new_orders bypass generalizes to every tool in
-    _PASSTHROUGH_TOOLS — spot-check a list tool with no dedicated
-    _TOOL_SPECIFIC_INSTRUCTIONS entry at all (unlike get_new_orders, so
-    count_only bypasses too) and an action-toggle tool, and confirm a tool
-    NOT in the set (get_message_threads — its raw pipe-delimited dispatch
-    output genuinely differs from its dedicated instruction) still uses the
-    interpret call."""
+    _PASSTHROUGH_TOOLS — which, now that each tool renders its own finished
+    view in _dispatch, is every tool there is. Spot-check a list tool and an
+    action-toggle tool, then the one path that still reaches the interpret
+    call: a non-Polish query."""
 
     @pytest.mark.asyncio
     async def test_get_new_returns_count_only_also_bypasses(self):
@@ -232,7 +218,11 @@ class TestPassthroughGeneralizedToOtherTools:
         assert agent._client.chat.completions.create.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_tool_not_in_passthrough_set_still_uses_interpret_call(self):
+    async def test_english_query_still_uses_interpret_call(self):
+        """Every tool renders its own view now, so nothing is left OUT of
+        _PASSTHROUGH_TOOLS — the interpret call survives for the one job the
+        rendering can't do: answering a non-Polish question, where it
+        translates the finished view's labels rather than rebuilding it."""
         agent = _make_agent()
         tool_select_resp = _tool_select_response(
             [_tool_call("get_message_threads", {})]
@@ -240,7 +230,7 @@ class TestPassthroughGeneralizedToOtherTools:
 
         interp_msg = MagicMock()
         interp_msg.tool_calls = None
-        interp_msg.content = "- **jan_kowalski** — nieprzeczytana"
+        interp_msg.content = "- **jan_kowalski** — unread"
         interp_choice = MagicMock()
         interp_choice.message = interp_msg
         interp_resp = MagicMock()
@@ -250,12 +240,12 @@ class TestPassthroughGeneralizedToOtherTools:
             side_effect=[tool_select_resp, _no_more_tools_response(), interp_resp]
         )
         agent._dispatch = AsyncMock(
-            return_value="Thread t1 | Buyer: jan_kowalski | Unread: True | Last message: 2026-08-26"
+            return_value="- **jan_kowalski** — 🔴 nieprzeczytana — wątek `t1`"
         )
 
-        response = await agent.run("pokaż wiadomości")
+        response = await agent.run("show me my messages")
 
-        assert response.text == "- **jan_kowalski** — nieprzeczytana"
+        assert response.text == "- **jan_kowalski** — unread"
         assert agent._client.chat.completions.create.call_count == 3
 
 
@@ -389,6 +379,116 @@ class TestGetActiveOffersDispatch:
         assert "interpret_llm" not in response.metadata["perf_stages"]
         # Tool-select round + the "anything else?" round, and no interpret call.
         assert agent._client.chat.completions.create.call_count == 2
+
+
+class TestEveryToolRendersItsOwnView:
+    """The design rule this file's bypass tests rest on: the model picks WHICH
+    tool runs and (for a non-Polish query) translates labels — it never builds
+    the output view out of raw data. Every tool's dispatch returns the finished
+    answer, so every tool is a passthrough tool."""
+
+    def test_no_tool_is_left_for_the_model_to_format(self):
+        from agents.allegro.allegro_agent import _PASSTHROUGH_TOOLS, _RENDERED_VIEW_TOOLS
+        from agents.allegro.allegro_tools import ALLEGRO_TOOLS, TOOL_OUTPUT_FORMAT
+
+        declared = {t["function"]["name"] for t in ALLEGRO_TOOLS}
+        assert declared == set(TOOL_OUTPUT_FORMAT)
+        assert declared <= _RENDERED_VIEW_TOOLS
+        assert declared <= _PASSTHROUGH_TOOLS
+
+    def test_the_interpret_instruction_never_asks_for_a_rebuild(self):
+        from agents.allegro.allegro_agent import _RENDERED_VIEW_INSTRUCTION
+
+        assert "PRZEPISZ BEZ ZMIAN" in _RENDERED_VIEW_INSTRUCTION
+        # No "build a table out of the data above" wording survives anywhere.
+        assert "Zbuduj tabelę" not in _RENDERED_VIEW_INSTRUCTION
+
+
+class TestRenderedViews:
+    """Spot-checks on the Python renderers behind the tool outputs — the shapes
+    the PWA parses (web/js/app.js): a '# ' heading names the document tab, a
+    table's trailing sentence becomes the chat bubble, a document/dashboard's
+    first line under the heading does."""
+
+    def _agent(self):
+        return _make_agent()
+
+    def test_md_table_escapes_pipes_and_aligns_columns(self):
+        agent = self._agent()
+
+        lines = agent._md_table(["A", "B"], [["x|y", 3], ["", None]], align="lr")
+
+        assert lines[0] == "| A | B |"
+        assert lines[1] == "| --- | ---: |"
+        assert lines[2] == "| x\\|y | 3 |"
+        # Empty cells become an em dash rather than collapsing the row.
+        assert lines[3] == "| — | None |"
+
+    @pytest.mark.asyncio
+    async def test_orders_table_carries_status_and_dispatch_deadline(self):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+
+        order = AllegroOrder(
+            order_id="abc-123",
+            buyer_login="jan_kowalski",
+            buyer_email="jan@example.com",
+            status="BOUGHT",
+            fulfillment_status="NEW",
+            total_price=189.98,
+            currency="PLN",
+            created_at="2026-08-27T10:15:00Z",
+            paid_at="2026-08-27T10:20:00Z",
+            delivery={"method": {"name": "InPost Paczkomaty"}},
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Sweter", quantity=2, price=94.99)],
+        )
+        agent = self._agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[order])
+
+        result = await agent._dispatch("get_orders", {})
+        lines = result.splitlines()
+
+        assert lines[0] == "# Zamówienia"
+        assert "| Zamówienie | Kupujący | Status realizacji | Wysyłka do | Wartość | Opłacone | Dostawa | Szt. |" in lines
+        assert "[abc-123](https://allegro.pl/sprzedaz/zamowienia/abc-123)" in result
+        assert "Nowe" in result
+        assert lines[-1] == "Znaleziono **1** zamówienie na łączną kwotę **189,98 PLN**."
+
+    def test_dashboard_chart_json_matches_the_bullets(self):
+        agent = self._agent()
+
+        out = agent._render_dashboard(
+            title="Podsumowanie ofert",
+            lead="Aktywnych ofert: **3**.",
+            sections=[("Stany magazynowe", {"0 szt.": 2, "1–9 szt.": 0, "10+ szt.": 1}, "Wykres")],
+        )
+
+        assert out.startswith("## Podsumowanie ofert")
+        # Empty buckets are dropped from both the bullets and the chart.
+        assert "- 0 szt.: **2** oferty" in out
+        assert "1–9 szt." not in out
+        spec = json.loads(out.split("```chart\n")[1].split("\n```")[0])
+        assert spec["labels"] == ["0 szt.", "10+ szt."]
+        assert spec["series"][0]["data"] == [2, 1]
+
+    @pytest.mark.asyncio
+    async def test_new_orders_count_only_is_the_final_sentence(self):
+        agent = self._agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[object(), object(), object()])
+        agent._monitoring_status_block = AsyncMock(return_value="")
+
+        result = await agent._dispatch("get_new_orders", {"count_only": True})
+
+        assert result.startswith("Masz **3** nowe zamówienia.")
+
+    @pytest.mark.asyncio
+    async def test_no_new_orders_count_only(self):
+        agent = self._agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[])
+        agent._monitoring_status_block = AsyncMock(return_value="")
+
+        result = await agent._dispatch("get_new_orders", {"count_only": True})
+
+        assert result.startswith("Nie masz nowych zamówień.")
 
 
 class TestGetOrderDetailsDispatch:

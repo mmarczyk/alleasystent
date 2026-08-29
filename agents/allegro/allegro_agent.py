@@ -87,13 +87,13 @@ def _wants_message_content(query: str, conversation_history: list[dict[str, str]
     return False
 
 
-# Used to skip the interpret LLM call entirely for tools whose dispatch output
-# is already rendered in exactly the shape _TOOL_SPECIFIC_INSTRUCTIONS asks
-# for (see get_new_orders below) — the interpret call's only remaining job is
-# translating Polish field labels for a non-Polish query, so it's only safe
-# to skip when the query is confidently Polish. A diacritic-free Polish query
-# ("ile mam zamowien") just falls through to the LLM as before — missing the
-# optimization there is fine, guessing wrong and mangling the language isn't.
+# Used to skip the interpret LLM call entirely: every tool's dispatch already
+# returns the finished view (see _RENDERED_VIEW_TOOLS below), so the interpret
+# call's only remaining job is translating the Polish labels for a non-Polish
+# query — which makes it safe to skip exactly when the query is confidently
+# Polish. A diacritic-free Polish query ("ile mam zamowien") just falls through
+# to the LLM — missing the optimization there is fine, guessing wrong and
+# mangling the language isn't.
 _POLISH_DIACRITICS = set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
 
 
@@ -101,157 +101,43 @@ def _is_confidently_polish(query: str) -> bool:
     return any(ch in _POLISH_DIACRITICS for ch in query)
 
 
-# Injected as a user-turn message right before the final "interpret" call, once
-# the output format is known from which tool(s) were just called (see
-# agents/allegro/allegro_tools.py TOOL_OUTPUT_FORMAT). "chat" and "action" need
-# no extra steering — the model already answers naturally / includes the tool's
-# button HTML verbatim per the system prompt.
-_OUTPUT_FORMAT_INSTRUCTIONS: dict[str, str] = {
-    "table": (
-        "[FORMAT ODPOWIEDZI: TABELA]\n"
-        "Zbuduj tabelę markdown WYŁĄCZNIE z danych zwróconych przez narzędzie powyżej. "
-        "Pierwsza linia — nagłówek: | kolumna1 | kolumna2 | ... . Bez wstępu ani potwierdzenia "
-        "przed tabelą. Maksymalnie 1-2 zdania podsumowania PO tabeli.\n"
-        "Jeśli narzędzie nie zwróciło żadnych wyników — NIE twórz tabeli (pustej ani "
-        "przykładowej), odpowiedz jednym krótkim zdaniem."
-    ),
-    "dashboard": (
-        "[FORMAT ODPOWIEDZI: DASHBOARD]\n"
-        "Zbuduj wielosekcyjny raport z danych zwróconych przez narzędzie powyżej: każda sekcja "
-        "z nagłówkiem ##, kluczowe liczby pogrubione (**x**), porównania/trendy gdzie to możliwe. "
-        "Zacznij od razu od pierwszego nagłówka ## — bez wstępu.\n"
-        "Jeśli dane zawierają liczby nadające się do porównania (np. przychód wg produktu, "
-        "rozkład stanów magazynowych, koszty vs zysk, top produkty) — dołącz po odpowiedniej "
-        "sekcji jeden blok kodu oznaczony jako 'chart' z wykresem w formacie JSON:\n"
-        "```chart\n"
-        '{"type":"bar","title":"Tytuł wykresu","labels":["Etykieta 1","Etykieta 2"],'
-        '"series":[{"name":"Nazwa serii","data":[100,200]}]}\n'
-        "```\n"
-        "   - type: \"bar\" | \"line\" | \"pie\" | \"doughnut\"\n"
-        "   - labels: kategorie/dni/produkty; series: jedna lub więcej serii liczbowych tej "
-        "samej długości co labels\n"
-        "   - Użyj WYŁĄCZNIE prawdziwych liczb z danych powyżej — nigdy nie zmyślaj; pomiń "
-        "blok chart, jeśli danych jest za mało na sensowny wykres."
-    ),
-    "document": (
-        "[FORMAT ODPOWIEDZI: DOKUMENT]\n"
-        "Sformatuj odpowiedź jako pełny, gotowy do użycia dokument. Pierwsza linia — nagłówek: "
-        "# Tytuł dokumentu. Bez wstępu ani potwierdzenia. Kompletna treść, z podpisem/stopką "
-        "jeśli pasuje."
-    ),
-}
-
 # Above this many characters of tool results, AllegroAgent.run stops offering the
 # model another tool round — see the cost guard in run() for why.
 _CHAIN_RESULT_BUDGET = 8000
 
-# Per-tool overrides, checked BEFORE the generic per-format instruction above —
-# for cases where "chat" isn't specific enough (get_new_orders is "chat" format
-# but still needs a fixed shape, not whatever prose/table the model feels like).
-_TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
-    "get_new_orders": (
-        "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]\n"
-        "Przedstaw zamówienia z danych powyżej jako listę punktowaną — jeden blok na "
-        "zamówienie, dokładnie jak w danych narzędzia. NIGDY nie buduj tabeli markdown "
-        "dla zamówień.\n"
-        "Dla każdego zamówienia pokaż TYLKO te pola: Zamawiający, Status, Wysyłka do, "
-        "Rodzaj dostawy, Ilość szt., Wartość, Opłacone (data i godzina). Pola Status i "
-        "Wysyłka do (termin nadania paczki) przepisz DOKŁADNIE z danych narzędzia, razem "
-        "ze znacznikiem '⚠️ po terminie', jeśli tam jest. Nie dodawaj innych pól (bez "
-        "linku, bez daty złożenia), chyba że user o nie poprosi osobno. Bez wstępu przed listą."
-    ),
-    "get_new_orders:count_only": (
-        "[FORMAT ODPOWIEDZI: TYLKO LICZBA]\n"
-        "Użytkownik zapytał ILE jest nowych zamówień — odpowiedz JEDNYM krótkim zdaniem podającym "
-        "TYLKO liczbę z danych narzędzia powyżej (np. 'Masz 5 nowych zamówień.'). NIE wypisuj "
-        "poszczególnych zamówień ani ich szczegółów, chyba że user o to poprosi osobno."
-    ),
-    "get_message_threads": (
-        "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]\n"
-        "Przedstaw wątki z danych powyżej jako listę punktowaną — jeden wpis na wątek: "
-        "kupujący, status (przeczytany/nieprzeczytany), data ostatniej wiadomości. Bez wstępu "
-        "przed listą."
-    ),
-    "get_message_threads:count_only": (
-        "[FORMAT ODPOWIEDZI: TYLKO LICZBA]\n"
-        "Użytkownik zapytał CZY MA lub ILE MA nowych (nieprzeczytanych) wiadomości — odpowiedz "
-        "JEDNYM krótkim zdaniem z danych narzędzia powyżej, np. 'Nie masz nowych wiadomości.' "
-        "albo 'Masz 3 nowe wiadomości (od: jan_kowalski, anna92).'. NIE wypisuj pełnej listy "
-        "wątków ani szczegółów. Jeśli jest co najmniej jedna nowa wiadomość, zakończ pytaniem "
-        "czy pokazać szczegóły (np. 'Pokazać szczegóły?'). Jeśli nowych wiadomości nie ma, nie pytaj."
-    ),
-    "get_thread_messages": (
-        "[FORMAT ODPOWIEDZI: TREŚĆ WIADOMOŚCI]\n"
-        "Przedstaw wiadomości z danych powyżej w kolejności chronologicznej — dla każdej: "
-        "nadawca pogrubiony (**Kupujący**/**Sprzedawca**), data i godzina, treść w cudzysłowie, "
-        "dokładnie jak w danych narzędzia. NIE skracaj, nie streszczaj i nie parafrazuj treści."
-    ),
-    "get_order_details": (
-        "[FORMAT ODPOWIEDZI: ZWYKŁY TEKST — NIGDY DOKUMENT]\n"
-        "Odpowiedz zwykłym tekstem w formie listy punktowanej — bez nagłówków (#, ##), "
-        "bez tabel i bez bloków kodu. Całość ma się zmieścić w dymku czatu. Bez wstępu "
-        "ani potwierdzenia przed listą.\n"
-        "Zacznij od pól podstawowych, każde w osobnym punkcie: Zamówienie (ID), Kupujący, "
-        "Status, Wysyłka do, Wartość, Faktura. Pole 'Faktura' musi jasno mówić, czy "
-        "kupujący poprosił o fakturę, a jeśli tak — czy została już wystawiona (dane z "
-        "narzędzia mówią to wprost).\n"
-        "Dalej, jako kolejne punkty tej samej listy (z zagnieżdżonymi podpunktami, nie "
-        "jako osobne sekcje z nagłówkami): Produkty — KAŻDY produkt osobno, z ilością i "
-        "ceną; Dostawa — metoda i tracking; Rozliczenie — wszystkie wpisy billingowe "
-        "osobno, jeśli są w danych, plus zysk netto.\n"
-        "Użyj WYŁĄCZNIE danych zwróconych przez narzędzie powyżej — nigdy nie zmyślaj "
-        "produktów, cen ani statusu faktury."
-    ),
-    # The dispatch already returns the finished answer (heading + markdown table
-    # + trailing summary — see AllegroAgent._render_offers_table), so this only
-    # runs for the turns that still reach the interpret call (English query, or
-    # several tools in one turn) and its whole job is "don't touch it".
-    "get_active_offers": (
-        "[FORMAT ODPOWIEDZI: GOTOWA TABELA — PRZEPISZ BEZ ZMIAN]\n"
-        "Dane powyżej to już gotowa odpowiedź: nagłówek, tabela markdown i JEDNO zdanie "
-        "podsumowania na końcu, PO tabeli. Przepisz je dokładnie w tej samej kolejności — "
-        "ten sam nagłówek, te same kolumny (Nazwa, Stan (szt.), Cena, ID ofert), ta sama "
-        "kolejność wierszy (rosnąco wg stanu magazynowego), wszystkie wiersze bez pomijania "
-        "(łącznie z oznaczonymi „(zakończona — wyprzedana)”), i podsumowanie na samym końcu "
-        "— to ono trafia do dymka czatu, więc nie przenoś go przed tabelę ani nie usuwaj. "
-        "NIE sortuj ponownie, NIE grupuj inaczej, NIE skracaj tabeli, nie dodawaj wstępu. "
-        "Jeśli użytkownik pytał po angielsku — przetłumacz tylko nagłówek, nazwy kolumn i "
-        "zdanie podsumowania; dane w wierszach zostaw bez zmian."
-    ),
-    "query_offers_by_stock": (
-        "[FORMAT ODPOWIEDZI: TABELA]\n"
-        "Zbuduj tabelę markdown z danych zwróconych przez narzędzie powyżej, zachowując "
-        "DOKŁADNIE tę kolejność wierszy — dane są już posortowane rosnąco wg stanu "
-        "magazynowego (od najmniejszej ilości szt.) i zagregowane po nazwie produktu (stan "
-        "zsumowany dla tego samego produktu). NIE sortuj ponownie, NIE grupuj inaczej, NIE "
-        "pomijaj wierszy oznaczonych jako „(zakończona — wyprzedana)” — to wyprzedane, "
-        "zakończone oferty wymagające wznowienia i też mają się znaleźć w tabeli. Kolumny: "
-        "Nazwa, Stan łącznie (szt.), Cena, ID ofert. Bez wstępu ani potwierdzenia przed "
-        "tabelą. Maksymalnie 1-2 zdania podsumowania PO tabeli."
-    ),
-}
+# Every data tool renders its own finished view in _dispatch — the table, the
+# document, the dashboard, the bullet list the user actually sees. Turning rows
+# of data into a view is mechanical work with no judgment in it, so it belongs
+# in Python: a model doing it is slower, costs tokens on every turn, and can
+# drop, reorder or truncate rows, or quietly invent a number. See
+# AllegroAgent._render_offers_table / _render_orders_table / _render_dashboard
+# and the "Skip the interpret call entirely" block in AllegroAgent.run().
+#
+# So the interpret call is skipped for these tools whenever the query is
+# confidently Polish (see _is_confidently_polish). It still runs for a
+# non-Polish query and for a turn that called several tools, and then this is
+# its whole brief: hand the finished view back, never rebuild it.
+_RENDERED_VIEW_INSTRUCTION = (
+    "[GOTOWA ODPOWIEDŹ — PRZEPISZ BEZ ZMIAN]\n"
+    "Dane powyżej to już gotowa, sformatowana odpowiedź dla użytkownika: nagłówki, "
+    "tabele, listy, bloki ```chart i zdanie podsumowania — dokładnie w tej kolejności, "
+    "w jakiej mają się wyświetlić. Przepisz je bez zmian: nie buduj tabeli od nowa, nie "
+    "sortuj, nie grupuj, nie skracaj, nie pomijaj wierszy, nie dopisuj wstępu ani "
+    "komentarza i nie przenoś podsumowania sprzed/za tabelę (tabela trafia do dokumentu, "
+    "a zdanie po niej do dymka czatu). Jeśli użytkownik pytał po angielsku — przetłumacz "
+    "WYŁĄCZNIE etykiety (nagłówki, nazwy kolumn, zdania podsumowania); wartości w "
+    "wierszach, kwoty, daty i identyfikatory zostaw dokładnie takie, jakie są."
+)
 
-# Tools whose dispatch output is already the final answer verbatim — see the
-# "Skip the interpret call entirely" block in AllegroAgent.run() for the full
-# reasoning. Their _TOOL_SPECIFIC_INSTRUCTIONS entries (where they have one)
-# only restate the shape the dispatch already produced, so for a
-# confidently-Polish query the interpret call is pure passthrough and gets
-# skipped; an English one still runs it, to translate the Polish labels.
-_PASSTHROUGH_TOOLS = frozenset({
-    "get_new_orders",
-    "get_order_details",
-    "get_active_offers",
-    "get_new_returns",
-    "get_returns_to_process",
-    "get_new_complaints",
-    "get_orders_pending_invoice",
-    "get_order_invoice_data",
-    "suggest_order_monitoring", "disable_order_monitoring",
-    "suggest_invoice_monitoring", "disable_invoice_monitoring",
-    "suggest_invoice_reminder", "disable_invoice_reminder",
-    "suggest_message_monitoring", "disable_message_monitoring",
-    "suggest_returns_monitoring", "disable_returns_monitoring",
-})
+# Tools whose dispatch output is the finished answer. That is every tool that
+# touches store data plus the monitoring toggles (their button block is built
+# from the stored flag, never guessed) — i.e. everything the agent can call.
+_RENDERED_VIEW_TOOLS = frozenset(TOOL_OUTPUT_FORMAT)
+
+# Single-tool Polish turns skip the interpret call altogether — nothing is left
+# for it to do.
+_PASSTHROUGH_TOOLS = _RENDERED_VIEW_TOOLS
+
 
 
 class AllegroAgent(BaseAgent):
@@ -488,10 +374,14 @@ class AllegroAgent(BaseAgent):
     # whatever the tool actually returned. This is the interpret step's own,
     # much shorter prompt: just enough to format/preserve data faithfully.
     _interpret_system_prompt = (
-        "You are formatting Allegro (Polish e-commerce) store data that has already been "
-        "fetched by a tool into a reply for the store owner. Use ONLY the data in the tool "
-        "result(s) above — never invent order IDs, prices, offer IDs, or any other data not "
-        "present there. When showing prices, always include the PLN currency.\n"
+        "You are passing an Allegro (Polish e-commerce) store reply on to the store owner. "
+        "The tool result above is ALREADY the finished, formatted view — headings, tables, "
+        "charts, summary sentence, buttons — built for the app that renders it. Hand it back "
+        "as it is; the only thing you may change is the LANGUAGE of the labels, and only when "
+        "the user asked in another language. Never rebuild a table, re-sort or regroup rows, "
+        "drop rows, or add a preamble. Use ONLY the data in the tool result(s) above — never "
+        "invent order IDs, prices, offer IDs, or any other data not present there. When "
+        "showing prices, always include the PLN currency.\n"
         "ORDER FIELDS — ALWAYS PRESENT: every reply that lists or describes orders MUST show, "
         "for each order, its current status and dispatch deadline ('Wysyłka do'), copied "
         "VERBATIM from the tool data (including any '⚠️ po terminie' marker and the '—' used "
@@ -610,8 +500,6 @@ class AllegroAgent(BaseAgent):
         # current query look multi-topic and needlessly skip this layer.
         query_labels = matched_labels(query)
         called_tools: list[str] = []
-        new_orders_count_only = False
-        message_threads_count_only = False
         single_tool_raw_result: str | None = None
         # tool call signature → result, so a model that re-asks for data it was
         # already given costs no second Allegro API round-trip.
@@ -633,10 +521,6 @@ class AllegroAgent(BaseAgent):
         if det_match is not None:
             det_tool, det_input = det_match
             called_tools.append(det_tool)
-            if det_tool == "get_new_orders" and det_input.get("count_only"):
-                new_orders_count_only = True
-            if det_tool == "get_message_threads" and det_input.get("count_only"):
-                message_threads_count_only = True
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
             try:
                 with perf.stage(f"tool:{det_tool}"):
@@ -729,8 +613,6 @@ class AllegroAgent(BaseAgent):
                         tool_input = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         tool_input = {}
-                    if tool_name == "get_new_orders" and tool_input.get("count_only"):
-                        new_orders_count_only = True
                     if tool_name == "get_message_threads":
                         # The user's wording overrides whatever the model decided for
                         # count_only (see _wants_message_count_only above).
@@ -738,8 +620,6 @@ class AllegroAgent(BaseAgent):
                             tool_input["count_only"] = False
                         elif _wants_message_count_only(query):
                             tool_input["count_only"] = True
-                        if tool_input.get("count_only"):
-                            message_threads_count_only = True
                     logger.info("[allegro] tool call: %s(%s)", tool_name, tool_input)
                     signature = f"{tool_name}:{json.dumps(tool_input, sort_keys=True, default=str)}"
                     if signature in tool_results:
@@ -786,28 +666,22 @@ class AllegroAgent(BaseAgent):
                 # sometimes replied with nothing at all. MAX_TOOL_ROUNDS still caps it.
 
         # ── Skip the interpret call entirely when it would be pure passthrough ──
-        # See _PASSTHROUGH_TOOLS above for which tools and why. count_only
-        # doesn't disqualify get_new_returns/get_returns_to_process/
-        # get_new_complaints (no dedicated instruction exists for them either
-        # way) but DOES disqualify get_new_orders specifically — its
-        # get_new_orders:count_only instruction demands different wording
-        # ("Masz 5 nowych zamówień.") than the raw dispatch text ("Liczba
-        # nowych zamówień: 5."). Bypassed only when this was the ONLY tool
-        # called in the turn — a multi-tool turn still needs the LLM to weave
-        # the results together — and the query is confidently Polish (see
-        # _is_confidently_polish); an English query still needs the LLM to
-        # translate the Polish field labels.
+        # See _PASSTHROUGH_TOOLS above: the dispatch output IS the answer, down
+        # to the count_only wording ("Masz 5 nowych zamówień."). Bypassed only
+        # when this was the ONLY tool called in the turn — a multi-tool turn
+        # still needs the LLM to weave the results together — and the query is
+        # confidently Polish (see _is_confidently_polish); an English query
+        # still needs the LLM to translate the Polish labels.
         if (
             len(called_tools) == 1
             and called_tools[0] in _PASSTHROUGH_TOOLS
-            and not (called_tools[0] == "get_new_orders" and new_orders_count_only)
             and single_tool_raw_result is not None
             and _is_confidently_polish(query)
         ):
-            # Not hardcoded "chat": get_order_details is "document" (see
-            # TOOL_OUTPUT_FORMAT) and the frontend renders that as a distinct
-            # artifact view (web/js/app.js _isDoc) — collapsing it into plain
-            # chat text here would silently drop that presentation.
+            # Not hardcoded "chat": a table/document/dashboard tool renders as a
+            # distinct artifact view in the frontend (web/js/app.js _isDoc) —
+            # collapsing it into plain chat text here would silently drop that
+            # presentation.
             bypass_format = resolve_output_format(called_tools)
             perf.log(
                 source=self.agent_name, output_format=bypass_format,
@@ -828,30 +702,16 @@ class AllegroAgent(BaseAgent):
         # Deterministic — decided by WHICH TOOL ran, not guessed from the
         # user's wording (see TOOL_OUTPUT_FORMAT in allegro_tools.py for why).
         output_format = resolve_output_format(called_tools)
-        instruction_keys = [
-            "get_new_orders:count_only" if (t == "get_new_orders" and new_orders_count_only)
-            else "get_message_threads:count_only" if (t == "get_message_threads" and message_threads_count_only)
-            else t
-            for t in called_tools
-        ]
-        # With a chain of tools (get_new_orders → get_order_details), the LAST
-        # tool is the one that answered the question — the earlier ones only fed
-        # it an ID — so walk the chain backwards and take the instruction of the
-        # last tool whose own format IS the resolved one (both formats matching
-        # is the common case now that get_order_details is "chat" too, and then
-        # only recency separates them; picking the first would render an order's
-        # details as the new-orders bullet list). With a single tool called — the
-        # overwhelming majority — this picks the same instruction it always did.
-        available = [
-            (key, TOOL_OUTPUT_FORMAT.get(tool, "chat"))
-            for key, tool in zip(instruction_keys, called_tools)
-            if key in _TOOL_SPECIFIC_INSTRUCTIONS
-        ]
-        tool_instruction = next(
-            (_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, fmt in reversed(available) if fmt == output_format),
-            next((_TOOL_SPECIFIC_INSTRUCTIONS[key] for key, _ in reversed(available)), None),
+        # Any tool in the turn rendered its own view (that is every tool there
+        # is — see _RENDERED_VIEW_TOOLS), so the interpret call is only reached
+        # by a non-Polish or multi-tool turn and its brief is "hand it back".
+        # A turn that called no tool at all has no view to protect and gets no
+        # formatting instruction — there is nothing to format.
+        format_instruction = (
+            _RENDERED_VIEW_INSTRUCTION
+            if any(t in _RENDERED_VIEW_TOOLS for t in called_tools)
+            else None
         )
-        format_instruction = tool_instruction or _OUTPUT_FORMAT_INSTRUCTIONS.get(output_format)
         if format_instruction:
             messages.append({"role": "user", "content": format_instruction})
 
@@ -1063,6 +923,80 @@ class AllegroAgent(BaseAgent):
             return few
         return many
 
+    @staticmethod
+    def _cell(value: Any) -> str:
+        """One markdown table cell. A '|' inside the value would split the cell in
+        two and shift every following column of that row; a newline would end the
+        row outright — so neutralize both."""
+        return str(value).replace("|", "\\|").replace("\n", " ").strip() or "—"
+
+    @classmethod
+    def _md_table(cls, headers: list[str], rows: list[list[Any]], align: str = "") -> list[str]:
+        """Markdown table as a list of lines. `align` is one character per column:
+        'r' right-aligns (numbers, prices), anything else left."""
+        seps = []
+        for i in range(len(headers)):
+            seps.append("---:" if i < len(align) and align[i] == "r" else "---")
+        return [
+            "| " + " | ".join(cls._cell(h) for h in headers) + " |",
+            "| " + " | ".join(seps) + " |",
+            *["| " + " | ".join(cls._cell(c) for c in row) + " |" for row in rows],
+        ]
+
+    @classmethod
+    def _offer_row(cls, g: dict) -> list[str]:
+        """One aggregated-product row, shared by every offers table (active
+        offers, stock query, price query, reorder list) so the seller sees the
+        same columns everywhere."""
+        ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
+        return [
+            f"{g['name']}{ended_marker}",
+            g["total_stock"],
+            cls._format_price(g["price"], g["currency"]),
+            ", ".join(f"`{i}`" for i in g["ids"]),
+        ]
+
+    _OFFER_COLUMNS = ["Nazwa", "Stan (szt.)", "Cena", "ID ofert"]
+
+    @classmethod
+    def _render_dashboard(
+        cls, title: str, lead: str, sections: list[tuple[str, dict[str, int | float], str]]
+    ) -> str:
+        """A dashboard view: '## ' sections the PWA turns into cards, each with a
+        bucket breakdown and a ```chart block the frontend swaps for a live
+        Chart.js canvas (web/js/app.js _renderCharts).
+
+        The chart JSON is built here, from the same numbers as the bullets, for
+        the reason the whole view is: it is a mechanical transform of data, and
+        having the interpret LLM type it out risked invented or mismatched
+        figures in a chart the seller reads as fact.
+        """
+        out = [f"## {title}", "", lead]
+        for name, buckets, chart_title in sections:
+            filled = {k: v for k, v in buckets.items() if v}
+            if not filled:
+                continue
+            out += ["", f"## {name}", ""]
+            out += [
+                f"- {k}: **{v}** {cls._plural_pl(int(v), 'oferta', 'oferty', 'ofert')}"
+                for k, v in filled.items()
+            ]
+            out += [
+                "",
+                "```chart",
+                json.dumps(
+                    {
+                        "type": "bar",
+                        "title": chart_title,
+                        "labels": list(filled.keys()),
+                        "series": [{"name": chart_title, "data": list(filled.values())}],
+                    },
+                    ensure_ascii=False,
+                ),
+                "```",
+            ]
+        return "\n".join(out)
+
     @classmethod
     def _render_offers_table(
         cls, aggregated: list[dict], raw: list[dict], name_filter: str | None = None
@@ -1070,11 +1004,11 @@ class AllegroAgent(BaseAgent):
         """The final, ready-to-display answer for get_active_offers: a heading,
         the markdown table, and — last — a one-sentence summary.
 
-        Built here instead of handed to the interpret LLM (see _PASSTHROUGH_TOOLS)
-        for the same reason as get_order_details: _TOOL_SPECIFIC_INSTRUCTIONS
-        already prescribed the exact columns and row order, so the model had no
-        judgment left to apply — just hundreds of rows to re-type, slowly and with
-        a real chance of dropping, reordering or truncating some of them.
+        Rendering happens here, in Python, not in the interpret LLM: turning rows
+        of data into the output view is mechanical work with no judgment in it,
+        and a model doing it is slower, costs tokens and can drop, reorder or
+        truncate rows. See _PASSTHROUGH_TOOLS — the model never sees this on the
+        way out for a Polish query.
 
         The layout is what the PWA needs to split the reply the way the seller
         expects (web/js/app.js): the leading '# ' heading names the document tab
@@ -1083,21 +1017,7 @@ class AllegroAgent(BaseAgent):
         following the table as the chat-bubble preview — so the chat says "masz
         obecnie XX aktywnych ofert" and the table stays in the document.
         """
-        heading = "# Aktywne oferty"
-        rows = [
-            "| Nazwa | Stan (szt.) | Cena | ID ofert |",
-            "| --- | ---: | ---: | --- |",
-        ]
-        for g in aggregated:  # already sorted ascending by stock
-            # A '|' in an offer name would otherwise split the cell in two and
-            # shift every following column of that row.
-            name = str(g["name"]).replace("|", "\\|")
-            ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
-            ids_str = ", ".join(f"`{i}`" for i in g["ids"])
-            rows.append(
-                f"| {name}{ended_marker} | {g['total_stock']} | "
-                f"{cls._format_price(g['price'], g['currency'])} | {ids_str} |"
-            )
+        rows = cls._md_table(cls._OFFER_COLUMNS, [cls._offer_row(g) for g in aggregated], align="lrrl")
 
         ended_offers = sum(1 for o in raw if o.get("_ended"))
         active_offers = len(raw) - ended_offers
@@ -1118,7 +1038,7 @@ class AllegroAgent(BaseAgent):
                 f"{cls._plural_pl(ended_offers, 'zakończona', 'zakończone', 'zakończonych')}"
                 " przez wyprzedanie — do wznowienia."
             )
-        return "\n".join([heading, "", *rows, "", summary])
+        return "\n".join(["# Aktywne oferty", "", *rows, "", summary])
 
     async def _get_stock_relevant_offers(self, name: str | None = None) -> list[dict]:
         """Active offers plus ended offers that sold out to zero stock.
@@ -1190,6 +1110,17 @@ class AllegroAgent(BaseAgent):
     @classmethod
     def _status_pl(cls, status: str | None) -> str:
         return cls._STATUS_PL.get(status or "", status or "—")
+
+    _PUBLICATION_PL: dict[str, str] = {
+        "ACTIVE":    "Aktywna",
+        "ACTIVATING": "Aktywowana",
+        "INACTIVE":  "Nieaktywna",
+        "ENDED":     "Zakończona",
+    }
+
+    @classmethod
+    def _publication_pl(cls, status: str | None) -> str:
+        return cls._PUBLICATION_PL.get(status or "", status or "—")
     _TRACKING_URLS: dict[str, str] = {
         "INPOST":          "https://inpost.pl/sledzenie-przesylek?number={code}",
         "DHL":             "https://www.dhl.com/pl-pl/home/tracking.html?tracking-id={code}&submit=1",
@@ -1575,6 +1506,49 @@ class AllegroAgent(BaseAgent):
         lines.append(f"- Link: {link}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _order_link(order_id: str) -> str:
+        """Order ID as a link to its Allegro panel page — the ID stays visible
+        (the seller pastes it into other questions) and stays one click away."""
+        return f"[{order_id}](https://allegro.pl/sprzedaz/zamowienia/{order_id})"
+
+    @classmethod
+    def _render_orders_table(cls, orders: list[Any]) -> str:
+        """Order listing as the finished table view (see _render_offers_table for
+        why rendering lives in Python). Status and the dispatch deadline are
+        columns, never optional — every order answer has to carry both."""
+        rows = [
+            [
+                cls._order_link(o.order_id),
+                o.buyer_login,
+                cls._fulfillment_pl(o.fulfillment_status),
+                cls._dispatch_deadline_pl(o),
+                cls._format_price(o.total_price, o.currency),
+                cls._format_dt_pl(o.paid_at),
+                cls._dig(o.delivery if isinstance(o.delivery, dict) else {}, "method", "name", default="—"),
+                sum(li.quantity for li in o.line_items),
+            ]
+            for o in orders
+        ]
+        total = sum(o.total_price for o in orders)
+        summary = (
+            f"Znaleziono **{len(orders)}** "
+            f"{cls._plural_pl(len(orders), 'zamówienie', 'zamówienia', 'zamówień')} "
+            f"na łączną kwotę **{cls._format_price(total)}**."
+        )
+        return "\n".join([
+            "# Zamówienia",
+            "",
+            *cls._md_table(
+                ["Zamówienie", "Kupujący", "Status realizacji", "Wysyłka do",
+                 "Wartość", "Opłacone", "Dostawa", "Szt."],
+                rows,
+                align="llllrllr",
+            ),
+            "",
+            summary,
+        ])
+
     async def _preview_pending_invoices(self, month: int | None, year: int | None) -> str:
         """Build the exact inFakt invoice payload for each pending order WITHOUT sending it.
 
@@ -1702,7 +1676,11 @@ class AllegroAgent(BaseAgent):
                 limit=min(int(tool_input.get("limit", 100)), 100),
             )
             if tool_input.get("count_only"):
-                body = f"Liczba nowych zamówień: {len(orders)}."
+                body = (
+                    f"Masz **{len(orders)}** "
+                    f"{self._plural_pl(len(orders), 'nowe zamówienie', 'nowe zamówienia', 'nowych zamówień')}."
+                    if orders else "Nie masz nowych zamówień."
+                )
             else:
                 body = "Brak nowych zamówień." if not orders else "\n\n".join(self._new_order_bullet(o) for o in orders)
             return body + "\n\n" + await self._monitoring_status_block()
@@ -1725,7 +1703,7 @@ class AllegroAgent(BaseAgent):
             )
             if not orders:
                 return "Brak zamówień spełniających podane kryteria."
-            return "\n\n".join(self._order_block(o) for o in orders)
+            return self._render_orders_table(orders)
 
         if tool_name == "get_order_details":
             logger.info("DEBUG get_order_details called for order_id=%s", tool_input.get("order_id"))
@@ -1871,14 +1849,17 @@ class AllegroAgent(BaseAgent):
                     price_buckets["200–500 zł"] += 1
                 else:
                     price_buckets["500+ zł"] += 1
-            stock_lines = "\n".join(f"  - {k}: **{v}** ofert" for k, v in stock_buckets.items() if v)
-            price_lines = "\n".join(f"  - {k}: **{v}** ofert" for k, v in price_buckets.items() if v)
-            return (
-                f"**Podsumowanie ofert**\n\n"
-                f"Łącznie aktywnych ofert: **{total}**\n"
-                f"Łączny stan magazynowy: **{total_stock:,} szt.**\n\n"
-                f"**Stany magazynowe:**\n{stock_lines}\n\n"
-                f"**Ceny:**\n{price_lines}"
+            return self._render_dashboard(
+                title="Podsumowanie ofert",
+                # non-breaking-space thousands: "1 234 szt.", not the English "1,234"
+                lead=(
+                    f"Aktywnych ofert: **{total}**, łączny stan magazynowy: "
+                    f"**{format(total_stock, ',').replace(',', chr(160))} szt.**"
+                ),
+                sections=[
+                    ("Stany magazynowe", stock_buckets, "Liczba ofert wg stanu"),
+                    ("Ceny", price_buckets, "Liczba ofert wg ceny"),
+                ],
             )
 
         if tool_name == "query_offers_by_stock":
@@ -1909,20 +1890,19 @@ class AllegroAgent(BaseAgent):
                 label.append(f"≤ {max_stock} szt.")
             if min_stock is not None:
                 label.append(f"≥ {min_stock} szt.")
-            scope = f" — „{name_filter}”" if name_filter else ""
-            header = f"Znaleziono **{len(results)}** produktów ({', '.join(label) or 'wszystkie'}){scope}, posortowane rosnąco wg stanu:\n"
-            lines = [header]
-            for g in results:
-                ids_str = ", ".join(f"`{i}`" for i in g["ids"])
-                ofert_str = f"({len(g['ids'])} {'oferta' if len(g['ids']) == 1 else 'ofert'})" if len(g["ids"]) > 1 else ""
-                ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
-                lines.append(
-                    f"- **{g['name']}**{ended_marker} {ofert_str}— "
-                    f"stan łącznie: **{g['total_stock']} szt.** — "
-                    f"{self._format_price(g['price'], g['currency'])} — "
-                    f"ID: {ids_str}"
-                )
-            return "\n".join(lines)
+            criteria = ", ".join(label) or "wszystkie stany"
+            scope = f", filtr nazwy: „{name_filter}”" if name_filter else ""
+            rows = self._md_table(
+                self._OFFER_COLUMNS, [self._offer_row(g) for g in results], align="lrrl"
+            )
+            total_stock = sum(g["total_stock"] for g in results)
+            summary = (
+                f"Znaleziono **{len(results)}** "
+                f"{self._plural_pl(len(results), 'produkt', 'produkty', 'produktów')} "
+                f"({criteria}{scope}) — łącznie **{total_stock} szt.** na stanie, "
+                "posortowane rosnąco wg stanu."
+            )
+            return "\n".join([f"# Stany magazynowe ({criteria})", "", *rows, "", summary])
 
         if tool_name == "query_offers_by_price":
             max_price = tool_input.get("max_price")
@@ -1941,17 +1921,22 @@ class AllegroAgent(BaseAgent):
             results.sort(key=lambda x: x[2])
             label = []
             if min_price is not None:
-                label.append(f"≥ {self._format_price(min_price)}")
+                label.append(f"od {self._format_price(min_price)}")
             if max_price is not None:
-                label.append(f"≤ {self._format_price(max_price)}")
-            header = f"Znaleziono **{len(results)}** ofert ({', '.join(label) or 'wszystkie'}):\n"
-            lines = [header]
-            for oid, name, price, currency, stock in results:
-                lines.append(
-                    f"- **{name}** — **{self._format_price(price, currency)}** — "
-                    f"stan: {stock} szt. — ID: `{oid}`"
-                )
-            return "\n".join(lines)
+                label.append(f"do {self._format_price(max_price)}")
+            criteria = " ".join(label) or "wszystkie ceny"
+            rows = self._md_table(
+                ["Nazwa", "Cena", "Stan (szt.)", "ID oferty"],
+                [[name, self._format_price(price, currency), stock, f"`{oid}`"]
+                 for oid, name, price, currency, stock in results],
+                align="lrrl",
+            )
+            summary = (
+                f"Znaleziono **{len(results)}** "
+                f"{self._plural_pl(len(results), 'ofertę', 'oferty', 'ofert')} "
+                f"w cenie {criteria}, posortowane rosnąco wg ceny."
+            )
+            return "\n".join([f"# Oferty wg ceny ({criteria})", "", *rows, "", summary])
 
         if tool_name == "get_products_to_reorder":
             assortment = tool_input.get("assortment")
@@ -1967,17 +1952,33 @@ class AllegroAgent(BaseAgent):
             if not results:
                 scope = f" w asortymencie „{assortment}”" if assortment else ""
                 return f"Brak produktów{scope} wymagających uzupełnienia (próg: {max_stock} szt.)."
-            scope = f" — asortyment: „{assortment}”" if assortment else ""
-            header = f"Produkty do zamówienia (stan ≤ {max_stock} szt.{scope}) — {len(results)} pozycji:\n"
-            lines = [header]
-            for g in results:
-                ids_str = ", ".join(f"`{i}`" for i in g["ids"])
-                ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
-                lines.append(
-                    f"- **{g['name']}**{ended_marker} — stan obecny: **{g['total_stock']} szt.** — "
-                    f"cena sprzedaży: {self._format_price(g['price'], g['currency'])} — ID: {ids_str}"
-                )
-            return "\n".join(lines)
+            rows = self._md_table(
+                ["Nazwa", "Stan obecny (szt.)", "Cena sprzedaży", "ID ofert"],
+                [self._offer_row(g) for g in results],
+                align="lrrl",
+            )
+            sold_out = sum(1 for g in results if g["total_stock"] == 0)
+            # Document format: the chat bubble previews the heading plus the line
+            # right after it (web/js/app.js _docPreview), so that line has to be a
+            # sentence — a table row there reads as garbled pipes.
+            lead = (
+                f"Do uzupełnienia: **{len(results)}** "
+                f"{self._plural_pl(len(results), 'produkt', 'produkty', 'produktów')} "
+                f"ze stanem ≤ {max_stock} szt."
+                + (f" Asortyment: „{assortment}”." if assortment else "")
+                + (f" W tym **{sold_out}** całkowicie wyprzedanych (0 szt.)." if sold_out else "")
+            )
+            return "\n".join([
+                "# Zamówienie uzupełniające",
+                "",
+                lead,
+                "",
+                *rows,
+                "",
+                "Kolejność wierszy: od najniższego stanu magazynowego. Oferty oznaczone "
+                "„(zakończona — wyprzedana)” Allegro zakończyło automatycznie po zejściu "
+                "stanu do zera — po dostawie towaru trzeba je wznowić.",
+            ])
 
         if tool_name == "get_sales_summary":
             date_from, date_to = self._local_day_bounds_to_utc(
@@ -2039,11 +2040,33 @@ class AllegroAgent(BaseAgent):
                 for li in o.line_items:
                     product_revenue[li.offer_name] = product_revenue.get(li.offer_name, 0) + li.price * li.quantity
             top = sorted(product_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
-            top_lines = "\n".join(
-                f"  {i+1}. **{name}** — {self._format_price(rev)}"
-                for i, (name, rev) in enumerate(top)
-            )
-            billing_section = ""
+
+            sections: list[str] = []
+            if top:
+                sections += [
+                    "",
+                    "## Top produkty wg przychodu",
+                    "",
+                    *self._md_table(
+                        ["#", "Produkt", "Przychód"],
+                        [[i + 1, name, self._format_price(rev)] for i, (name, rev) in enumerate(top)],
+                        align="rlr",
+                    ),
+                    "",
+                    "```chart",
+                    json.dumps(
+                        {
+                            "type": "bar",
+                            "title": "Przychód wg produktu",
+                            "labels": [name for name, _ in top],
+                            "series": [{"name": "Przychód (PLN)",
+                                        "data": [round(rev, 2) for _, rev in top]}],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "```",
+                ]
+
             if billing_entries:
                 # order_id → {"fees": total costs, "refunds": total credits}, both as
                 # positive values. Built once from the batch billing fetch above — no
@@ -2080,130 +2103,174 @@ class AllegroAgent(BaseAgent):
                 # doesn't silently disagree with the total.
                 unattributed_fees = total_fees - sum(v["fees"] for v in by_order.values())
                 unattributed_refunds = total_refunds - sum(v["refunds"] for v in by_order.values())
-                billing_lines = "\n".join(
+
+                sections += ["", f"## Koszty Allegro ({period_label})", ""]
+                sections.append(f"- Łączne opłaty: **{self._format_price(total_fees)}**")
+                sections += [
                     f"  - {desc}: {self._format_price(amt)}"
                     for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
-                )
-                refund_lines = "\n".join(
-                    f"  - {desc}: +{self._format_price(amt)}"
-                    for desc, amt in sorted(refund_by_type.items(), key=lambda x: x[1], reverse=True)
-                )
-                # Per-order table (sorted by date)
+                ]
+                if total_refunds > 0:
+                    sections.append(f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**")
+                    sections += [
+                        f"  - {desc}: +{self._format_price(amt)}"
+                        for desc, amt in sorted(refund_by_type.items(), key=lambda x: x[1], reverse=True)
+                    ]
+                if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
+                    sections.append(
+                        "- w tym nieprzypisane do żadnego zamówienia (abonament, inne): "
+                        f"opłaty **{self._format_price(unattributed_fees)}**"
+                        + (f", zwroty/rabaty **+{self._format_price(unattributed_refunds)}**"
+                           if unattributed_refunds > 0.01 else "")
+                    )
+                sections += [
+                    "",
+                    f"**Przychód po opłatach Allegro (przychód − opłaty + zwroty): "
+                    f"{self._format_price(revenue_after_fees)}**",
+                    "",
+                    "*To NIE jest zysk netto — nie obejmuje kosztu zakupu towaru ani innych "
+                    "kosztów własnych, których ta aplikacja nie zna.*",
+                ]
+
                 order_rows = []
                 for o in sorted(orders, key=lambda x: x.paid_at or x.created_at):
                     oid = o.order_id
-                    rev = o.total_price
                     fees = by_order[oid]["fees"] if oid in by_order else 0.0
                     refunds = by_order[oid]["refunds"] if oid in by_order else 0.0
-                    after_fees = rev - fees + refunds
-                    date_str = (o.paid_at or o.created_at)[:10]
-                    buyer = o.buyer_login[:15] if o.buyer_login else "—"
                     items_short = ", ".join(
-                        f"{li.offer_name[:25]}×{li.quantity}" for li in o.line_items[:2]
+                        f"{li.offer_name}×{li.quantity}" for li in o.line_items[:2]
                     ) + ("…" if len(o.line_items) > 2 else "")
-                    order_rows.append(
-                        f"  {date_str} | {buyer:<15} | przychód: {self._format_price(rev)} | "
-                        f"opłaty: {self._format_price(fees)} | po opłatach: {self._format_price(after_fees)}"
-                        + (f"\n    {items_short}" if items_short else "")
-                    )
-                per_order_section = ""
+                    order_rows.append([
+                        (o.paid_at or o.created_at)[:10],
+                        o.buyer_login or "—",
+                        self._format_price(o.total_price),
+                        self._format_price(fees),
+                        self._format_price(o.total_price - fees + refunds),
+                        items_short or "—",
+                    ])
                 if order_rows:
-                    per_order_section = (
-                        "\n\n**Zestawienie per zamówienie** (opłaty przypisane do konkretnego zamówienia; "
-                        "nie obejmuje opłat kontowych, np. abonamentu):\n" + "\n".join(order_rows)
-                    )
+                    sections += [
+                        "",
+                        "## Zestawienie per zamówienie",
+                        "",
+                        "Opłaty przypisane do konkretnego zamówienia — bez opłat kontowych "
+                        "(np. abonamentu).",
+                        "",
+                        *self._md_table(
+                            ["Data", "Kupujący", "Przychód", "Opłaty", "Po opłatach", "Produkty"],
+                            order_rows,
+                            align="llrrrl",
+                        ),
+                    ]
                     if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
-                        per_order_section += (
-                            f"\n\n  Uwaga: suma opłat/zwrotów z powyższej tabeli nie zsumuje się do "
-                            f"\"Przychód po opłatach Allegro\" powyżej — brakującą różnicę stanowią "
-                            f"opłaty/zwroty nieprzypisane do żadnego zamówienia, patrz niżej "
+                        sections += [
+                            "",
+                            "Suma z tabeli nie zejdzie się z „Przychodem po opłatach Allegro” — "
+                            "różnicę stanowią opłaty/zwroty nieprzypisane do żadnego zamówienia "
                             f"(opłaty {self._format_price(unattributed_fees)}"
-                            + (f", zwroty +{self._format_price(unattributed_refunds)}" if unattributed_refunds > 0.01 else "")
-                            + ")."
-                        )
-                # Each breakdown block follows the bullet it belongs to: the lines are
-                # indented, so markdown nests them under whatever bullet precedes them —
-                # listing both blocks after the refunds bullet filed the fee types
-                # (prowizja, abonament) under "Zwroty/rabaty".
-                billing_section = (
-                    f"\n\n**Koszty Allegro** ({period_label})\n"
-                    f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
-                    + (f"{billing_lines}\n" if billing_lines else "")
-                    + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
-                    + (f"{refund_lines}\n" if refund_lines else "")
-                    + (
-                        "- w tym nieprzypisane do żadnego zamówienia (abonament, inne): "
-                        + f"opłaty **{self._format_price(unattributed_fees)}**"
-                        + (f", zwroty/rabaty **+{self._format_price(unattributed_refunds)}**" if unattributed_refunds > 0.01 else "")
-                        + "\n"
-                        if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01 else ""
-                    )
-                    + f"\n**Przychód po opłatach Allegro (przychód − opłaty + zwroty): {self._format_price(revenue_after_fees)}**\n"
-                    + "*To NIE jest zysk netto — nie obejmuje kosztu zakupu towaru ani innych kosztów własnych, "
-                    + "których ta aplikacja nie zna.*"
-                    + per_order_section
-                )
+                            + (f", zwroty +{self._format_price(unattributed_refunds)}"
+                               if unattributed_refunds > 0.01 else "")
+                            + ").",
+                        ]
             elif billing_error:
-                billing_section = (
-                    "\n\n⚠️ Dane o kosztach Allegro niedostępne (brak uprawnień do rozliczeń). "
-                    "Zaloguj się ponownie przez /allegro/login, aby uzyskać dostęp do billing."
-                )
-            return (
-                f"**Podsumowanie sprzedaży** ({period_label})\n\n"
-                f"- Liczba zamówień: **{order_count}**\n"
-                f"- Łączny przychód: **{self._format_price(total_revenue)}**\n"
-                f"- Średnia wartość zamówienia: **{self._format_price(avg_value)}**\n\n"
-                f"**Top produkty wg przychodu:**\n{top_lines}"
-                f"{billing_section}"
-            )
+                sections += [
+                    "",
+                    "## Koszty Allegro",
+                    "",
+                    "⚠️ Dane o kosztach Allegro niedostępne (brak uprawnień do rozliczeń). "
+                    "Zaloguj się ponownie przez /allegro/login, aby uzyskać dostęp do billing.",
+                ]
+
+            return "\n".join([
+                f"## Podsumowanie sprzedaży ({period_label})",
+                "",
+                f"Zamówień: **{order_count}**, łączny przychód: "
+                f"**{self._format_price(total_revenue)}**, średnia wartość zamówienia: "
+                f"**{self._format_price(avg_value)}**.",
+                *sections,
+            ])
 
         if tool_name == "get_offer_details":
             offer = await self._allegro.get_offer(tool_input["offer_id"])
-            return json.dumps(offer, ensure_ascii=False, indent=2)[:3000]
+            oid, name, price, currency, stock = self._offer_fields(offer)
+            lines = [
+                f"**{name}**",
+                f"- ID oferty: `{oid}`",
+                f"- Cena: **{self._format_price(price, currency)}**",
+                f"- Stan magazynowy: **{stock} szt.**",
+            ]
+            sold = self._dig(offer, "stock", "sold")
+            if sold is not None:
+                lines.append(f"- Sprzedano: {sold} szt.")
+            status = self._dig(offer, "publication", "status")
+            if status:
+                lines.append(f"- Status publikacji: **{self._publication_pl(status)}**")
+            started = self._dig(offer, "publication", "startingAt", default="")
+            if started:
+                lines.append(f"- Wystawiona: {self._format_dt_pl(started)}")
+            ended = self._dig(offer, "publication", "endingAt", default="")
+            if ended:
+                lines.append(f"- Zakończenie: {self._format_dt_pl(ended)}")
+            ean = self._dig(offer, "external", "id")
+            if ean:
+                lines.append(f"- Sygnatura własna: {ean}")
+            lines.append(f"- Link: https://allegro.pl/oferta/{oid}")
+            return "\n".join(lines)
 
+        # The three write actions below answer in Polish, finished — the user
+        # reads this confirmation as-is (see _PASSTHROUGH_TOOLS), so it must not
+        # depend on an LLM to translate an "Error: ..." string or an API dump.
         if tool_name == "update_offer_price":
+            offer_id = tool_input["offer_id"]
             price = float(tool_input["price"])
             if price <= 0:
-                return "Error: price must be greater than 0."
-            result = await self._allegro.update_offer_price(tool_input["offer_id"], price)
-            return f"Price updated successfully. New price: {price} PLN. Response: {json.dumps(result)[:200]}"
+                return f"Nie zmieniłem ceny oferty `{offer_id}` — cena musi być większa od zera."
+            await self._allegro.update_offer_price(offer_id, price)
+            return f"✅ Cena oferty `{offer_id}` zmieniona na **{self._format_price(price)}**."
 
         if tool_name == "update_offer_stock":
+            offer_id = tool_input["offer_id"]
             available = int(tool_input["available"])
             if available < 0:
-                return "Error: stock quantity cannot be negative."
-            result = await self._allegro.update_offer_stock(tool_input["offer_id"], available)
-            return f"Stock updated to {available}. Response: {json.dumps(result)[:200]}"
+                return f"Nie zmieniłem stanu oferty `{offer_id}` — stan nie może być ujemny."
+            await self._allegro.update_offer_stock(offer_id, available)
+            return f"✅ Stan oferty `{offer_id}` ustawiony na **{available} szt.**"
 
         if tool_name == "send_message_to_buyer":
             result = await self._allegro.send_message(tool_input["thread_id"], tool_input["text"])
-            return f"Message sent successfully. Message ID: {result.get('id', 'N/A')}"
+            msg_id = result.get("id", "—")
+            return f"✅ Wiadomość wysłana (wątek `{tool_input['thread_id']}`, ID wiadomości: `{msg_id}`)."
 
         if tool_name == "get_message_threads":
             threads = await self._allegro.get_message_threads(
                 limit=min(int(tool_input.get("limit", 10)), 20)
             )
             if not threads:
-                return "No message threads found." if not tool_input.get("count_only") else (
-                    "Unread count: 0. No message threads at all."
+                return (
+                    "Nie masz nowych wiadomości." if tool_input.get("count_only")
+                    else "Brak wątków wiadomości."
                 )
             unread = [t for t in threads if not t.get("read", True)]
             if tool_input.get("count_only"):
                 if not unread:
-                    return f"Unread count: 0. Checked the {len(threads)} most recent threads — all already read."
+                    return "Nie masz nowych wiadomości."
                 buyers = ", ".join(
-                    (t.get("interlocutor") or {}).get("login", "N/A") for t in unread[:5]
+                    (t.get("interlocutor") or {}).get("login", "—") for t in unread[:5]
                 )
-                return f"Unread count: {len(unread)}. Buyers: {buyers}."
-            lines = []
-            for t in threads:
-                interlocutor = t.get("interlocutor") or {}
-                lines.append(
-                    f"Thread {t.get('id')} | Buyer: {interlocutor.get('login', 'N/A')} | "
-                    f"Unread: {not t.get('read', True)} | "
-                    f"Last message: {t.get('lastMessageDateTime', 'N/A')}"
+                return (
+                    f"Masz **{len(unread)}** "
+                    f"{self._plural_pl(len(unread), 'nową wiadomość', 'nowe wiadomości', 'nowych wiadomości')} "
+                    f"(od: {buyers}). Pokazać szczegóły?"
                 )
-            return "\n".join(lines)
+            # The thread ID stays in the line: send_message_to_buyer needs it, and
+            # it is read back from this very text on the next turn.
+            return "\n".join(
+                f"- **{(t.get('interlocutor') or {}).get('login', '—')}** — "
+                f"{'🔴 nieprzeczytana' if not t.get('read', True) else 'przeczytana'} — "
+                f"ostatnia wiadomość: {self._format_dt_pl(t.get('lastMessageDateTime', ''))} — "
+                f"wątek `{t.get('id')}`"
+                for t in threads
+            )
 
         if tool_name == "get_thread_messages":
             thread_id = tool_input.get("thread_id")
@@ -2229,31 +2296,38 @@ class AllegroAgent(BaseAgent):
                         if self._to_warsaw_date(t.get("lastMessageDateTime", "")) == target_date
                     ]
                 if not candidates:
-                    return "No thread found matching the given buyer_login/date filters."
+                    return "Nie znalazłem wątku pasującego do podanego kupującego / daty."
                 thread_id = candidates[0].get("id")
                 matched_buyer = (candidates[0].get("interlocutor") or {}).get("login", "N/A")
             messages = await self._allegro.get_thread_messages(
                 thread_id, limit=min(int(tool_input.get("limit", 10)), 20)
             )
             if not messages:
-                return f"Thread {thread_id} has no messages."
-            lines = [f"Thread {thread_id}" + (f" | Buyer: {matched_buyer}" if matched_buyer else "")]
+                return f"Wątek `{thread_id}` nie zawiera wiadomości."
+            header = f"Wątek `{thread_id}`" + (f" — kupujący **{matched_buyer}**" if matched_buyer else "")
+            lines = [header, ""]
             for m in messages:
                 author = m.get("author") or {}
                 who = "Kupujący" if author.get("isInterlocutor") else "Sprzedawca"
                 lines.append(
-                    f"[{m.get('createdAt', 'N/A')}] {who} ({author.get('login', 'N/A')}): {m.get('text', '')}"
+                    f"**{who}** ({author.get('login', '—')}) — "
+                    f"{self._format_dt_pl(m.get('createdAt', ''))}"
                 )
-            return "\n".join(lines)
+                # Verbatim, never summarized — the seller is reading what the
+                # buyer actually wrote.
+                lines.append(f"„{m.get('text', '')}”")
+                lines.append("")
+            return "\n".join(lines).rstrip()
 
         if tool_name == "get_account_info":
             info = await self._allegro.get_user_info()
-            return (
-                f"Login: {info.get('login', 'N/A')}\n"
-                f"Email: {info.get('email', 'N/A')}\n"
-                f"Company: {info.get('company', {}).get('name', 'Individual seller')}\n"
-                f"Registered: {info.get('registeredAt', 'N/A')}"
-            )
+            company = (info.get("company") or {}).get("name")
+            return "\n".join([
+                f"- Login: **{info.get('login', '—')}**",
+                f"- E-mail: {info.get('email', '—')}",
+                f"- Konto: {company or 'sprzedawca indywidualny'}",
+                f"- Zarejestrowane: {self._format_dt_pl(info.get('registeredAt', ''))}",
+            ])
 
         if tool_name == "get_billing_summary":
             date_from_local = tool_input.get("date_from_local")
@@ -2294,21 +2368,24 @@ class AllegroAgent(BaseAgent):
             fee_by_type: dict[str, float] = {}
             total_fees = 0.0
             total_refunds = 0.0
-            detail_lines = []
+            rows = []
+            skipped_transfers = 0
             for e in entries:
                 amount_val = float((e.get("value") or {}).get("amount", 0) or 0)
                 currency = (e.get("value") or {}).get("currency", "PLN")
                 type_desc = (e.get("type") or {}).get("description", "Inne")
                 occurred = e.get("occurredAt", "")[:10]
                 order_id = (e.get("order") or {}).get("id", "")
-                order_ref = f" | zamówienie {order_id}" if order_id else ""
-                sign = "+" if amount_val > 0 else ""
                 is_transfer = self._is_balance_transfer_entry(e)
-                detail_lines.append(
-                    f"{occurred} | {type_desc}{order_ref} | {sign}{amount_val:.2f} {currency}"
-                    + (" (transfer wewnętrzny, pominięty w sumach)" if is_transfer else "")
-                )
+                sign = "+" if amount_val > 0 else ""
+                rows.append([
+                    occurred,
+                    type_desc + (" *(transfer wewnętrzny, poza sumami)*" if is_transfer else ""),
+                    f"`{order_id}`" if order_id else "—",
+                    f"{sign}{amount_val:.2f} {currency}".replace(".", ","),
+                ])
                 if is_transfer:
+                    skipped_transfers += 1
                     continue
                 if amount_val < 0:
                     total_fees += abs(amount_val)
@@ -2316,20 +2393,30 @@ class AllegroAgent(BaseAgent):
                 elif amount_val > 0:
                     total_refunds += amount_val
             net_cost = total_fees - total_refunds
-            breakdown = "\n".join(
-                f"  - {desc}: {self._format_price(amt)}"
+            # Same 50-row cap the old bullet listing had — a busy month is
+            # hundreds of entries and the totals above are the answer.
+            shown, hidden = rows[:50], max(len(rows) - 50, 0)
+            breakdown = [
+                f"- {desc}: **{self._format_price(amt)}**"
                 for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
-            )
+            ]
             summary = (
-                f"**Koszty Allegro** ({period_label}) — {len(entries)} operacji\n\n"
-                f"- Łączne opłaty: **{self._format_price(total_fees)}**\n"
-                + (f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**\n" if total_refunds > 0 else "")
-                + f"- Koszt netto: **{self._format_price(net_cost)}**\n\n"
-                + (f"**Podział wg rodzaju opłaty:**\n{breakdown}\n\n" if breakdown else "")
-                + f"**Szczegóły:**\n" + "\n".join(detail_lines[:50])
-                + (f"\n… i {len(detail_lines) - 50} więcej" if len(detail_lines) > 50 else "")
+                f"Łączne opłaty: **{self._format_price(total_fees)}**"
+                + (f", zwroty/rabaty: **+{self._format_price(total_refunds)}**" if total_refunds > 0 else "")
+                + f", koszt netto: **{self._format_price(net_cost)}** "
+                f"({len(entries)} {self._plural_pl(len(entries), 'operacja', 'operacje', 'operacji')}, "
+                f"{period_label})."
+                + (f" W tabeli pokazano {len(shown)} najnowszych." if hidden else "")
+                + (f" Transferów wewnętrznych pominiętych w sumach: {skipped_transfers}." if skipped_transfers else "")
             )
-            return summary
+            return "\n".join([
+                f"# Koszty Allegro ({period_label})",
+                "",
+                *(["**Podział wg rodzaju opłaty:**", "", *breakdown, ""] if breakdown else []),
+                *self._md_table(["Data", "Rodzaj", "Zamówienie", "Kwota"], shown, align="lllr"),
+                "",
+                summary,
+            ])
 
         if tool_name == "get_orders_delivery":
             fulfillment_status = tool_input.get("fulfillment_status")
@@ -2353,7 +2440,7 @@ class AllegroAgent(BaseAgent):
             if not orders:
                 return "Brak zamówień gotowych do wysłania."
             courier_counts: Counter = Counter()
-            blocks = []
+            rows = []
             for o in orders:
                 d = o.delivery if isinstance(o.delivery, dict) else {}
                 carrier_id = self._dig(d, "method", "id", default="")
@@ -2364,23 +2451,33 @@ class AllegroAgent(BaseAgent):
                     self._dig(d, "smart", "trackingCode", default=None)
                     or self._dig(d, "trackingCode", default="—")
                 )
-                pickup_name = self._dig(d, "pickupPoint", "name", default=None)
                 tracking_url = self._tracking_url(carrier_id, tracking)
-                tracking_str = (
-                    f"[{tracking}]({tracking_url})" if tracking_url and tracking != "—"
-                    else tracking
-                )
-                extra = [
-                    f"Kurier/dostawa: **{method_name}**",
-                    f"Numer śledzenia: {tracking_str}",
-                ]
-                if pickup_name:
-                    extra.append(f"Punkt odbioru: {pickup_name}")
-                blocks.append(self._order_block(o, extra_lines=extra))
-            summary = "**Podsumowanie kurierów:**\n" + "\n".join(
-                f"- {method}: {count} zamówień" for method, count in courier_counts.most_common()
+                rows.append([
+                    self._order_link(o.order_id),
+                    o.buyer_login,
+                    method_name,
+                    f"[{tracking}]({tracking_url})" if tracking_url and tracking != "—" else tracking,
+                    self._dig(d, "pickupPoint", "name", default="—"),
+                    self._fulfillment_pl(o.fulfillment_status),
+                    self._dispatch_deadline_pl(o),
+                ])
+            couriers = ", ".join(f"{method}: **{count}**" for method, count in courier_counts.most_common())
+            summary = (
+                f"Do wysłania: **{len(orders)}** "
+                f"{self._plural_pl(len(orders), 'zamówienie', 'zamówienia', 'zamówień')}. "
+                f"Kurierzy — {couriers}."
             )
-            return summary + "\n\n---\n\n" + "\n\n".join(blocks)
+            return "\n".join([
+                "# Zamówienia do wysyłki",
+                "",
+                *self._md_table(
+                    ["Zamówienie", "Kupujący", "Kurier/dostawa", "Numer śledzenia",
+                     "Punkt odbioru", "Status", "Wysyłka do"],
+                    rows,
+                ),
+                "",
+                summary,
+            ])
 
         if tool_name == "get_orders_pending_invoice":
             orders = await self._allegro.get_orders_needing_invoice(
