@@ -329,9 +329,30 @@ class AllegroAgent(BaseAgent):
         "→ get_thread_messages). NEVER invent or guess a UUID to satisfy get_order_details — a made-up "
         "ID just fails against the Allegro API and the user gets no answer at all. When a step "
         "returns nothing to continue with, call ask_clarifying_question instead of guessing.\n"
-        "• Unsent / 'niewysłane' / 'do wysłania' → get_orders_delivery (its default filter is "
-        "already fulfillment_status=READY_FOR_SHIPMENT)\n"
-        "• Not packed / 'niespakowane' / 'do spakowania' → get_new_orders (fulfillment_status=NEW)\n"
+        "• ORDER STAGE — pick the tool from the STAGE the user names, however they name it "
+        "(the same stage gets asked formally, colloquially and as a count — for a count add "
+        "count_only=true, the stage choice does not change):\n"
+        "   – NOWE: 'nowe', 'świeże', 'do obsłużenia', 'złożone', 'zarejestrowane', "
+        "'oczekujące na potwierdzenie', 'co nowego wpadło', 'co mam zacząć', 'co czeka na start', "
+        "'nietknięte', 'ile w kolejce' — and the still-to-pack wording 'do spakowania' / "
+        "'co mam spakować' / 'niespakowane' → get_new_orders (fulfillment_status=NEW)\n"
+        "   – W REALIZACJI: 'w trakcie', 'w realizacji', 'przetwarzane', 'w toku', 'kompletowane', "
+        "'co teraz kompletuję', 'co mam w robocie', 'nad czym siedzę', 'nieskończone', "
+        "'do dokończenia' → get_orders with fulfillment_status=PROCESSING\n"
+        "   – DO WYSŁANIA: 'gotowe do wysyłki', 'oczekujące/czekają na wysyłkę', 'do wysłania', "
+        "'niewysłane', 'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
+        "'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania' → get_orders_delivery "
+        "(its default filter is already fulfillment_status=READY_FOR_SHIPMENT)\n"
+        "   – WYSŁANE: 'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', "
+        "'co już poszło', 'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało' → "
+        "get_orders_delivery with fulfillment_status=SENT (the courier and tracking details are "
+        "exactly what a question about a parcel already on its way is after)\n"
+        "   – ODEBRANE: 'odebrane', 'dostarczone', 'zrealizowane', 'zakończone', 'co już dotarło', "
+        "'co klient odebrał', 'ile dostarczonych', 'ile zamkniętych' → get_orders with "
+        "fulfillment_status=PICKED_UP\n"
+        "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → "
+        "get_orders with no fulfillment_status — it is the fallback for every order question the "
+        "stages above do not cover, never the first choice when a stage IS named.\n"
         "• Delivery providers / 'dostawcy' / 'kurierzy' → get_orders_delivery\n"
         "• 'Jakich mam dostawców/kurierów w zamówieniach do wysłania?' / which couriers are used for "
         "orders needing shipment / group orders by courier → get_orders_delivery. There is NO separate "
@@ -1768,10 +1789,21 @@ class AllegroAgent(BaseAgent):
             orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)][:limit]
 
         suffix = "\n\n" + await self._monitoring_status_block() if preset.get("monitoring_block") else ""
+        # An explicit fulfillment_status can override the preset's own stage —
+        # the stage matchers in deterministic_dispatch do exactly that to reach
+        # WYSŁANE/ODEBRANE — and then the preset's wording names the wrong one
+        # ("Brak zamówień gotowych do wysłania" for a question about parcels
+        # already sent). Fall back to the stage's own name in that case.
+        if fulfillment_status and fulfillment_status != preset.get("fulfillment_status"):
+            stage_pl = self._fulfillment_pl(fulfillment_status)
+            empty_msg = f"Brak zamówień w statusie: {stage_pl}."
+            count_label = f"Liczba zamówień w statusie {stage_pl}"
+        else:
+            empty_msg, count_label = preset["empty"], preset["count_label"]
         if tool_input.get("count_only"):
-            return f"{preset['count_label']}: {len(orders)}." + suffix
+            return f"{count_label}: {len(orders)}." + suffix
         if not orders:
-            return preset["empty"] + suffix
+            return empty_msg + suffix
 
         carrier_map: dict[str, str] = {}
         if include_delivery:
