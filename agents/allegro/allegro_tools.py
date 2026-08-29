@@ -1072,6 +1072,35 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_clarifying_question",
+            "description": (
+                "Call this INSTEAD of any data tool when the user's message (plus conversation "
+                "history) does NOT give you enough information to pick the right tool or to fill "
+                "one of its REQUIRED parameters — e.g. you would have to invent/guess an order_id, "
+                "invoice_uuid, buyer_login, date, product name, or price that was never given "
+                "directly and was never established earlier in this conversation. Also use this "
+                "when the request is genuinely ambiguous between two different tools/intents and "
+                "the wording alone doesn't tell you which one the user means. "
+                "Ask ONE short, specific question, in the same language as the user's message, "
+                "naming exactly what you need (e.g. which order — ID or buyer login; which date "
+                "or period; which product). Do NOT call any other tool in the same turn — this is "
+                "a stop-and-ask, not a guess-and-verify."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The clarifying question to show the user, in their language.",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
 ]
 
 
@@ -1144,6 +1173,8 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "disable_invoice_reminder": "action",
     "disable_message_monitoring": "action",
     "disable_returns_monitoring": "action",
+    # Dopytanie użytkownika, gdy brak narzędzia/parametru da się jednoznacznie ustalić
+    "ask_clarifying_question": "chat",
 }
 
 # When several tools are called in the same turn, the most "structured" format
@@ -1263,8 +1294,16 @@ def matched_labels(text: str) -> set[str]:
 
 
 def tools_for_labels(labels: set[str]) -> list[dict]:
-    """Subset of ALLEGRO_TOOLS belonging to any of `labels`."""
-    return [t for t in ALLEGRO_TOOLS if _TOOL_LABELS.get(t["function"]["name"]) in labels]
+    """Subset of ALLEGRO_TOOLS belonging to any of `labels`, plus the universal
+    ask_clarifying_question escape hatch. It carries no domain label of its own
+    (see _TOOL_LABELS) because it must stay reachable no matter which topic the
+    query matched — it's the fallback for a missing/ambiguous parameter WITHIN
+    whatever domain got matched, not a domain in itself."""
+    return [
+        t for t in ALLEGRO_TOOLS
+        if _TOOL_LABELS.get(t["function"]["name"]) in labels
+        or t["function"]["name"] == "ask_clarifying_question"
+    ]
 
 
 def select_tools_for_context(text: str) -> list[dict] | None:

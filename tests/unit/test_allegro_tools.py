@@ -70,9 +70,15 @@ class TestToolLabelCoverage:
     tool (no label, or a label with no stems) would silently vanish from
     every tool-select call regardless of what the user asks."""
 
+    # ask_clarifying_question is deliberately label-less — tools_for_labels()
+    # injects it into every filtered subset regardless of topic (see its
+    # docstring), since it's the escape hatch for a missing/ambiguous
+    # parameter WITHIN whatever domain got matched, not a domain itself.
+    _UNLABELED_TOOLS = frozenset({"ask_clarifying_question"})
+
     def test_every_tool_has_a_label(self):
         from agents.allegro.allegro_tools import ALLEGRO_TOOLS, _TOOL_LABELS
-        names = {t["function"]["name"] for t in ALLEGRO_TOOLS}
+        names = {t["function"]["name"] for t in ALLEGRO_TOOLS} - self._UNLABELED_TOOLS
         assert names == set(_TOOL_LABELS.keys())
 
     def test_every_label_has_stems(self):
