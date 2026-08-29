@@ -67,6 +67,10 @@ CASES: list[Case] = [
          "Które zamówienia czekają na wysyłkę?",
          ("Podsumowanie kurierów", "Numer śledzenia", "Punkt odbioru"),
          note="Gotowe do wysyłki + mapowanie kurierów i linki do śledzenia."),
+    Case("get_orders_delivery__sent", "get_orders_delivery", {"fulfillment_status": "SENT"},
+         "Co już poszło do klientów?",
+         ("Podsumowanie kurierów", "JJD000390007312345678"),
+         note="Etap WYSŁANE — ten sam widok kurierski, ale dla paczek już nadanych."),
 
     # ── Oferty i stany magazynowe ────────────────────────────────────────────
     Case("get_active_offers", "get_active_offers", {},

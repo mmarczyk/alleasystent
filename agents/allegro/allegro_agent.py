@@ -294,8 +294,13 @@ class AllegroAgent(BaseAgent):
         "→ get_thread_messages). NEVER invent or guess a UUID to satisfy get_order_details — a made-up "
         "ID just fails against the Allegro API and the user gets no answer at all. When a step "
         "returns nothing to continue with, say so instead of calling the next tool with a guess.\n"
-        "• Unsent / 'niewysłane' / 'do wysłania' → get_orders_delivery (fulfillment_status=READY_FOR_SHIPMENT)\n"
-        "• Not packed / 'niespakowane' / 'do spakowania' → get_new_orders (fulfillment_status=NEW)\n"
+        "• ORDER STAGE — pick the tool from the STAGE the user names, however they name it (the same stage gets asked formally, colloquially and as a count):\n"
+        "   – NOWE: 'nowe', 'świeże', 'do obsłużenia', 'złożone', 'zarejestrowane', 'oczekujące na potwierdzenie', 'co nowego wpadło', 'co mam zacząć', 'co czeka na start', 'nietknięte', 'ile w kolejce' — and the still-to-pack wording 'do spakowania' / 'co mam spakować' / 'niespakowane' → get_new_orders (fulfillment_status=NEW)\n"
+        "   – W REALIZACJI: 'w trakcie', 'w realizacji', 'przetwarzane', 'w toku', 'kompletowane', 'co teraz kompletuję', 'co mam w robocie', 'nad czym siedzę', 'nieskończone', 'do dokończenia' → get_orders with fulfillment_status=PROCESSING\n"
+        "   – DO WYSŁANIA: 'gotowe do wysyłki', 'oczekujące na wysyłkę', 'czekają na wysyłkę', 'do wysłania', 'niewysłane', 'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania' → get_orders_delivery (fulfillment_status empty = READY_FOR_SHIPMENT)\n"
+        "   – WYSŁANE: 'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', 'co już poszło', 'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało' → get_orders_delivery with fulfillment_status=SENT\n"
+        "   – ODEBRANE: 'odebrane', 'dostarczone', 'zrealizowane', 'zakończone', 'co już dotarło', 'co klient odebrał', 'ile dostarczonych', 'ile zamkniętych' → get_orders with fulfillment_status=PICKED_UP\n"
+        "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → get_orders with no fulfillment_status — it is the fallback for every order question the stages above do not cover, never the first choice when a stage IS named.\n"
         "• Delivery providers / 'dostawcy' / 'kurierzy' → get_orders_delivery\n"
         "• 'Jakich mam dostawców/kurierów w zamówieniach do wysłania?' / which couriers are used for "
         "orders needing shipment / group orders by courier → get_orders_delivery. There is NO separate "
@@ -2283,6 +2288,11 @@ class AllegroAgent(BaseAgent):
             if not fulfillment_status:
                 orders = [o for o in orders if o.fulfillment_status == "READY_FOR_SHIPMENT"]
             if not orders:
+                # The tool serves two stages (see its description): the default
+                # READY_FOR_SHIPMENT one and an explicit fulfillment_status —
+                # a fixed "gotowych do wysłania" would misreport the others.
+                if fulfillment_status:
+                    return f"Brak zamówień w statusie: {self._fulfillment_pl(fulfillment_status)}."
                 return "Brak zamówień gotowych do wysłania."
             courier_counts: Counter = Counter()
             blocks = []
