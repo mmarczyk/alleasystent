@@ -173,6 +173,14 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Do NOT use get_sales_summary for these — that tool is only for earnings/profit/fee "
                 "questions ('ile zarobiłem', 'jakie opłaty'), not for listing orders. "
                 "For new/pending orders use get_new_orders instead. "
+                "This is also the FALLBACK for any order question no more specific tool covers — "
+                "reach for it when the user names no fulfillment stage at all. "
+                "STAGE FILTERS only this tool can serve: 'w trakcie (realizacji)' / 'przetwarzane' / "
+                "'w toku' / 'kompletowane' / 'co mam w robocie' / 'nieskończone' / 'do dokończenia' "
+                "→ fulfillment_status=PROCESSING; 'odebrane' / 'dostarczone' / 'zrealizowane' / "
+                "'zakończone' / 'co już dotarło' / 'co klient odebrał' → fulfillment_status=PICKED_UP. "
+                "For the NOWE stage use get_new_orders and for DO WYSŁANIA / WYSŁANE use "
+                "get_orders_delivery (it adds the courier and tracking details those questions want). "
                 "TIME FILTERS: bought_after/before_local = order PLACEMENT time; "
                 "paid_after/before_local = PAYMENT time ('opłacone po X', 'zapłacone po X'); "
                 "dispatch_after/before_local = DISPATCH DEADLINE ('do kiedy trzeba wysłać'). "
@@ -564,8 +572,16 @@ ALLEGRO_TOOLS: list[dict] = [
                 "which delivery methods were selected, tracking numbers, or any question "
                 "combining orders with shipping/courier/delivery. "
                 "Default (no filters): orders with fulfillment_status=READY_FOR_SHIPMENT "
-                "(packed and awaiting carrier handoff) — i.e. 'do wysłania' / 'niewysłane'. "
-                "Use SENT only when explicitly asking about already-shipped orders."
+                "(packed and awaiting carrier handoff). "
+                "STAGE 'DO WYSŁANIA' — leave fulfillment_status EMPTY for any wording meaning the "
+                "parcel still has to go out: 'do wysłania', 'gotowe do wysyłki', 'czekają/oczekujące "
+                "na wysyłkę', 'niewysłane', 'do nadania', 'przygotowane do nadania', 'zapakowane' "
+                "(already packed), 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania'. "
+                "STAGE 'WYSŁANE' — set fulfillment_status=SENT for wording meaning it already left: "
+                "'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', 'co już poszło', "
+                "'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało'. "
+                "NOTE 'do spakowania'/'co mam spakować'/'niespakowane' is the PREVIOUS stage (not yet "
+                "packed) — that is get_new_orders, not this tool."
             ),
             "parameters": _order_params(
                 "status", "fulfillment_status", "buyer_login",
@@ -1266,7 +1282,20 @@ _TOOL_LABELS: dict[str, str] = {
 # above (the words already given there as the phrases that should trigger
 # it) plus the label's own name and its common alternate spelling.
 _LABEL_STEMS: dict[str, tuple[str, ...]] = {
-    "zamowienia": ("zamow", "zamaw", "order", "paczk", "przesyl", "wysylk", "kurier", "dostaw"),
+    # The trailing block is the order-STAGE vocabulary (see
+    # deterministic_dispatch._ORDER_STAGE_SIGNALS): a seller often names the
+    # stage without naming orders at all — "co czeka na kuriera?", "co mam w
+    # robocie?", "ile dostarczonych?" — and without these stems Layer 1 finds
+    # no label and falls back to all ~37 schemas. Words that name a stage but
+    # are equally at home in another domain ("do obsłużenia", "czekające" —
+    # both also returns wording) are deliberately left out: two labels would
+    # only disable the deterministic layer for BOTH domains.
+    "zamowienia": ("zamow", "zamaw", "order", "paczk", "przesyl", "wysylk", "kurier", "dostaw",
+                   "wysla", "nadan", "spakow", "zapakow", "wpad", "nietkni", "kolejc", "rozpocz",
+                   "trakci", "realizacj", "zrealizow", "przetwarz", "kompletu", "kompletow",
+                   "robocie", "nieskoncz", "nieukoncz", "dokoncz", "wywoz", "transporcie",
+                   "przewozn", "poszl", "wyjecha", "dotar", "odebr", "odbior", "dostarcz",
+                   "zakonczon", "zamkni", "odhaczy"),
     "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj"),
     "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),

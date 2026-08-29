@@ -14,7 +14,11 @@ from agents.allegro.allegro_tools import ALLEGRO_TOOLS
 from tests.tools.cases import CASES, CASES_BY_ID, COVERED_TOOLS, Case
 from tests.tools.runner import run_case
 
-TOOL_NAMES = {t["function"]["name"] for t in ALLEGRO_TOOLS}
+# ask_clarifying_question never reaches _execute_tool: it is an intent
+# signal, not a data tool — AllegroAgent.run() short-circuits on it and
+# returns the question itself, so there is no tool output to exercise here.
+NON_DISPATCH_TOOLS = {"ask_clarifying_question"}
+TOOL_NAMES = {t["function"]["name"] for t in ALLEGRO_TOOLS} - NON_DISPATCH_TOOLS
 
 # Phrases the agent emits when a tool blew up — never acceptable output.
 ERROR_MARKERS = (

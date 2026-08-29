@@ -39,6 +39,117 @@ class TestGetNewOrders:
         assert _resolve("jacy kurierzy w nowych zamówieniach") is None
 
 
+class TestOrderStageVocabulary:
+    """The five order stages and the three registers a seller asks each of them
+    in — formal, colloquial and count (see deterministic_dispatch's
+    _ORDER_STAGE_SIGNALS)."""
+
+    @pytest.mark.parametrize("query", [
+        # formalne
+        "nowe zamówienia",
+        "świeże zamówienia",
+        "zamówienia do obsłużenia",
+        "jakie zamówienia są złożone",
+        "zamówienia zarejestrowane",
+        "zamówienia oczekujące",
+        # potoczne
+        "co nowego wpadło w zamówieniach",
+        "jakie zamówienia są jeszcze nietknięte",
+        # do spakowania = wciąż NOWE, nie 'do wysłania'
+        "które zamówienia mam spakować",
+        "zamówienia do spakowania",
+        "niespakowane zamówienia",
+    ])
+    def test_new_stage(self, query):
+        assert _resolve(query) == ("get_new_orders", {})
+
+    @pytest.mark.parametrize("query", [
+        "które zamówienia są w trakcie realizacji",
+        "zamówienia przetwarzane",
+        "które zamówienia są w toku",
+        "co teraz kompletuję",
+        "co mam w robocie",
+        "które zamówienia są nieskończone",
+        "co zostało do dokończenia w zamówieniach",
+    ])
+    def test_in_progress_stage(self, query):
+        assert _resolve(query) == ("get_orders", {"fulfillment_status": "PROCESSING"})
+
+    @pytest.mark.parametrize("query", [
+        "Które zamówienia czekają na wysyłkę?",
+        "pokaż mi zamówienia do wysłania",
+        "zamówienia gotowe do wysyłki",
+        "zamówienia oczekujące na wysyłkę",
+        "niewysłane zamówienia",
+        "zamówienia przygotowane do nadania",
+        "zapakowane zamówienia",
+        "co czeka na kuriera",
+        "paczki do nadania",
+        "ile mam gotowych do wysyłki",
+        "co jest gotowe do wywózki",
+    ])
+    def test_to_ship_stage(self, query):
+        assert _resolve(query) == ("get_orders_delivery", {})
+
+    @pytest.mark.parametrize("query", [
+        "wysłane zamówienia",
+        "które zamówienia są w transporcie",
+        "zamówienia przekazane przewoźnikowi",
+        "co już poszło",
+        "co odebrał kurier",
+        "które paczki już wyjechały",
+    ])
+    def test_shipped_stage(self, query):
+        assert _resolve(query) == ("get_orders_delivery", {"fulfillment_status": "SENT"})
+
+    @pytest.mark.parametrize("query", [
+        "odebrane zamówienia",
+        "które zamówienia są dostarczone",
+        "które zamówienia są zrealizowane",
+        "które paczki dotarły",
+        "co klient odebrał",
+    ])
+    def test_delivered_stage(self, query):
+        assert _resolve(query) == ("get_orders", {"fulfillment_status": "PICKED_UP"})
+
+    def test_shipping_plan_wins_over_shipped_wording(self):
+        """'do wysłania' shares its stem with 'wysłane' — the plan sense must
+        win, or every DO WYSŁANIA question would report already-sent parcels."""
+        assert _resolve("zamówienia do wysłania") == ("get_orders_delivery", {})
+
+    @pytest.mark.parametrize("query", [
+        "które zamówienia są spakowane, a które już wysłane",   # two stages
+        "zamówienia w realizacji i te odebrane",                 # two stages
+    ])
+    def test_bails_on_mixed_stages(self, query):
+        assert _resolve(query) is None
+
+    @pytest.mark.parametrize("query", [
+        "ile zamówień wysłałem dzisiaj",          # period — this layer has no clock
+        "zamówienia wysłane w tym miesiącu",      # period
+        "status zamówień gotowych do wysyłki",    # detail intent
+        "faktury do wysłanych zamówień",          # invoices, not a plain listing
+    ])
+    def test_bails_like_the_rest_of_the_layer(self, query):
+        assert _resolve(query) is None
+
+    @pytest.mark.parametrize("query,expected", [
+        ("ile zamówień jest w trakcie", ("get_orders", {"fulfillment_status": "PROCESSING", "count_only": True})),
+        ("ile zamówień zrealizowanych", ("get_orders", {"fulfillment_status": "PICKED_UP", "count_only": True})),
+        ("ile paczek do nadania", ("get_orders_delivery", {"count_only": True})),
+        ("ile przesyłek już wyjechało", ("get_orders_delivery", {"fulfillment_status": "SENT", "count_only": True})),
+    ])
+    def test_counting_a_stage_counts_that_stage(self, query, expected):
+        """'ile ...' + 'zamówień' used to mean get_new_orders(count_only) no
+        matter what stage was named — 'ile zamówień jest w trakcie' answered
+        with the NEW count. The count question also names what the seller
+        handles ('ile paczek do nadania'), not always the order itself."""
+        assert _resolve(query) == expected
+
+    def test_stageless_listing_stays_the_llm_fallback(self):
+        assert _resolve("pokaż zamówienia") is None
+
+
 class TestGetOrdersDelivery:
     """'Do wysłania' is the ready-to-ship preset of the same listing, so it
     resolves without an LLM round-trip too."""

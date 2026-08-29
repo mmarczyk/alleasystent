@@ -58,10 +58,116 @@ def _is_count_only(query: str, topic_re: re.Pattern) -> bool:
     return bool(_COUNT_QUESTION_RE.search(query) and topic_re.search(query))
 
 
-# ── zamowienia: get_new_orders ──────────────────────────────────────────────
+# ── zamowienia: the order-stage vocabulary ──────────────────────────────────
+# An order moves through five stages, and a seller names the stage they mean
+# in almost every order question they ask — but with wildly different wording
+# for the same stage: formal ("gotowe do wysyłki"), colloquial ("co czeka na
+# kuriera"), or as a count ("ile paczek do nadania?"). Each bucket below
+# collects all three registers for one stage, and each stage maps to the tool
+# that can actually filter it:
+#
+#   nowe          → get_new_orders      (READY_FOR_PROCESSING + NEW)
+#   w realizacji  → get_orders          (fulfillment_status=PROCESSING)
+#   do wysłania   → get_orders_delivery (READY_FOR_SHIPMENT — its default)
+#   wysłane       → get_orders_delivery (fulfillment_status=SENT)
+#   odebrane      → get_orders          (fulfillment_status=PICKED_UP)
+#
+# get_orders WITHOUT a status is deliberately not resolved here: a stage-less
+# "pokaż zamówienia" is nearly always really about a period, a buyer or some
+# other filter this layer can't extract, so it stays the LLM's fallback.
 _ORDERS_TOPIC_RE = re.compile(r"zamów", re.IGNORECASE)
-_ORDERS_NEW_SIGNAL_RE = re.compile(r"\bnow[eyąą]\b|\bnew\b|\boczekuj|co\s+nowego", re.IGNORECASE)
+# Counting questions name what the seller physically handles as often as
+# they name the order itself — "ile paczek do nadania?", "ile przesyłek
+# czeka na kuriera?" — and those must still resolve to count_only.
+_ORDERS_COUNT_TOPIC_RE = re.compile(r"zamów|paczk|paczek|przesy[łl]", re.IGNORECASE)
 _ORDERS_SINGULAR_RE = re.compile(r"ostatni[eaąm]|najnowsz[ea]|\blast\b", re.IGNORECASE)
+
+# NOWE. "oczekujące" belongs here ("oczekujące na potwierdzenie") EXCEPT when
+# it's the awaiting-shipment sense — the trailing \b is load-bearing: without
+# it \w* backtracks a letter and the negative lookahead passes on the very
+# phrasing it exists to exclude.
+_STATUS_NEW_RE = re.compile(
+    r"\bnow[eyaąę]\w*|\bnew\b|świe[żz]\w*|swiez\w*|do\s+obs[łl]u[żz]enia|"
+    r"z[łl]o[żz]on\w*|zarejestrowan\w*|przyj[ęe]t\w*\s+do\s+systemu|"
+    r"oczekuj\w*\b(?!\s+na\s+(?:wysy|wys[łl]a|nada|kurier))|"
+    r"co\s+nowego|wpad[łl]\w*|nietkni[ęe]t\w*|na\s+start\w*|do\s+rozpocz[ęe]cia|"
+    r"zacz[ąa][ćc]\s+robi[ćc]|w\s+kolejce|"
+    # Packing is what turns a NEW order into a READY_FOR_SHIPMENT one, so the
+    # TO-DO forms ('do spakowania', 'co mam spakować') are asking for orders
+    # that are still NEW — only the DONE forms ('spakowane', 'zapakowane',
+    # below) mean the parcel is already waiting for the courier.
+    r"do\s+spakowania|spakowa[ćc]|niespakowan\w*",
+    re.IGNORECASE,
+)
+
+# W REALIZACJI
+_STATUS_IN_PROGRESS_RE = re.compile(
+    r"w\s+trakcie|w\s+realizacji|na\s+etapie\s+realizacji|przetwarzan\w*|\bw\s+toku\b|"
+    r"kompletowan\w*|kompletuj\w*|w\s+robocie|nad\s+czym\s+siedz\w*|"
+    r"nie(?:s|u)ko[ńn]czon\w*|do\s+doko[ńn]czenia",
+    re.IGNORECASE,
+)
+
+# DO WYSŁANIA
+_STATUS_TO_SHIP_RE = re.compile(
+    r"gotow\w*\s+do\s+(?:wysy[łl]ki|wys[łl]ania|nadania|wyw[óo]zki)|"
+    r"do\s+wys[łl]ania|do\s+wysy[łl]ki|do\s+nadania|do\s+wyw[óo]zki|"
+    r"(?:o?czekaj\w*|o?czeka|oczekuj\w*)\s+na\s+(?:wysy[łl]k\w*|kuriera|nadanie)|"
+    r"na\s+kuriera|przygotowan\w*\s+do\s+nadania|"
+    r"\b(?:za|s)pakowan(?:e|ych|ymi|y|a)\b|niewys[łl]an\w*",
+    re.IGNORECASE,
+)
+
+# WYSŁANE
+_STATUS_SHIPPED_RE = re.compile(
+    r"wys[łl]an\w*|wys[łl]a[łl]\w*|nadan[eyi]\b|nada[łl]\w*|w\s+transporcie|"
+    r"przekazan\w*\s+przewo[źz]nikowi|posz[łl]\w*|wyjecha[łl]\w*|odebra[łl]\s+kurier",
+    re.IGNORECASE,
+)
+
+# ODEBRANE
+_STATUS_DELIVERED_RE = re.compile(
+    r"odebran\w*|klient\s+odebra[łl]|dostarczon\w*|zrealizowan\w*|zako[ńn]czon\w*|"
+    r"zamkni[ęe]t\w*|potwierdzone\s+odebranie|dotar[łl]\w*|odhaczy\w*",
+    re.IGNORECASE,
+)
+
+# Stage → (tool, arguments), for the four stages a stage word alone resolves.
+# NOWE is absent on purpose: it keeps _match_get_new_orders below, which also
+# owns the count-only and singular ("ostatnie zamówienie") branches.
+_ORDER_STAGE_TOOLS: dict[str, tuple[str, dict]] = {
+    "to_ship":     ("get_orders_delivery", {}),
+    "shipped":     ("get_orders_delivery", {"fulfillment_status": "SENT"}),
+    "in_progress": ("get_orders", {"fulfillment_status": "PROCESSING"}),
+    "delivered":   ("get_orders", {"fulfillment_status": "PICKED_UP"}),
+}
+
+_ORDER_STAGE_SIGNALS: tuple[tuple[str, re.Pattern], ...] = (
+    ("new", _STATUS_NEW_RE),
+    ("in_progress", _STATUS_IN_PROGRESS_RE),
+    ("to_ship", _STATUS_TO_SHIP_RE),
+    ("shipped", _STATUS_SHIPPED_RE),
+    ("delivered", _STATUS_DELIVERED_RE),
+)
+
+
+def _order_stage(query: str) -> str | None:
+    """The single order stage `query` names, or None when it names none or
+    several — an ambiguous or mixed question is exactly the case this layer
+    hands to the LLM rather than guessing at."""
+    hits = {stage for stage, pattern in _ORDER_STAGE_SIGNALS if pattern.search(query)}
+    # 'do wysłania' / 'niewysłane' are shipping PLANS, but they share their
+    # stem with the shipped-already wording ('wysłane'), so this one pair
+    # co-fires on a query that names only the DO WYSŁANIA stage. Blanking out
+    # the plan phrases tells the two cases apart: if a shipped wording is
+    # still there afterwards, the query really did name both stages ("które
+    # są spakowane, a które już wysłane") and stays ambiguous. Every other
+    # overlap is a genuinely mixed question and bails below.
+    if hits == {"to_ship", "shipped"}:
+        return None if _STATUS_SHIPPED_RE.search(_STATUS_TO_SHIP_RE.sub(" ", query)) else "to_ship"
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
 # Any of these means the query wants more than a bare listing — a specific
 # order's details/status/cost (get_order_details, usually chained off a
 # listing call this layer can't perform) or a date range (get_orders).
@@ -71,43 +177,56 @@ _ORDERS_BAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The stage matchers need a narrower bail list than get_new_orders' one above:
+# 'kurier' and 'wysyłka do' are core DO WYSŁANIA vocabulary, so bailing on
+# them would make those stages unreachable. What stays is what this layer
+# genuinely can't serve — one named order, and any period filter.
+_ORDER_STAGE_BAIL_RE = re.compile(
+    r"szczegó[łl]|status\b|adres\b|dane\s+do|co\s+si[eę]\s+dzieje|koszt(y)?\s+(tego|przy)|"
+    r"faktur|[0-9a-f]{8}-[0-9a-f]{4}-|wysy[łl]k[aąi]\s+do\b|termin|"
+    r"musz[ęe]\s+wys[łl]a|do\s+kiedy|" + _PERIOD_RE.pattern,
+    re.IGNORECASE,
+)
+
 
 def _match_get_new_orders(query: str) -> dict | None:
     if _ORDERS_BAIL_RE.search(query):
         return None
+    stage = _order_stage(query)
+    if stage is not None and stage != "new":
+        return None  # a later stage — one of the stage matchers owns this query
     if _is_count_only(query, _ORDERS_TOPIC_RE):
         return {"count_only": True}
-    if not _ORDERS_NEW_SIGNAL_RE.search(query):
+    if stage != "new":
         return None  # e.g. bare "jakie zamówienia mam" — ambiguous vs get_orders
     if _ORDERS_SINGULAR_RE.search(query):
         return {"limit": 1}
     return {}
 
 
-# ── zamowienia: get_orders_delivery ────────────────────────────────────────
-# "Zamówienia do wysłania" is a preset of the same listing (see
-# _ORDERS_PRESETS in AllegroAgent), so resolving it here costs nothing extra
-# and keeps the two most common order questions — "nowe" and "do wysłania" —
-# on the same, LLM-free path. Deliberately narrow: only wording that names
-# the ready-to-ship state outright, never a deadline question ("wysyłka do
-# kiedy"), which is a filter this layer can't compute.
-_ORDERS_TO_SEND_RE = re.compile(
-    r"do\s+wys[łl]ani|do\s+wysy[łl]k|niewys[łl]an|nie\s+wys[łl]an[oey]|"
-    r"gotow\w*\s+do\s+wysy[łl]k|czekaj\w*\s+na\s+wysy[łl]k",
-    re.IGNORECASE,
-)
+# All four stages below are presets of the SAME listing call (see
+# _ORDERS_PRESETS in AllegroAgent), so resolving them here costs nothing
+# beyond the arguments themselves and keeps the most common order questions
+# on the LLM-free path.
+def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
+    def _match(query: str) -> dict | None:
+        if _ORDER_STAGE_BAIL_RE.search(query) or _order_stage(query) != stage:
+            return None
+        if _ORDERS_SINGULAR_RE.search(query):
+            return None  # "ostatnie do wysłania" — a limit=1 guess isn't worth the risk
+        args = dict(_ORDER_STAGE_TOOLS[stage][1])
+        if _is_count_only(query, _ORDERS_COUNT_TOPIC_RE):
+            args["count_only"] = True
+        return args
+    return _match
 
 
-def _match_get_orders_delivery(query: str) -> dict | None:
-    if not (_ORDERS_TOPIC_RE.search(query) and _ORDERS_TO_SEND_RE.search(query)):
-        return None
-    if _PERIOD_RE.search(query):
-        return None  # a date window needs bought_/dispatch_ bounds this layer can't compute
-    if _ORDERS_SINGULAR_RE.search(query):
-        return None  # "ostatnie do wysłania" — a limit=1 guess isn't worth the risk
-    if _is_count_only(query, _ORDERS_TOPIC_RE):
-        return {"count_only": True}
-    return {}
+# get_new_orders last: the stage matchers above are the specific ones, and
+# _match_get_new_orders' count-only branch fires on a stage-less question.
+_ORDERS_MATCHERS: list[tuple[str, Callable[[str], dict | None]]] = [
+    *((tool, _stage_matcher(stage)) for stage, (tool, _) in _ORDER_STAGE_TOOLS.items()),
+    ("get_new_orders", _match_get_new_orders),
+]
 
 
 # "Szczegóły/status/koszty/faktura ostatniego (nowego) zamówienia" — the
@@ -276,10 +395,7 @@ def _match_monitoring(query: str) -> tuple[str, dict] | None:
 # Single-return matchers (tool name implied by the registry key) plus the
 # multi-outcome monitoring matcher (handled separately below).
 _LABEL_MATCHERS: dict[str, list[tuple[str, Callable[[str], dict | None]]]] = {
-    "zamowienia": [
-        ("get_orders_delivery", _match_get_orders_delivery),
-        ("get_new_orders", _match_get_new_orders),
-    ],
+    "zamowienia": _ORDERS_MATCHERS,
     "wiadomosci": [("get_message_threads", _match_get_message_threads)],
     "konto":      [("get_account_info", _match_get_account_info)],
     "oferty":     [("get_offers_summary", _match_get_offers_summary)],
