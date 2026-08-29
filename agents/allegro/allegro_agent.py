@@ -231,6 +231,13 @@ class AllegroAgent(BaseAgent):
         "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → "
         "get_orders with no fulfillment_status — it is the fallback for every order question the "
         "stages above do not cover, never the first choice when a stage IS named.\n"
+        "• DEADLINE, not stage — 'co muszę wysłać dzisiaj', 'co mam dziś do wysyłki', 'ile paczek "
+        "muszę dziś nadać', 'jakie mam dzisiaj terminy' → get_orders_due_today (everything still to "
+        "be handed over whose 'Wysyłka do' falls by the end of today, overdue included, soonest "
+        "first). Do NOT answer this with get_orders_delivery: that lists what is PACKED regardless "
+        "of deadline, so it both hides orders nobody packed yet and shows parcels not due for days. "
+        "Other horizons on the same tool: 'do jutra'/'do piątku' → dispatch_before_local with that "
+        "date at 23:59; 'co jest po terminie' → dispatch_before_local with the CURRENT time.\n"
         "• Delivery providers / 'dostawcy' / 'kurierzy' → get_orders_delivery\n"
         "• 'Jakich mam dostawców/kurierów w zamówieniach do wysłania?' / which couriers are used for "
         "orders needing shipment / group orders by courier → get_orders_delivery. There is NO separate "
@@ -1718,6 +1725,25 @@ class AllegroAgent(BaseAgent):
             "count_forms": ("zamówienie", "zamówienia", "zamówień"),
             "count_none": "Brak zamówień gotowych do wysłania.",
         },
+        # The deadline view. Unlike the presets above it is defined by WHEN the
+        # parcel has to leave, not by how far along it is, so it filters by
+        # exclusion: everything still to be handed over, whether nobody has
+        # packed it yet or it is already sitting by the door.
+        "get_orders_due_today": {
+            "status": "READY_FOR_PROCESSING",
+            "exclude_fulfillment": _DISPATCH_DONE_STATUSES,
+            # End of today. No lower bound on purpose: an order whose deadline
+            # passed yesterday is the most urgent thing on the list, not
+            # something to hide from "co muszę wysłać dzisiaj".
+            "dispatch_before_local": "23:59",
+            "sort_by_dispatch": True,
+            "limit": 50,
+            "include_delivery": True,
+            "empty": "Nic nie czeka na wysyłkę z dzisiejszym terminem.",
+            "count_lead": "Na dziś do wysłania:",
+            "count_forms": ("zamówienie", "zamówienia", "zamówień"),
+            "count_none": "Nic nie czeka na wysyłkę z dzisiejszym terminem.",
+        },
     }
 
     @classmethod
@@ -1765,12 +1791,21 @@ class AllegroAgent(BaseAgent):
             limit = int(preset["limit"])
         limit = max(1, min(limit, 100))
 
-        dispatch_after = self._optional_local_to_utc(tool_input.get("dispatch_after_local"))
-        dispatch_before = self._optional_local_to_utc(tool_input.get("dispatch_before_local"))
-        # The deadline filter runs client-side (see _dispatch_within), so fetch
-        # a full page and narrow afterwards — filtering a limit=1 fetch would
-        # usually leave nothing at all.
-        fetch_limit = 100 if (dispatch_after or dispatch_before) else limit
+        # "23:59" in a preset is resolved against the CURRENT day on every call
+        # (see _local_to_utc), so the deadline view means today whenever it runs
+        # — no date is ever baked into the preset itself.
+        dispatch_after = self._optional_local_to_utc(
+            tool_input.get("dispatch_after_local") or preset.get("dispatch_after_local")
+        )
+        dispatch_before = self._optional_local_to_utc(
+            tool_input.get("dispatch_before_local") or preset.get("dispatch_before_local")
+        )
+        exclude_fulfillment = preset.get("exclude_fulfillment") or frozenset()
+        # Both the deadline filter and the status exclusion run client-side (the
+        # Allegro API has no parameter for either — see _dispatch_within), so
+        # fetch a full page and narrow afterwards; filtering a limit=1 fetch
+        # would usually leave nothing at all.
+        fetch_limit = 100 if (dispatch_after or dispatch_before or exclude_fulfillment) else limit
 
         orders = await self._allegro.get_orders(
             status=status,
@@ -1783,8 +1818,15 @@ class AllegroAgent(BaseAgent):
             paid_at_lte=self._optional_local_to_utc(tool_input.get("paid_before_local")),
             limit=fetch_limit,
         )
+        if exclude_fulfillment:
+            orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
         if dispatch_after or dispatch_before:
-            orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)][:limit]
+            orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)]
+        if preset.get("sort_by_dispatch"):
+            # Soonest deadline first — the order the parcels have to be dealt
+            # with, not the order they were bought in.
+            orders.sort(key=lambda o: getattr(o, "dispatch_to", "") or "")
+        orders = orders[:limit]
 
         suffix = "\n\n" + await self._monitoring_status_block() if preset.get("monitoring_block") else ""
         # An explicit fulfillment_status can override the preset's own stage —

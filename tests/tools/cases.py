@@ -80,6 +80,15 @@ CASES: list[Case] = [
          "Co już poszło do klientów?",
          ("Podsumowanie kurierów", "JJD000390007312345678"),
          note="Etap WYSŁANE — ten sam widok kurierski, ale dla paczek już nadanych."),
+    Case("get_orders_due_today", "get_orders_due_today", {},
+         "Co muszę wysłać dzisiaj?",
+         ("Podsumowanie kurierów", "**Zamówienie**", "po terminie", "Wysyłka do"),
+         note="Widok terminowy: termin nadania do końca dnia, po terminie na górze, "
+              "bez paczek już nadanych (ORD_6 SENT nie wchodzi mimo minionego terminu)."),
+    Case("get_orders_due_today__count", "get_orders_due_today", {"count_only": True},
+         "Ile paczek muszę dziś nadać?",
+         ("Na dziś do wysłania:",),
+         note="count_only — sama liczba, tym samym filtrem terminu."),
 
     # ── Oferty i stany magazynowe ────────────────────────────────────────────
     Case("get_active_offers", "get_active_offers", {},

@@ -177,6 +177,59 @@ class TestGetOrdersDelivery:
         assert _resolve("do kiedy mam wysłać zamówienia") is None
 
 
+class TestOrdersDueToday:
+    """The deadline question is the one order question where a date word is not
+    a reason to bail — 'dzisiaj' is the tool's own default cut-off."""
+
+    @pytest.mark.parametrize("query", [
+        "co muszę wysłać dzisiaj",
+        "co muszę dziś wysłać",
+        "co mam dzisiaj do wysłania",
+        "co mam dziś do wysyłki",
+        "jakie mam dzisiaj terminy wysyłki",
+        "co mam dziś do nadania",
+    ])
+    def test_today_deadline_questions(self, query):
+        assert _resolve(query) == ("get_orders_due_today", {})
+
+    @pytest.mark.parametrize("query", [
+        "ile paczek muszę dziś nadać",
+        "ile zamówień mam dziś do wysłania",
+    ])
+    def test_count_only(self, query):
+        assert _resolve(query) == ("get_orders_due_today", {"count_only": True})
+
+    def test_already_shipped_today_is_not_a_deadline_question(self):
+        """'ile dziś wysłałem' is today + shipping words, but asks about
+        parcels that already left — a period question for the LLM."""
+        assert _resolve("ile dziś wysłałem") is None
+
+    def test_mixed_past_and_future_shipping_bails(self):
+        assert _resolve("co dziś wysłałem i co jeszcze muszę wysłać") is None
+
+    @pytest.mark.parametrize("query", [
+        "co muszę wysłać do jutra",            # another horizon — needs a computed date
+        "co muszę wysłać w tym tygodniu",      # ditto
+        "co muszę wysłać do 15 września",      # ditto
+        "co jest po terminie",                 # needs the current time as the cut-off
+        "do kiedy mam wysłać zamówienia",      # asks about the deadline, not for a list
+    ])
+    def test_other_horizons_stay_with_the_llm(self, query):
+        assert _resolve(query) is None
+
+    def test_today_without_a_dispatch_word_is_not_this_tool(self):
+        """'ile zamówień dzisiaj' is a placement-time question (get_orders with
+        bought_after_local), not a deadline one."""
+        assert _resolve("ile zamówień wpłynęło dzisiaj") is None
+
+    def test_deadline_beats_the_ready_to_ship_stage(self):
+        """'co mam dziś do wysłania' names the DO WYSŁANIA stage too, but the
+        deadline is the narrower answer — and the stage matchers bail on a
+        period word anyway."""
+        assert _resolve("co mam dziś do wysłania") == ("get_orders_due_today", {})
+        assert _resolve("co mam do wysłania") == ("get_orders_delivery", {})
+
+
 class TestGetMessageThreads:
     def test_bare_list(self):
         assert _resolve("pokaż wiadomości") == ("get_message_threads", {})
