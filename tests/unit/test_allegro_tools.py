@@ -70,9 +70,15 @@ class TestToolLabelCoverage:
     tool (no label, or a label with no stems) would silently vanish from
     every tool-select call regardless of what the user asks."""
 
+    # ask_clarifying_question is deliberately label-less — tools_for_labels()
+    # injects it into every filtered subset regardless of topic (see its
+    # docstring), since it's the escape hatch for a missing/ambiguous
+    # parameter WITHIN whatever domain got matched, not a domain itself.
+    _UNLABELED_TOOLS = frozenset({"ask_clarifying_question"})
+
     def test_every_tool_has_a_label(self):
         from agents.allegro.allegro_tools import ALLEGRO_TOOLS, _TOOL_LABELS
-        names = {t["function"]["name"] for t in ALLEGRO_TOOLS}
+        names = {t["function"]["name"] for t in ALLEGRO_TOOLS} - self._UNLABELED_TOOLS
         assert names == set(_TOOL_LABELS.keys())
 
     def test_every_label_has_stems(self):
@@ -109,6 +115,50 @@ class TestMatchedLabels:
     def test_english_query_matches(self):
         from agents.allegro.allegro_tools import matched_labels
         assert "zamowienia" in matched_labels("show me my new orders")
+
+
+class TestOrderListingConsistency:
+    """The three order tools are three intent presets over ONE implementation
+    (AllegroAgent._ORDERS_PRESETS) — these pin the parts of that contract that
+    live in the schemas."""
+
+    _ORDER_TOOLS = ("get_new_orders", "get_orders", "get_orders_delivery")
+
+    @pytest.fixture(autouse=True)
+    def load_tools(self):
+        from agents.allegro.allegro_tools import ALLEGRO_TOOLS
+        self.tools = ALLEGRO_TOOLS
+
+    def test_all_order_listings_reply_as_plain_text(self):
+        from agents.allegro.allegro_tools import TOOL_OUTPUT_FORMAT
+        for name in self._ORDER_TOOLS:
+            assert TOOL_OUTPUT_FORMAT[name] == "chat", f"{name} would render as a document"
+
+    def test_shared_arguments_have_one_definition(self):
+        """Same argument name ⇒ same schema (bar per-tool description/default
+        overrides), so a filter can't quietly mean two things."""
+        params = {
+            name: next(t for t in self.tools if t["function"]["name"] == name)["function"]["parameters"]["properties"]
+            for name in self._ORDER_TOOLS
+        }
+        for shared in ("status", "fulfillment_status", "buyer_login", "count_only",
+                       "dispatch_before_local"):
+            definitions = [p[shared] for p in params.values() if shared in p]
+            assert len(definitions) > 1, f"{shared} is not shared by any two order tools"
+            for definition in definitions[1:]:
+                assert definition.get("type") == definitions[0].get("type")
+                assert definition.get("enum") == definitions[0].get("enum")
+
+    def test_general_listing_carries_every_filter(self):
+        props = next(
+            t for t in self.tools if t["function"]["name"] == "get_orders"
+        )["function"]["parameters"]["properties"]
+        for expected in ("status", "fulfillment_status", "buyer_login", "line_items_sent",
+                         "bought_after_local", "bought_before_local",
+                         "paid_after_local", "paid_before_local",
+                         "dispatch_after_local", "dispatch_before_local",
+                         "include_delivery", "count_only", "limit"):
+            assert expected in props, f"get_orders lost the {expected} filter"
 
 
 class TestSelectToolsForContext:

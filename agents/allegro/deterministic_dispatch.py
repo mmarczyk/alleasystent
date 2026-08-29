@@ -76,6 +76,10 @@ def _is_count_only(query: str, topic_re: re.Pattern) -> bool:
 # "pokaż zamówienia" is nearly always really about a period, a buyer or some
 # other filter this layer can't extract, so it stays the LLM's fallback.
 _ORDERS_TOPIC_RE = re.compile(r"zamów", re.IGNORECASE)
+# Counting questions name what the seller physically handles as often as
+# they name the order itself — "ile paczek do nadania?", "ile przesyłek
+# czeka na kuriera?" — and those must still resolve to count_only.
+_ORDERS_COUNT_TOPIC_RE = re.compile(r"zamów|paczk|paczek|przesy[łl]", re.IGNORECASE)
 _ORDERS_SINGULAR_RE = re.compile(r"ostatni[eaąm]|najnowsz[ea]|\blast\b", re.IGNORECASE)
 
 # NOWE. "oczekujące" belongs here ("oczekujące na potwierdzenie") EXCEPT when
@@ -179,7 +183,8 @@ _ORDERS_BAIL_RE = re.compile(
 # genuinely can't serve — one named order, and any period filter.
 _ORDER_STAGE_BAIL_RE = re.compile(
     r"szczegó[łl]|status\b|adres\b|dane\s+do|co\s+si[eę]\s+dzieje|koszt(y)?\s+(tego|przy)|"
-    r"faktur|[0-9a-f]{8}-[0-9a-f]{4}-|" + _PERIOD_RE.pattern,
+    r"faktur|[0-9a-f]{8}-[0-9a-f]{4}-|wysy[łl]k[aąi]\s+do\b|termin|"
+    r"musz[ęe]\s+wys[łl]a|do\s+kiedy|" + _PERIOD_RE.pattern,
     re.IGNORECASE,
 )
 
@@ -199,11 +204,20 @@ def _match_get_new_orders(query: str) -> dict | None:
     return {}
 
 
+# All four stages below are presets of the SAME listing call (see
+# _ORDERS_PRESETS in AllegroAgent), so resolving them here costs nothing
+# beyond the arguments themselves and keeps the most common order questions
+# on the LLM-free path.
 def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
     def _match(query: str) -> dict | None:
         if _ORDER_STAGE_BAIL_RE.search(query) or _order_stage(query) != stage:
             return None
-        return dict(_ORDER_STAGE_TOOLS[stage][1])
+        if _ORDERS_SINGULAR_RE.search(query):
+            return None  # "ostatnie do wysłania" — a limit=1 guess isn't worth the risk
+        args = dict(_ORDER_STAGE_TOOLS[stage][1])
+        if _is_count_only(query, _ORDERS_COUNT_TOPIC_RE):
+            args["count_only"] = True
+        return args
     return _match
 
 

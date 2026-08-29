@@ -69,7 +69,7 @@ class TestOrderStageVocabulary:
         "które zamówienia są w toku",
         "co teraz kompletuję",
         "co mam w robocie",
-        "ile zamówień jest nieskończonych",
+        "które zamówienia są nieskończone",
         "co zostało do dokończenia w zamówieniach",
     ])
     def test_in_progress_stage(self, query):
@@ -84,7 +84,7 @@ class TestOrderStageVocabulary:
         "zamówienia przygotowane do nadania",
         "zapakowane zamówienia",
         "co czeka na kuriera",
-        "ile paczek do nadania",
+        "paczki do nadania",
         "ile mam gotowych do wysyłki",
         "co jest gotowe do wywózki",
     ])
@@ -97,7 +97,7 @@ class TestOrderStageVocabulary:
         "zamówienia przekazane przewoźnikowi",
         "co już poszło",
         "co odebrał kurier",
-        "ile paczek już wyjechało",
+        "które paczki już wyjechały",
     ])
     def test_shipped_stage(self, query):
         assert _resolve(query) == ("get_orders_delivery", {"fulfillment_status": "SENT"})
@@ -105,8 +105,8 @@ class TestOrderStageVocabulary:
     @pytest.mark.parametrize("query", [
         "odebrane zamówienia",
         "które zamówienia są dostarczone",
-        "ile zamówień zrealizowanych",
-        "ile paczek dotarło",
+        "które zamówienia są zrealizowane",
+        "które paczki dotarły",
         "co klient odebrał",
     ])
     def test_delivered_stage(self, query):
@@ -133,16 +133,48 @@ class TestOrderStageVocabulary:
     def test_bails_like_the_rest_of_the_layer(self, query):
         assert _resolve(query) is None
 
-    def test_stage_wins_over_the_bare_count_branch(self):
+    @pytest.mark.parametrize("query,expected", [
+        ("ile zamówień jest w trakcie", ("get_orders", {"fulfillment_status": "PROCESSING", "count_only": True})),
+        ("ile zamówień zrealizowanych", ("get_orders", {"fulfillment_status": "PICKED_UP", "count_only": True})),
+        ("ile paczek do nadania", ("get_orders_delivery", {"count_only": True})),
+        ("ile przesyłek już wyjechało", ("get_orders_delivery", {"fulfillment_status": "SENT", "count_only": True})),
+    ])
+    def test_counting_a_stage_counts_that_stage(self, query, expected):
         """'ile ...' + 'zamówień' used to mean get_new_orders(count_only) no
         matter what stage was named — 'ile zamówień jest w trakcie' answered
-        with the NEW count."""
-        assert _resolve("ile zamówień jest w trakcie") == (
-            "get_orders", {"fulfillment_status": "PROCESSING"}
-        )
+        with the NEW count. The count question also names what the seller
+        handles ('ile paczek do nadania'), not always the order itself."""
+        assert _resolve(query) == expected
 
     def test_stageless_listing_stays_the_llm_fallback(self):
         assert _resolve("pokaż zamówienia") is None
+
+
+class TestGetOrdersDelivery:
+    """'Do wysłania' is the ready-to-ship preset of the same listing, so it
+    resolves without an LLM round-trip too."""
+
+    def test_orders_to_send(self):
+        assert _resolve("które zamówienia są do wysłania") == ("get_orders_delivery", {})
+
+    def test_unsent_orders(self):
+        assert _resolve("pokaż zamówienia niewysłane") == ("get_orders_delivery", {})
+
+    def test_count_only(self):
+        assert _resolve("ile zamówień mam do wysłania") == (
+            "get_orders_delivery", {"count_only": True},
+        )
+
+    def test_bails_on_date_range(self):
+        assert _resolve("zamówienia do wysłania z tego tygodnia") is None
+
+    def test_bails_on_singular(self):
+        assert _resolve("ostatnie zamówienie do wysłania") is None
+
+    def test_deadline_question_is_not_a_ready_to_ship_question(self):
+        """'Do kiedy wysłać' asks about the dispatch deadline — a filter this
+        layer can't compute, so it must fall through to the LLM."""
+        assert _resolve("do kiedy mam wysłać zamówienia") is None
 
 
 class TestGetMessageThreads:

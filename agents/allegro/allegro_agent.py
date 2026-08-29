@@ -149,20 +149,27 @@ _CHAIN_RESULT_BUDGET = 8000
 # for cases where "chat" isn't specific enough (get_new_orders is "chat" format
 # but still needs a fixed shape, not whatever prose/table the model feels like).
 _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
-    "get_new_orders": (
+    # One instruction for all three order tools (get_new_orders / get_orders /
+    # get_orders_delivery are one implementation — see _ORDERS_PRESETS), so the
+    # answer can't change shape with the preset the model picked. Registered
+    # per tool name below rather than by format: "chat" alone would let the
+    # model lay orders out as a table, which the frontend then renders as a
+    # document artifact instead of chat text.
+    "_orders_listing": (
         "[FORMAT ODPOWIEDZI: LISTA PUNKTOWANA — NIGDY TABELA]\n"
         "Przedstaw zamówienia z danych powyżej jako listę punktowaną — jeden blok na "
         "zamówienie, dokładnie jak w danych narzędzia. NIGDY nie buduj tabeli markdown "
         "dla zamówień.\n"
-        "Dla każdego zamówienia pokaż TYLKO te pola: Zamawiający, Status, Wysyłka do, "
-        "Rodzaj dostawy, Ilość szt., Wartość, Opłacone (data i godzina). Pola Status i "
-        "Wysyłka do (termin nadania paczki) przepisz DOKŁADNIE z danych narzędzia, razem "
-        "ze znacznikiem '⚠️ po terminie', jeśli tam jest. Nie dodawaj innych pól (bez "
-        "linku, bez daty złożenia), chyba że user o nie poprosi osobno. Bez wstępu przed listą."
+        "Dla każdego zamówienia pokaż pola dokładnie w takiej kolejności, jak w danych "
+        "narzędzia: Zamawiający, Status, Wysyłka do, Rodzaj dostawy, Ilość szt., Wartość, "
+        "Opłacone, Złożone (oraz Numer śledzenia / Punkt odbioru i podsumowanie kurierów, "
+        "jeśli są w danych). Pola Status i Wysyłka do (termin nadania paczki) przepisz "
+        "DOKŁADNIE z danych narzędzia, razem ze znacznikiem '⚠️ po terminie', jeśli tam "
+        "jest. Nie dodawaj pól, których w danych nie ma. Bez wstępu przed listą."
     ),
-    "get_new_orders:count_only": (
+    "_orders_listing:count_only": (
         "[FORMAT ODPOWIEDZI: TYLKO LICZBA]\n"
-        "Użytkownik zapytał ILE jest nowych zamówień — odpowiedz JEDNYM krótkim zdaniem podającym "
+        "Użytkownik zapytał ILE jest zamówień — odpowiedz JEDNYM krótkim zdaniem podającym "
         "TYLKO liczbę z danych narzędzia powyżej (np. 'Masz 5 nowych zamówień.'). NIE wypisuj "
         "poszczególnych zamówień ani ich szczegółów, chyba że user o to poprosi osobno."
     ),
@@ -226,6 +233,14 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
     ),
 }
 
+# The order tools all point at the same two instructions above — see
+# _ORDERS_PRESETS in AllegroAgent for the shared implementation behind them.
+for _orders_tool in ("get_new_orders", "get_orders", "get_orders_delivery"):
+    _TOOL_SPECIFIC_INSTRUCTIONS[_orders_tool] = _TOOL_SPECIFIC_INSTRUCTIONS["_orders_listing"]
+    _TOOL_SPECIFIC_INSTRUCTIONS[f"{_orders_tool}:count_only"] = _TOOL_SPECIFIC_INSTRUCTIONS[
+        "_orders_listing:count_only"
+    ]
+
 # Tools whose dispatch output is already the final answer verbatim — see the
 # "Skip the interpret call entirely" block in AllegroAgent.run() for the full
 # reasoning. None of these have a _TOOL_SPECIFIC_INSTRUCTIONS entry asking the
@@ -233,6 +248,8 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
 # call is pure passthrough and gets skipped.
 _PASSTHROUGH_TOOLS = frozenset({
     "get_new_orders",
+    "get_orders",
+    "get_orders_delivery",
     "get_order_details",
     "get_new_returns",
     "get_returns_to_process",
@@ -268,11 +285,29 @@ class AllegroAgent(BaseAgent):
         "carrier). In a table these are two of the columns; in a bullet list, two of the lines. "
         "Copy both verbatim from the tool data (including the '⚠️ po terminie' marker and the "
         "'—' used when Allegro didn't return a deadline) — never compute, guess or omit them.\n"
+        "ORDER LISTINGS — get_new_orders, get_orders and get_orders_delivery are the SAME "
+        "listing with different preset filters, and all three answer as a plain-text bullet "
+        "list, never a table. Pick the one whose preset matches the intent (new/unprocessed, "
+        "arbitrary filters, ready-to-ship + couriers) and pass the filters the question "
+        "actually names: status, fulfillment_status, buyer_login, bought_after/before_local "
+        "(when the order was placed), paid_after/before_local (when it was paid), "
+        "dispatch_after/before_local (the 'Wysyłka do' deadline — use it for 'co muszę wysłać "
+        "dzisiaj/do jutra' and for overdue orders), count_only for 'ile', limit for a singular "
+        "'ostatnie zamówienie'. Never answer a filtered question with an unfiltered list.\n"
         "When answering questions about orders or offers, always fetch fresh data via tools. "
         "Present information clearly and concisely. "
         "When showing prices, always include the PLN currency. "
         "Respond in the same language as the user's question (Polish or English). "
         "Do not make up or guess any order IDs or prices — always retrieve them via tools. "
+        "CLARIFYING QUESTIONS — CRITICAL: You MUST call a tool every turn, but that tool does not "
+        "have to be a data tool. If the message plus conversation history does not give you enough "
+        "to pick the right tool OR to fill one of its REQUIRED parameters (order_id, invoice_uuid, "
+        "buyer_login, a date/period, a product/assortment name, a price, ...) without inventing or "
+        "guessing it, call ask_clarifying_question instead — never fabricate a value just to satisfy "
+        "a tool call, and never silently pick between two plausible tools when the wording is truly "
+        "ambiguous. Do not overuse it: if the value is already in this conversation (given earlier "
+        "by the user or by you), or the MANDATORY TOOL CALLS rules below already resolve which tool "
+        "and arguments to use, call that tool directly — do not ask for information you already have.\n"
         "MANDATORY TOOL CALLS — these question types MUST trigger a tool, never be answered from memory:\n"
         "• Order LIST for a period, no cost/profit/earnings wording — 'lista zamówień', 'pokaż "
         "wszystkie zamówienia z tego miesiąca', 'zamówienia z ostatniego tygodnia' → get_orders "
@@ -293,14 +328,31 @@ class AllegroAgent(BaseAgent):
         "with THAT order_id. Same for a thread you must find before reading it (get_message_threads "
         "→ get_thread_messages). NEVER invent or guess a UUID to satisfy get_order_details — a made-up "
         "ID just fails against the Allegro API and the user gets no answer at all. When a step "
-        "returns nothing to continue with, say so instead of calling the next tool with a guess.\n"
-        "• ORDER STAGE — pick the tool from the STAGE the user names, however they name it (the same stage gets asked formally, colloquially and as a count):\n"
-        "   – NOWE: 'nowe', 'świeże', 'do obsłużenia', 'złożone', 'zarejestrowane', 'oczekujące na potwierdzenie', 'co nowego wpadło', 'co mam zacząć', 'co czeka na start', 'nietknięte', 'ile w kolejce' — and the still-to-pack wording 'do spakowania' / 'co mam spakować' / 'niespakowane' → get_new_orders (fulfillment_status=NEW)\n"
-        "   – W REALIZACJI: 'w trakcie', 'w realizacji', 'przetwarzane', 'w toku', 'kompletowane', 'co teraz kompletuję', 'co mam w robocie', 'nad czym siedzę', 'nieskończone', 'do dokończenia' → get_orders with fulfillment_status=PROCESSING\n"
-        "   – DO WYSŁANIA: 'gotowe do wysyłki', 'oczekujące na wysyłkę', 'czekają na wysyłkę', 'do wysłania', 'niewysłane', 'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania' → get_orders_delivery (fulfillment_status empty = READY_FOR_SHIPMENT)\n"
-        "   – WYSŁANE: 'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', 'co już poszło', 'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało' → get_orders_delivery with fulfillment_status=SENT\n"
-        "   – ODEBRANE: 'odebrane', 'dostarczone', 'zrealizowane', 'zakończone', 'co już dotarło', 'co klient odebrał', 'ile dostarczonych', 'ile zamkniętych' → get_orders with fulfillment_status=PICKED_UP\n"
-        "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → get_orders with no fulfillment_status — it is the fallback for every order question the stages above do not cover, never the first choice when a stage IS named.\n"
+        "returns nothing to continue with, call ask_clarifying_question instead of guessing.\n"
+        "• ORDER STAGE — pick the tool from the STAGE the user names, however they name it "
+        "(the same stage gets asked formally, colloquially and as a count — for a count add "
+        "count_only=true, the stage choice does not change):\n"
+        "   – NOWE: 'nowe', 'świeże', 'do obsłużenia', 'złożone', 'zarejestrowane', "
+        "'oczekujące na potwierdzenie', 'co nowego wpadło', 'co mam zacząć', 'co czeka na start', "
+        "'nietknięte', 'ile w kolejce' — and the still-to-pack wording 'do spakowania' / "
+        "'co mam spakować' / 'niespakowane' → get_new_orders (fulfillment_status=NEW)\n"
+        "   – W REALIZACJI: 'w trakcie', 'w realizacji', 'przetwarzane', 'w toku', 'kompletowane', "
+        "'co teraz kompletuję', 'co mam w robocie', 'nad czym siedzę', 'nieskończone', "
+        "'do dokończenia' → get_orders with fulfillment_status=PROCESSING\n"
+        "   – DO WYSŁANIA: 'gotowe do wysyłki', 'oczekujące/czekają na wysyłkę', 'do wysłania', "
+        "'niewysłane', 'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
+        "'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania' → get_orders_delivery "
+        "(its default filter is already fulfillment_status=READY_FOR_SHIPMENT)\n"
+        "   – WYSŁANE: 'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', "
+        "'co już poszło', 'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało' → "
+        "get_orders_delivery with fulfillment_status=SENT (the courier and tracking details are "
+        "exactly what a question about a parcel already on its way is after)\n"
+        "   – ODEBRANE: 'odebrane', 'dostarczone', 'zrealizowane', 'zakończone', 'co już dotarło', "
+        "'co klient odebrał', 'ile dostarczonych', 'ile zamkniętych' → get_orders with "
+        "fulfillment_status=PICKED_UP\n"
+        "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → "
+        "get_orders with no fulfillment_status — it is the fallback for every order question the "
+        "stages above do not cover, never the first choice when a stage IS named.\n"
         "• Delivery providers / 'dostawcy' / 'kurierzy' → get_orders_delivery\n"
         "• 'Jakich mam dostawców/kurierów w zamówieniach do wysłania?' / which couriers are used for "
         "orders needing shipment / group orders by courier → get_orders_delivery. There is NO separate "
@@ -319,7 +371,8 @@ class AllegroAgent(BaseAgent):
         "one named order returned a 50-row table of unrelated orders). Only fall back to get_orders "
         "if you genuinely have no order_id at all (e.g. you'd have to search by buyer name/company, "
         "which get_orders can't do either — buyer_login is the Allegro login, not a company or "
-        "person's name — in that case tell the user you need the order_id or the buyer's Allegro login).\n"
+        "person's name — in that case call ask_clarifying_question asking for the order_id or the "
+        "buyer's Allegro login).\n"
         "• Whether/how many orders were PLACED in a specific TIME WINDOW ('czy dzisiaj po 8 rano były "
         "jakieś zamówienia', 'ile zamówień wpłynęło wczoraj', 'zamówienia złożone po godzinie X', "
         "'zamówienia z ostatniej godziny') → get_orders with bought_after_local/bought_before_local. "
@@ -397,7 +450,8 @@ class AllegroAgent(BaseAgent):
         "'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X'):\n"
         "  - ONE specific order named (a concrete order_id from context or given directly by the "
         "user) → issue_invoice_for_order. This is REAL — it actually creates the invoice in inFakt. "
-        "Never invent or guess an order_id; if you don't have one, ask the user or look it up first.\n"
+        "Never invent or guess an order_id; if you don't have one, call ask_clarifying_question or "
+        "look it up first.\n"
         "  - Batch / whole month, no single order named ('wystaw wszystkie faktury', 'wystaw brakujące "
         "faktury za ten miesiąc') → preview_pending_invoices. This does NOT send anything — bulk "
         "issuance is preview-only by design. Tell the user clearly that nothing was actually issued and "
@@ -409,9 +463,9 @@ class AllegroAgent(BaseAgent):
         "  - attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
         "Allegro order, so the buyer sees it on their order page. Needs order_id + invoice_uuid "
         "(invoice_uuid comes from the issue_invoice_for_order result earlier in this conversation — "
-        "never guess it, ask if it's not in context).\n"
+        "never guess it, call ask_clarifying_question if it's not in context).\n"
         "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
-        "invoice_uuid, same rule — never guess it.\n"
+        "invoice_uuid, same rule — never guess it, call ask_clarifying_question instead.\n"
         "  - If the user's ORIGINAL request already named the channel(s) ('wystaw i wyślij do KSeF i "
         "Allegro', 'wystaw i dodaj do Allegro') — just call the matching tool(s) directly, no need to ask.\n"
         "  - Otherwise: once the user confirms the issued invoice looks fine ('ok', 'faktura jest ok', "
@@ -608,7 +662,7 @@ class AllegroAgent(BaseAgent):
         # current query look multi-topic and needlessly skip this layer.
         query_labels = matched_labels(query)
         called_tools: list[str] = []
-        new_orders_count_only = False
+        orders_count_only = False
         message_threads_count_only = False
         single_tool_raw_result: str | None = None
         # tool call signature → result, so a model that re-asks for data it was
@@ -631,8 +685,8 @@ class AllegroAgent(BaseAgent):
         if det_match is not None:
             det_tool, det_input = det_match
             called_tools.append(det_tool)
-            if det_tool == "get_new_orders" and det_input.get("count_only"):
-                new_orders_count_only = True
+            if det_tool in self._ORDERS_PRESETS and det_input.get("count_only"):
+                orders_count_only = True
             if det_tool == "get_message_threads" and det_input.get("count_only"):
                 message_threads_count_only = True
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
@@ -714,6 +768,24 @@ class AllegroAgent(BaseAgent):
                     logger.warning("AllegroAgent: no tool call and no text — falling through to interpret")
                     break
 
+                # The model couldn't determine the right tool or a required parameter
+                # from the query — it asked instead of guessing/hallucinating an ID.
+                # Short-circuit here: no real Allegro call, no interpret step, and any
+                # other tool call the model bundled into the same round is dropped
+                # rather than executed against guessed arguments.
+                clarify_call = next(
+                    (tc for tc in msg.tool_calls if tc.function.name == "ask_clarifying_question"), None
+                )
+                if clarify_call:
+                    try:
+                        clarify_args = json.loads(clarify_call.function.arguments)
+                    except json.JSONDecodeError:
+                        clarify_args = {}
+                    question = clarify_args.get("question") or "Czy możesz doprecyzować, o co dokładnie chodzi?"
+                    logger.info("[allegro] ask_clarifying_question: %r | query=%.80r", question, query)
+                    perf.log(result="ask_clarifying_question")
+                    return AgentResponse(text=question, agent_type=self.agent_name, metadata={"output_format": "chat"})
+
                 messages.append({
                     "role": "assistant",
                     "content": msg.content,
@@ -727,8 +799,8 @@ class AllegroAgent(BaseAgent):
                         tool_input = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         tool_input = {}
-                    if tool_name == "get_new_orders" and tool_input.get("count_only"):
-                        new_orders_count_only = True
+                    if tool_name in self._ORDERS_PRESETS and tool_input.get("count_only"):
+                        orders_count_only = True
                     if tool_name == "get_message_threads":
                         # The user's wording overrides whatever the model decided for
                         # count_only (see _wants_message_count_only above).
@@ -787,8 +859,8 @@ class AllegroAgent(BaseAgent):
         # See _PASSTHROUGH_TOOLS above for which tools and why. count_only
         # doesn't disqualify get_new_returns/get_returns_to_process/
         # get_new_complaints (no dedicated instruction exists for them either
-        # way) but DOES disqualify get_new_orders specifically — its
-        # get_new_orders:count_only instruction demands different wording
+        # way) but DOES disqualify the order listings — their
+        # "<tool>:count_only" instruction demands different wording
         # ("Masz 5 nowych zamówień.") than the raw dispatch text ("Liczba
         # nowych zamówień: 5."). Bypassed only when this was the ONLY tool
         # called in the turn — a multi-tool turn still needs the LLM to weave
@@ -798,7 +870,7 @@ class AllegroAgent(BaseAgent):
         if (
             len(called_tools) == 1
             and called_tools[0] in _PASSTHROUGH_TOOLS
-            and not (called_tools[0] == "get_new_orders" and new_orders_count_only)
+            and not (called_tools[0] in self._ORDERS_PRESETS and orders_count_only)
             and single_tool_raw_result is not None
             and _is_confidently_polish(query)
         ):
@@ -827,7 +899,7 @@ class AllegroAgent(BaseAgent):
         # user's wording (see TOOL_OUTPUT_FORMAT in allegro_tools.py for why).
         output_format = resolve_output_format(called_tools)
         instruction_keys = [
-            "get_new_orders:count_only" if (t == "get_new_orders" and new_orders_count_only)
+            f"{t}:count_only" if (t in self._ORDERS_PRESETS and orders_count_only)
             else "get_message_threads:count_only" if (t == "get_message_threads" and message_threads_count_only)
             else t
             for t in called_tools
@@ -1107,20 +1179,10 @@ class AllegroAgent(BaseAgent):
         {"SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED"}
     )
 
-    _STATUS_PL: dict[str, str] = {
-        "BOUGHT":               "Opłacone",
-        "FILLED_IN":            "Wypełnione",
-        "READY_FOR_PROCESSING": "Gotowe do realizacji",
-        "CANCELLED":            "Anulowane",
-    }
-
     @classmethod
     def _fulfillment_pl(cls, status: str | None) -> str:
         return cls._FULFILLMENT_PL.get(status or "", status or "—")
 
-    @classmethod
-    def _status_pl(cls, status: str | None) -> str:
-        return cls._STATUS_PL.get(status or "", status or "—")
     _TRACKING_URLS: dict[str, str] = {
         "INPOST":          "https://inpost.pl/sledzenie-przesylek?number={code}",
         "DHL":             "https://www.dhl.com/pl-pl/home/tracking.html?tracking-id={code}&submit=1",
@@ -1351,26 +1413,58 @@ class AllegroAgent(BaseAgent):
         return datetime.now(cls._WARSAW).date().isoformat()
 
     @classmethod
-    def _new_order_bullet(cls, o: Any) -> str:
-        """Render one new order as a bullet-list block with exactly the fields
-        the store owner asked for: buyer, current status, dispatch deadline,
-        delivery type, item count, value, payment date/time. No link and no
-        order-creation date — those are for get_orders / get_order_details,
-        not this compact new-orders view."""
+    def _order_bullet(
+        cls,
+        o: Any,
+        *,
+        carrier_map: dict[str, str] | None = None,
+        include_delivery: bool = False,
+        extra_lines: list[str] | None = None,
+    ) -> str:
+        """Render ONE order as the bullet block that every order listing uses.
+
+        Deliberately the only order renderer left: get_new_orders,
+        get_orders, get_orders_delivery and get_orders_pending_invoice each
+        had their own block before, differing in field order and even in
+        timezone (one printed raw UTC timestamps, the other Warsaw local
+        time), so the same order read differently depending on which tool
+        happened to fetch it. Fields, in the order the store owner asked for:
+        buyer, status, dispatch deadline, delivery type, quantity, value,
+        payment time, order time — then courier details when the caller asked
+        for them, any caller-specific extras, and the panel link.
+        """
         d = o.delivery if isinstance(o.delivery, dict) else {}
-        delivery_name = cls._dig(d, "method", "name", default="—")
+        carrier_id = cls._dig(d, "method", "id", default="")
+        delivery_name = (carrier_map or {}).get(carrier_id) or cls._dig(d, "method", "name", default="—")
         total_qty = sum(li.quantity for li in o.line_items)
         price = cls._format_price(o.total_price, o.currency)
-        return (
-            f"**Zamówienie** `{o.order_id}`\n"
-            f"- Zamawiający: **{o.buyer_login}**\n"
-            f"- Status: **{cls._fulfillment_pl(o.fulfillment_status)}**\n"
-            f"- Wysyłka do: **{cls._dispatch_deadline_pl(o)}**\n"
-            f"- Rodzaj dostawy: {delivery_name}\n"
-            f"- Ilość: {total_qty} szt.\n"
-            f"- Wartość: **{price}**\n"
-            f"- Opłacone: {cls._format_dt_pl(o.paid_at)}"
-        )
+        lines = [
+            f"**Zamówienie** `{o.order_id}`",
+            f"- Zamawiający: **{o.buyer_login}**",
+            f"- Status: **{cls._fulfillment_pl(o.fulfillment_status)}**",
+            f"- Wysyłka do: **{cls._dispatch_deadline_pl(o)}**",
+            f"- Rodzaj dostawy: {delivery_name}",
+            f"- Ilość: {total_qty} szt.",
+            f"- Wartość: **{price}**",
+            f"- Opłacone: {cls._format_dt_pl(o.paid_at)}",
+        ]
+        if o.created_at:
+            lines.append(f"- Złożone: {cls._format_dt_pl(o.created_at)}")
+        if include_delivery:
+            tracking = (
+                cls._dig(d, "smart", "trackingCode", default=None)
+                or cls._dig(d, "trackingCode", default="—")
+            )
+            tracking_url = cls._tracking_url(carrier_id, tracking)
+            tracking_str = f"[{tracking}]({tracking_url})" if tracking_url else tracking
+            lines.append(f"- Numer śledzenia: {tracking_str}")
+            pickup_name = cls._dig(d, "pickupPoint", "name", default=None)
+            if pickup_name:
+                lines.append(f"- Punkt odbioru: {pickup_name}")
+        if extra_lines:
+            lines.extend(f"- {line}" for line in extra_lines)
+        lines.append(f"- Link: https://allegro.pl/sprzedaz/zamowienia/{o.order_id}")
+        return "\n".join(lines)
 
     # A period query lists everything in the window, which for a busy month can
     # be hundreds of returns — far more than a chat reply should dump. 50 is the
@@ -1477,33 +1571,6 @@ class AllegroAgent(BaseAgent):
         ]
         if due:
             lines.append(f"- Termin decyzji: {cls._format_dt_pl(due)}")
-        return "\n".join(lines)
-
-    @classmethod
-    def _order_block(cls, o: Any, extra_lines: list[str] | None = None) -> str:
-        """Render a single order as a markdown bullet-point block."""
-        price = cls._format_price(o.total_price, o.currency)
-        d = o.delivery if isinstance(o.delivery, dict) else {}
-        delivery_name = cls._dig(d, "method", "name", default="—")
-        total_qty = sum(li.quantity for li in o.line_items)
-        link = f"https://allegro.pl/sprzedaz/zamowienia/{o.order_id}"
-        fulfillment = cls._fulfillment_pl(o.fulfillment_status)
-        lines = [
-            f"**Zamówienie** `{o.order_id}`",
-            f"- Kupujący: **{o.buyer_login}**",
-            f"- Wartość: **{price}**",
-            f"- Status realizacji: **{fulfillment}**",
-            f"- Wysyłka do: **{cls._dispatch_deadline_pl(o)}**",
-            f"- Dostawa: {delivery_name}",
-            f"- Produkty: {total_qty} szt.",
-        ]
-        if o.created_at:
-            lines.insert(1, f"- Data złożenia: {o.created_at} (UTC)")
-        if o.paid_at:
-            lines.insert(2 if o.created_at else 1, f"- Opłacone: {o.paid_at} (UTC)")
-        if extra_lines:
-            lines.extend(f"- {l}" for l in extra_lines)
-        lines.append(f"- Link: {link}")
         return "\n".join(lines)
 
     async def _preview_pending_invoices(self, month: int | None, year: int | None) -> str:
@@ -1621,42 +1688,156 @@ class AllegroAgent(BaseAgent):
             "Wysyłka do KSeF jest asynchroniczna — ostateczny status sprawdź w panelu inFakt."
         )
 
+    # ── Order listing: one implementation behind three tools ─────────────────
+    # get_new_orders / get_orders / get_orders_delivery exist as separate tool
+    # schemas only so the model can route intents against named presets (see
+    # the comment above _ORDER_PARAMS in allegro_tools.py). Functionally they
+    # are this table plus _orders_listing() below — same call, same rendering,
+    # same "chat" output format — so "nowe zamówienia" and "zamówienia do
+    # wysłania" can no longer come back in two different shapes.
+    _ORDERS_PRESETS: dict[str, dict[str, Any]] = {
+        "get_new_orders": {
+            "status": "READY_FOR_PROCESSING",
+            "fulfillment_status": "NEW",
+            "limit": 100,
+            "empty": "Brak nowych zamówień.",
+            "count_label": "Liczba nowych zamówień",
+            # Only the new-orders view carries the automatic-checking status
+            # block + button; a filtered/period listing is a one-off question,
+            # not the "watch my inbox" view the toggle belongs to.
+            "monitoring_block": True,
+        },
+        "get_orders": {
+            "limit": 50,
+            "empty": "Brak zamówień spełniających podane kryteria.",
+            "count_label": "Liczba zamówień",
+        },
+        "get_orders_delivery": {
+            "status": "READY_FOR_PROCESSING",
+            "fulfillment_status": "READY_FOR_SHIPMENT",
+            "limit": 50,
+            "include_delivery": True,
+            "empty": "Brak zamówień gotowych do wysłania.",
+            "count_label": "Liczba zamówień gotowych do wysłania",
+        },
+    }
+
+    @classmethod
+    def _optional_local_to_utc(cls, time_str: str | None) -> str | None:
+        """_local_to_utc for an optional argument: None (no filter) when absent
+        or unparseable — answering about a wider window is recoverable, blowing
+        up on the user's question isn't."""
+        if not time_str:
+            return None
+        try:
+            return cls._local_to_utc(time_str)
+        except (ValueError, TypeError):
+            logger.warning("_optional_local_to_utc: unparseable time %r, ignoring", time_str)
+            return None
+
+    @classmethod
+    def _dispatch_within(cls, o: Any, after: str | None, before: str | None) -> bool:
+        """Does this order's dispatch deadline fall inside [after, before]?
+
+        Allegro has no query parameter for delivery.time.dispatch.to, so this
+        filter is applied client-side. An order with no deadline at all is
+        excluded: "co muszę wysłać do jutra" must not answer with orders whose
+        deadline is simply unknown.
+        """
+        deadline = getattr(o, "dispatch_to", "") or ""
+        if not deadline:
+            return False
+        if after and deadline < after:
+            return False
+        if before and deadline > before:
+            return False
+        return True
+
+    async def _orders_listing(self, tool_name: str, tool_input: dict[str, Any]) -> str:
+        """The one order-listing implementation, shared by all three order
+        tools. `tool_name` only picks the preset defaults in _ORDERS_PRESETS;
+        every explicit argument the model passed wins over them."""
+        preset = self._ORDERS_PRESETS.get(tool_name, self._ORDERS_PRESETS["get_orders"])
+        status = tool_input.get("status") or preset.get("status")
+        fulfillment_status = tool_input.get("fulfillment_status") or preset.get("fulfillment_status")
+        include_delivery = bool(tool_input.get("include_delivery", preset.get("include_delivery", False)))
+        try:
+            limit = int(tool_input.get("limit") or preset["limit"])
+        except (TypeError, ValueError):
+            limit = int(preset["limit"])
+        limit = max(1, min(limit, 100))
+
+        dispatch_after = self._optional_local_to_utc(tool_input.get("dispatch_after_local"))
+        dispatch_before = self._optional_local_to_utc(tool_input.get("dispatch_before_local"))
+        # The deadline filter runs client-side (see _dispatch_within), so fetch
+        # a full page and narrow afterwards — filtering a limit=1 fetch would
+        # usually leave nothing at all.
+        fetch_limit = 100 if (dispatch_after or dispatch_before) else limit
+
+        orders = await self._allegro.get_orders(
+            status=status,
+            buyer_login=tool_input.get("buyer_login"),
+            fulfillment_status=fulfillment_status,
+            line_items_sent=tool_input.get("line_items_sent"),
+            bought_at_gte=self._optional_local_to_utc(tool_input.get("bought_after_local")),
+            bought_at_lte=self._optional_local_to_utc(tool_input.get("bought_before_local")),
+            paid_at_gte=self._optional_local_to_utc(tool_input.get("paid_after_local")),
+            paid_at_lte=self._optional_local_to_utc(tool_input.get("paid_before_local")),
+            limit=fetch_limit,
+        )
+        if dispatch_after or dispatch_before:
+            orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)][:limit]
+
+        suffix = "\n\n" + await self._monitoring_status_block() if preset.get("monitoring_block") else ""
+        # An explicit fulfillment_status can override the preset's own stage —
+        # the stage matchers in deterministic_dispatch do exactly that to reach
+        # WYSŁANE/ODEBRANE — and then the preset's wording names the wrong one
+        # ("Brak zamówień gotowych do wysłania" for a question about parcels
+        # already sent). Fall back to the stage's own name in that case.
+        if fulfillment_status and fulfillment_status != preset.get("fulfillment_status"):
+            stage_pl = self._fulfillment_pl(fulfillment_status)
+            empty_msg = f"Brak zamówień w statusie: {stage_pl}."
+            count_label = f"Liczba zamówień w statusie {stage_pl}"
+        else:
+            empty_msg, count_label = preset["empty"], preset["count_label"]
+        if tool_input.get("count_only"):
+            return f"{count_label}: {len(orders)}." + suffix
+        if not orders:
+            return empty_msg + suffix
+
+        carrier_map: dict[str, str] = {}
+        if include_delivery:
+            # id→name from the carriers endpoint, with the order's own
+            # method.name as fallback (see _order_bullet). A failure here only
+            # costs the nicer names, never the listing itself.
+            try:
+                carrier_map = {c["id"]: c.get("name", c["id"]) for c in await self._allegro.get_carriers()}
+            except Exception as exc:
+                logger.warning("[allegro] carrier lookup failed, using order delivery names: %s", exc)
+
+        blocks = [
+            self._order_bullet(o, carrier_map=carrier_map, include_delivery=include_delivery)
+            for o in orders
+        ]
+        body = "\n\n".join(blocks)
+        if include_delivery:
+            courier_counts: Counter = Counter(
+                carrier_map.get(self._dig(o.delivery if isinstance(o.delivery, dict) else {}, "method", "id", default=""))
+                or self._dig(o.delivery if isinstance(o.delivery, dict) else {}, "method", "name", default="—")
+                for o in orders
+            )
+            summary = "**Podsumowanie kurierów:**\n" + "\n".join(
+                f"- {method}: {count} zamówień" for method, count in courier_counts.most_common()
+            )
+            body = summary + "\n\n---\n\n" + body
+        return body + suffix
+
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
     async def _dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         logger.info("DEBUG _dispatch: tool=%s input=%s", tool_name, tool_input)
-        if tool_name == "get_new_orders":
-            orders = await self._allegro.get_orders(
-                status="READY_FOR_PROCESSING",
-                fulfillment_status="NEW",
-                buyer_login=tool_input.get("buyer_login"),
-                limit=min(int(tool_input.get("limit", 100)), 100),
-            )
-            if tool_input.get("count_only"):
-                body = f"Liczba nowych zamówień: {len(orders)}."
-            else:
-                body = "Brak nowych zamówień." if not orders else "\n\n".join(self._new_order_bullet(o) for o in orders)
-            return body + "\n\n" + await self._monitoring_status_block()
-
-        if tool_name == "get_orders":
-            bought_after = tool_input.get("bought_after_local")
-            bought_before = tool_input.get("bought_before_local")
-            paid_after = tool_input.get("paid_after_local")
-            paid_before = tool_input.get("paid_before_local")
-            orders = await self._allegro.get_orders(
-                status=tool_input.get("status"),
-                buyer_login=tool_input.get("buyer_login"),
-                fulfillment_status=tool_input.get("fulfillment_status"),
-                line_items_sent=tool_input.get("line_items_sent"),
-                bought_at_gte=self._local_to_utc(bought_after) if bought_after else None,
-                bought_at_lte=self._local_to_utc(bought_before) if bought_before else None,
-                paid_at_gte=self._local_to_utc(paid_after) if paid_after else None,
-                paid_at_lte=self._local_to_utc(paid_before) if paid_before else None,
-                limit=min(int(tool_input.get("limit", 50)), 100),
-            )
-            if not orders:
-                return "Brak zamówień spełniających podane kryteria."
-            return "\n\n".join(self._order_block(o) for o in orders)
+        if tool_name in self._ORDERS_PRESETS:
+            return await self._orders_listing(tool_name, tool_input)
 
         if tool_name == "get_order_details":
             logger.info("DEBUG get_order_details called for order_id=%s", tool_input.get("order_id"))
@@ -2268,62 +2449,6 @@ class AllegroAgent(BaseAgent):
             )
             return summary
 
-        if tool_name == "get_orders_delivery":
-            fulfillment_status = tool_input.get("fulfillment_status")
-            orders, carriers_raw = await asyncio.gather(
-                self._allegro.get_orders(
-                    status=tool_input.get("status", "READY_FOR_PROCESSING"),
-                    fulfillment_status=fulfillment_status,
-                    limit=min(int(tool_input.get("limit", 50)), 50),
-                ),
-                self._allegro.get_carriers(),
-                return_exceptions=True,
-            )
-            if isinstance(orders, BaseException):
-                raise orders
-            carriers_raw = carriers_raw if not isinstance(carriers_raw, BaseException) else []
-            # Build id→name map from carriers endpoint
-            carrier_map: dict[str, str] = {c["id"]: c.get("name", c["id"]) for c in carriers_raw}
-
-            if not fulfillment_status:
-                orders = [o for o in orders if o.fulfillment_status == "READY_FOR_SHIPMENT"]
-            if not orders:
-                # The tool serves two stages (see its description): the default
-                # READY_FOR_SHIPMENT one and an explicit fulfillment_status —
-                # a fixed "gotowych do wysłania" would misreport the others.
-                if fulfillment_status:
-                    return f"Brak zamówień w statusie: {self._fulfillment_pl(fulfillment_status)}."
-                return "Brak zamówień gotowych do wysłania."
-            courier_counts: Counter = Counter()
-            blocks = []
-            for o in orders:
-                d = o.delivery if isinstance(o.delivery, dict) else {}
-                carrier_id = self._dig(d, "method", "id", default="")
-                # Prefer name from carriers endpoint, fall back to order's method.name
-                method_name = carrier_map.get(carrier_id) or self._dig(d, "method", "name", default="—")
-                courier_counts[method_name] += 1
-                tracking = (
-                    self._dig(d, "smart", "trackingCode", default=None)
-                    or self._dig(d, "trackingCode", default="—")
-                )
-                pickup_name = self._dig(d, "pickupPoint", "name", default=None)
-                tracking_url = self._tracking_url(carrier_id, tracking)
-                tracking_str = (
-                    f"[{tracking}]({tracking_url})" if tracking_url and tracking != "—"
-                    else tracking
-                )
-                extra = [
-                    f"Kurier/dostawa: **{method_name}**",
-                    f"Numer śledzenia: {tracking_str}",
-                ]
-                if pickup_name:
-                    extra.append(f"Punkt odbioru: {pickup_name}")
-                blocks.append(self._order_block(o, extra_lines=extra))
-            summary = "**Podsumowanie kurierów:**\n" + "\n".join(
-                f"- {method}: {count} zamówień" for method, count in courier_counts.most_common()
-            )
-            return summary + "\n\n---\n\n" + "\n\n".join(blocks)
-
         if tool_name == "get_orders_pending_invoice":
             orders = await self._allegro.get_orders_needing_invoice(
                 month=tool_input.get("month"),
@@ -2340,10 +2465,11 @@ class AllegroAgent(BaseAgent):
             blocks = []
             for o, inv in zip(orders, inv_results):
                 items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
+                # No status/date lines here any more — _order_bullet already
+                # prints both (and in Warsaw time), so repeating them made the
+                # same order carry two "when" fields in two formats.
                 extra = [
                     f"E-mail: {o.buyer_email}",
-                    f"Status zamówienia: **{self._status_pl(o.status)}**",
-                    f"Data: {o.created_at[:10] if o.created_at else '—'}",
                     f"Produkty: {items_str}",
                     "**Faktura: niewystawiona**",
                 ]
@@ -2356,7 +2482,7 @@ class AllegroAgent(BaseAgent):
                         extra.append(f"Nabywca: {inv.get('first_name', '')} {inv.get('last_name', '')}".strip())
                     if inv.get("street"):
                         extra.append(f"Adres: {inv['street']}, {inv.get('zip_code', '')} {inv.get('city', '')}".strip(", "))
-                blocks.append(self._order_block(o, extra_lines=extra))
+                blocks.append(self._order_bullet(o, extra_lines=extra))
             return header + "\n\n".join(blocks) + "\n\n" + await self._invoice_reminder_status_block()
 
         if tool_name == "preview_pending_invoices":

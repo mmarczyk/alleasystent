@@ -14,7 +14,11 @@ from agents.allegro.allegro_tools import ALLEGRO_TOOLS
 from tests.tools.cases import CASES, CASES_BY_ID, COVERED_TOOLS, Case
 from tests.tools.runner import run_case
 
-TOOL_NAMES = {t["function"]["name"] for t in ALLEGRO_TOOLS}
+# ask_clarifying_question never reaches _execute_tool: it is an intent
+# signal, not a data tool — AllegroAgent.run() short-circuits on it and
+# returns the question itself, so there is no tool output to exercise here.
+NON_DISPATCH_TOOLS = {"ask_clarifying_question"}
+TOOL_NAMES = {t["function"]["name"] for t in ALLEGRO_TOOLS} - NON_DISPATCH_TOOLS
 
 # Phrases the agent emits when a tool blew up — never acceptable output.
 ERROR_MARKERS = (
@@ -80,6 +84,23 @@ async def test_sales_summary_fee_breakdown_sits_under_the_fee_line():
     first_fee_type = out.index("  - Prowizja od sprzedaży")
     first_refund_type = out.index("  - Zwrot prowizji")
     assert fees < first_fee_type < refunds < first_refund_type
+
+
+async def test_order_listings_answer_in_one_shape():
+    """get_new_orders / get_orders / get_orders_delivery are one implementation
+    behind three intent presets (AllegroAgent._ORDERS_PRESETS), so the seller
+    must get the same plain-text bullet block from all of them. They used to
+    differ: "nowe zamówienia" came back as chat text while "zamówienia do
+    wysłania" came back as a markdown table the PWA hides behind the document
+    viewer."""
+    fields = ("- Zamawiający:", "- Status:", "- Wysyłka do:", "- Rodzaj dostawy:",
+              "- Ilość:", "- Wartość:", "- Link:")
+    for case_id in ("get_new_orders", "get_orders", "get_orders_delivery"):
+        result = await run_case(CASES_BY_ID[case_id])
+        assert result["format"] == "chat", f"{case_id} is not plain text"
+        assert "|---" not in result["output"], f"{case_id} rendered a markdown table"
+        for field in fields:
+            assert field in result["output"], f"{case_id} is missing {field}"
 
 
 async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
