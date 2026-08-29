@@ -85,6 +85,15 @@ def _order(dispatch_to: str = "", fulfillment_status: str = "NEW") -> AllegroOrd
     )
 
 
+def _order_with_delivery() -> AllegroOrder:
+    order = _order("2099-08-21T10:00:00Z")
+    order.delivery = {
+        "method": {"id": "INPOST", "name": "InPost Paczkomaty"},
+        "smart": {"trackingCode": "ABC123"},
+    }
+    return order
+
+
 def _iso(delta: timedelta) -> str:
     return (datetime.now(timezone.utc) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -118,15 +127,32 @@ class TestDispatchDeadlineRendering:
 
 
 class TestOrderBlocksCarryBothFields:
-    def test_new_order_bullet_has_status_and_deadline(self):
-        block = AllegroAgent._new_order_bullet(_order("2099-08-21T10:00:00Z"))
+    """_order_bullet is the ONLY order renderer — every listing tool goes
+    through it (see AllegroAgent._orders_listing), so pinning it here pins the
+    shape of every order answer."""
+
+    def test_order_bullet_has_status_and_deadline(self):
+        block = AllegroAgent._order_bullet(_order("2099-08-21T10:00:00Z"))
         assert "- Status: **Nowe**" in block
         assert "- Wysyłka do: **21.08.2099, 12:00**" in block
 
-    def test_order_block_has_status_and_deadline(self):
-        block = AllegroAgent._order_block(_order("2099-08-21T10:00:00Z"))
-        assert "- Status realizacji: **Nowe**" in block
-        assert "- Wysyłka do: **21.08.2099, 12:00**" in block
+    def test_order_bullet_without_deadline_shows_dash(self):
+        assert "- Wysyłka do: **—**" in AllegroAgent._order_bullet(_order())
 
-    def test_order_block_without_deadline_shows_dash(self):
-        assert "- Wysyłka do: **—**" in AllegroAgent._order_block(_order())
+    def test_order_bullet_delivery_details_are_opt_in(self):
+        order = _order_with_delivery()
+        assert "Numer śledzenia" not in AllegroAgent._order_bullet(order)
+        with_delivery = AllegroAgent._order_bullet(order, include_delivery=True)
+        assert "- Numer śledzenia: [ABC123]" in with_delivery
+
+    def test_carrier_map_names_the_delivery_method(self):
+        """The /order/carriers name wins over the order's own method.name —
+        the same resolution the courier summary counts by."""
+        block = AllegroAgent._order_bullet(
+            _order_with_delivery(), carrier_map={"INPOST": "InPost Kurier"},
+        )
+        assert "- Rodzaj dostawy: InPost Kurier" in block
+
+    def test_extra_lines_land_before_the_link(self):
+        block = AllegroAgent._order_bullet(_order(), extra_lines=["E-mail: b@example.com"])
+        assert block.index("- E-mail: b@example.com") < block.index("- Link: ")

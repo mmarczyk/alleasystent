@@ -39,6 +39,33 @@ class TestGetNewOrders:
         assert _resolve("jacy kurierzy w nowych zamówieniach") is None
 
 
+class TestGetOrdersDelivery:
+    """'Do wysłania' is the ready-to-ship preset of the same listing, so it
+    resolves without an LLM round-trip too."""
+
+    def test_orders_to_send(self):
+        assert _resolve("które zamówienia są do wysłania") == ("get_orders_delivery", {})
+
+    def test_unsent_orders(self):
+        assert _resolve("pokaż zamówienia niewysłane") == ("get_orders_delivery", {})
+
+    def test_count_only(self):
+        assert _resolve("ile zamówień mam do wysłania") == (
+            "get_orders_delivery", {"count_only": True},
+        )
+
+    def test_bails_on_date_range(self):
+        assert _resolve("zamówienia do wysłania z tego tygodnia") is None
+
+    def test_bails_on_singular(self):
+        assert _resolve("ostatnie zamówienie do wysłania") is None
+
+    def test_deadline_question_is_not_a_ready_to_ship_question(self):
+        """'Do kiedy wysłać' asks about the dispatch deadline — a filter this
+        layer can't compute, so it must fall through to the LLM."""
+        assert _resolve("do kiedy mam wysłać zamówienia") is None
+
+
 class TestGetMessageThreads:
     def test_bare_list(self):
         assert _resolve("pokaż wiadomości") == ("get_message_threads", {})

@@ -82,6 +82,23 @@ async def test_sales_summary_fee_breakdown_sits_under_the_fee_line():
     assert fees < first_fee_type < refunds < first_refund_type
 
 
+async def test_order_listings_answer_in_one_shape():
+    """get_new_orders / get_orders / get_orders_delivery are one implementation
+    behind three intent presets (AllegroAgent._ORDERS_PRESETS), so the seller
+    must get the same plain-text bullet block from all of them. They used to
+    differ: "nowe zamówienia" came back as chat text while "zamówienia do
+    wysłania" came back as a markdown table the PWA hides behind the document
+    viewer."""
+    fields = ("- Zamawiający:", "- Status:", "- Wysyłka do:", "- Rodzaj dostawy:",
+              "- Ilość:", "- Wartość:", "- Link:")
+    for case_id in ("get_new_orders", "get_orders", "get_orders_delivery"):
+        result = await run_case(CASES_BY_ID[case_id])
+        assert result["format"] == "chat", f"{case_id} is not plain text"
+        assert "|---" not in result["output"], f"{case_id} rendered a markdown table"
+        for field in fields:
+            assert field in result["output"], f"{case_id} is missing {field}"
+
+
 async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
     """A task that is already done must cost exactly one status call and no
     up-front poll_interval wait."""

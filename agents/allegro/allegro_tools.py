@@ -1,15 +1,139 @@
 """Tool definitions for the Allegro agent (OpenAI/Gemini function-calling format)."""
 
+# ── Zamówienia: trzy intencje, jedna implementacja ──────────────────────────
+# get_new_orders / get_orders / get_orders_delivery stay three separate tool
+# schemas on purpose: intent routing is far more reliable against named
+# presets ("nowe zamówienia", "zamówienia do wysłania") than against one
+# generic tool hiding a dozen optional filters. What they must NOT be is three
+# different features — each is only a set of default arguments over the SAME
+# listing call (AllegroAgent._orders_listing), they share the parameter
+# definitions below, they render with the same order bullet, and all three are
+# "chat" in TOOL_OUTPUT_FORMAT. Before this, "nowe zamówienia" came back as
+# chat text while "zamówienia do wysłania" came back as a markdown table the
+# frontend then rendered as a document artifact — the same question answered
+# in two different shapes depending on which preset the model happened to pick.
+_ORDER_PARAMS: dict[str, dict] = {
+    "status": {
+        "type": "string",
+        "description": "Filter by order status.",
+        "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
+    },
+    "fulfillment_status": {
+        "type": "string",
+        "description": (
+            "Filter by fulfillment status: NEW = not packed yet ('niespakowane', "
+            "'do spakowania'), READY_FOR_SHIPMENT = packed, awaiting carrier handoff "
+            "('do wysłania', 'niewysłane'), SENT = already handed over."
+        ),
+        "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
+    },
+    "buyer_login": {
+        "type": "string",
+        "description": "Filter by buyer's Allegro login (the login, never a company or person's name).",
+    },
+    "line_items_sent": {
+        "type": "array",
+        "items": {"type": "string", "enum": ["NONE", "SOME", "ALL"]},
+        "description": "Filter by shipment state. Multiple values allowed (OR logic).",
+    },
+    "bought_after_local": {
+        "type": "string",
+        "description": (
+            "Order CREATION time filter — return only orders placed AT OR AFTER this local "
+            "Polish time. Format: 'HH:MM' for today (e.g. '12:00'), or 'YYYY-MM-DD HH:MM' "
+            "for a specific date (e.g. '2026-06-16 18:00'). Conversion to UTC is automatic."
+        ),
+    },
+    "bought_before_local": {
+        "type": "string",
+        "description": (
+            "Order CREATION time filter — return only orders placed AT OR BEFORE this local "
+            "Polish time. Same format as bought_after_local: 'HH:MM' or 'YYYY-MM-DD HH:MM'."
+        ),
+    },
+    "paid_after_local": {
+        "type": "string",
+        "description": (
+            "PAYMENT time filter — return only orders paid AT OR AFTER this local Polish time. "
+            "Use for queries with 'opłacone', 'zapłacone'. Format: 'HH:MM' or 'YYYY-MM-DD HH:MM'."
+        ),
+    },
+    "paid_before_local": {
+        "type": "string",
+        "description": (
+            "PAYMENT time filter — return only orders paid AT OR BEFORE this local Polish time. "
+            "Same format as paid_after_local."
+        ),
+    },
+    "dispatch_after_local": {
+        "type": "string",
+        "description": (
+            "DISPATCH DEADLINE filter ('Wysyłka do' — when the parcel must be handed to the "
+            "carrier): only orders whose deadline falls AT OR AFTER this local Polish time. "
+            "Format: 'HH:MM' or 'YYYY-MM-DD HH:MM'."
+        ),
+    },
+    "dispatch_before_local": {
+        "type": "string",
+        "description": (
+            "DISPATCH DEADLINE filter ('Wysyłka do'): only orders that must be handed to the "
+            "carrier AT OR BEFORE this local Polish time — use for 'co muszę wysłać dzisiaj', "
+            "'które zamówienia mają termin do jutra', 'zamówienia po terminie' (pass the "
+            "current time). Format: 'HH:MM' for today or 'YYYY-MM-DD HH:MM'. Orders for which "
+            "Allegro returned no deadline are excluded when this filter is used."
+        ),
+    },
+    "include_delivery": {
+        "type": "boolean",
+        "description": (
+            "Add courier details to every order (carrier name, tracking number and link, pickup "
+            "point) plus a per-courier count summary. Set true for any question combining orders "
+            "with couriers/delivery providers/tracking."
+        ),
+        "default": False,
+    },
+    "count_only": {
+        "type": "boolean",
+        "description": (
+            "Set true when the user only wants the NUMBER of orders ('ile zamówień', 'ile mam "
+            "nowych', 'liczba zamówień') — the reply states just the count, without listing the "
+            "orders. Do NOT set it when the user also wants to see the orders themselves "
+            "('pokaż', 'jakie zamówienia mam' with no 'ile')."
+        ),
+        "default": False,
+    },
+    "limit": {
+        "type": "integer",
+        "description": "Max orders to return (1–100).",
+        "default": 50,
+    },
+}
+
+
+def _order_params(*names: str, **overrides: dict) -> dict:
+    """Parameter schema for one order-listing tool: the shared definitions in
+    `_ORDER_PARAMS` narrowed to `names`, with per-tool tweaks (a different
+    default `limit`, a preset-specific description) merged on top — so the
+    three order tools can never drift into meaning different things by the
+    same argument name."""
+    props: dict[str, dict] = {}
+    for name in names:
+        prop = dict(_ORDER_PARAMS[name])
+        prop.update(overrides.get(name, {}))
+        props[name] = prop
+    return {"type": "object", "properties": props}
+
+
 ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
             "name": "get_new_orders",
             "description": (
-                "List new (unprocessed) orders waiting to be fulfilled. "
+                "List new (unprocessed) orders waiting to be fulfilled — the get_orders listing "
+                "with status=READY_FOR_PROCESSING + fulfillment_status=NEW already applied. "
                 "Use for any question about 'nowe zamówienia', 'nowe', 'oczekujące', "
                 "'co nowego', 'jakie zamówienia mam', 'ile zamówień', new/pending orders. "
-                "Automatically filters for READY_FOR_PROCESSING + fulfillment=NEW orders. "
                 "Results are sorted newest-first. "
                 "SINGULAR vs PLURAL: for 'ostatnie zamówienie' / 'ostatnie nowe zamówienie' / "
                 "'najnowsze zamówienie' / 'last order' (singular — asking about ONE order), "
@@ -17,38 +141,23 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'nowe zamówienia' / 'ostatnie zamówienia' / 'jakie zamówienia mam'. "
                 "COUNT-ONLY: for 'ile zamówień', 'ile mam nowych', 'ile jest wszystkich nowych', "
                 "'liczba nowych zamówień' (the user wants a NUMBER, not the order details) — set "
-                "count_only=true. Do NOT set count_only when the user also wants to see the orders "
-                "themselves (e.g. 'pokaż nowe zamówienia', 'jakie zamówienia mam' with no 'ile'). "
+                "count_only=true. "
+                "For a different status, a date range, or courier details use get_orders — same "
+                "listing, same reply shape, just other filters. "
                 "Returns order IDs, buyer info, current status, dispatch deadline "
                 "('Wysyłka do' — when the parcel must be handed to the carrier), and totals."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "buyer_login": {
-                        "type": "string",
-                        "description": "Optionally filter by buyer's Allegro login.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": (
-                            "Max orders to return (1–100). Set to 1 when the user asks about "
-                            "THE LAST/newest order in the singular ('ostatnie zamówienie', "
-                            "'ostatnie nowe zamówienie'). Leave at default for plural questions."
-                        ),
-                        "default": 100,
-                    },
-                    "count_only": {
-                        "type": "boolean",
-                        "description": (
-                            "Set true when the user only wants the NUMBER of new orders "
-                            "('ile zamówień', 'ile mam nowych', 'liczba nowych zamówień') — the "
-                            "reply will state just the count, not list individual orders."
-                        ),
-                        "default": False,
-                    },
+            "parameters": _order_params(
+                "buyer_login", "dispatch_before_local", "count_only", "limit",
+                limit={
+                    "description": (
+                        "Max orders to return (1–100). Set to 1 when the user asks about "
+                        "THE LAST/newest order in the singular ('ostatnie zamówienie', "
+                        "'ostatnie nowe zamówienie'). Leave at default for plural questions."
+                    ),
+                    "default": 100,
                 },
-            },
+            ),
         },
     },
     {
@@ -56,14 +165,17 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_orders",
             "description": (
-                "List Allegro orders with arbitrary filters. "
+                "List Allegro orders with arbitrary filters — the general form of the order "
+                "listing (get_new_orders and get_orders_delivery are the same call with preset "
+                "filters, and all three reply in the same plain-text format). "
                 "USE THIS for a plain LIST of orders, incl. for a date range — 'lista zamówień', "
                 "'pokaż wszystkie zamówienia z tego miesiąca/tygodnia', 'zamówienia z okresu X'. "
                 "Do NOT use get_sales_summary for these — that tool is only for earnings/profit/fee "
                 "questions ('ile zarobiłem', 'jakie opłaty'), not for listing orders. "
                 "For new/pending orders use get_new_orders instead. "
-                "TIME FILTERS: use bought_after/before_local for order PLACEMENT time; "
-                "use paid_after/before_local for PAYMENT time ('opłacone po X', 'zapłacone po X'). "
+                "TIME FILTERS: bought_after/before_local = order PLACEMENT time; "
+                "paid_after/before_local = PAYMENT time ('opłacone po X', 'zapłacone po X'); "
+                "dispatch_after/before_local = DISPATCH DEADLINE ('do kiedy trzeba wysłać'). "
                 "NEVER use this tool when the user names or already gave a SPECIFIC order_id "
                 "(a UUID, e.g. '0c4854a0-9646-11f1-8028-338c43adc37a') — this tool has NO order_id "
                 "parameter and cannot filter to a single order; it will silently ignore the ID and "
@@ -72,66 +184,13 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Every order returned carries its current status and its dispatch deadline "
                 "('Wysyłka do' — when the parcel must be handed to the carrier)."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "description": "Filter by order status.",
-                        "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
-                    },
-                    "buyer_login": {
-                        "type": "string",
-                        "description": "Filter orders by buyer's Allegro login.",
-                    },
-                    "fulfillment_status": {
-                        "type": "string",
-                        "description": "Filter by fulfillment status.",
-                        "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
-                    },
-                    "line_items_sent": {
-                        "type": "array",
-                        "items": {"type": "string", "enum": ["NONE", "SOME", "ALL"]},
-                        "description": "Filter by shipment state. Multiple values allowed (OR logic).",
-                    },
-                    "bought_after_local": {
-                        "type": "string",
-                        "description": (
-                            "Return only orders placed AT OR AFTER this local Polish time. "
-                            "Format: 'HH:MM' for today (e.g. '12:00'), "
-                            "or 'YYYY-MM-DD HH:MM' for a specific date (e.g. '2026-06-16 18:00'). "
-                            "Timezone conversion to UTC is handled automatically."
-                        ),
-                    },
-                    "bought_before_local": {
-                        "type": "string",
-                        "description": (
-                            "Return only orders placed AT OR BEFORE this local Polish time. "
-                            "Same format as bought_after_local: 'HH:MM' or 'YYYY-MM-DD HH:MM'."
-                        ),
-                    },
-                    "paid_after_local": {
-                        "type": "string",
-                        "description": (
-                            "Return only orders whose PAYMENT was completed AT OR AFTER this "
-                            "local Polish time. Use for queries with 'opłacone', 'zapłacone'. "
-                            "Format: 'HH:MM' for today or 'YYYY-MM-DD HH:MM' for a specific date."
-                        ),
-                    },
-                    "paid_before_local": {
-                        "type": "string",
-                        "description": (
-                            "Return only orders whose PAYMENT was completed AT OR BEFORE this "
-                            "local Polish time. Same format as paid_after_local."
-                        ),
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max orders to return (1–100).",
-                        "default": 50,
-                    },
-                },
-            },
+            "parameters": _order_params(
+                "status", "fulfillment_status", "buyer_login", "line_items_sent",
+                "bought_after_local", "bought_before_local",
+                "paid_after_local", "paid_before_local",
+                "dispatch_after_local", "dispatch_before_local",
+                "include_delivery", "count_only", "limit",
+            ),
         },
     },
     {
@@ -497,37 +556,29 @@ ALLEGRO_TOOLS: list[dict] = [
         "function": {
             "name": "get_orders_delivery",
             "description": (
-                "Show which courier / delivery method the buyer chose for each order. "
+                "Show which courier / delivery method the buyer chose for each order — the "
+                "get_orders listing with fulfillment_status=READY_FOR_SHIPMENT and courier "
+                "details switched on, so the reply is the same plain-text order list as the "
+                "other order tools, plus a per-courier count summary. "
                 "Use whenever the user asks: which couriers are in pending orders, "
                 "which delivery methods were selected, tracking numbers, or any question "
                 "combining orders with shipping/courier/delivery. "
-                "Default (no filters): returns orders with fulfillment_status=READY_FOR_SHIPMENT "
-                "(packed and awaiting carrier handoff). "
-                "For 'orders to send' / 'do wysłania' leave fulfillment_status empty."
+                "Default (no filters): orders with fulfillment_status=READY_FOR_SHIPMENT "
+                "(packed and awaiting carrier handoff) — i.e. 'do wysłania' / 'niewysłane'. "
+                "Use SENT only when explicitly asking about already-shipped orders."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "description": "Order status filter. Default: READY_FOR_PROCESSING.",
-                        "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
-                    },
-                    "fulfillment_status": {
-                        "type": "string",
-                        "description": (
-                            "Fulfillment status filter. Leave empty to get READY_FOR_SHIPMENT orders. "
-                            "Use SENT only when explicitly asking about already-shipped orders."
-                        ),
-                        "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max orders to return (1–50).",
-                        "default": 50,
-                    },
+            "parameters": _order_params(
+                "status", "fulfillment_status", "buyer_login",
+                "dispatch_after_local", "dispatch_before_local", "count_only", "limit",
+                status={"description": "Order status filter. Default: READY_FOR_PROCESSING."},
+                fulfillment_status={
+                    "description": (
+                        "Fulfillment status filter. Leave empty for READY_FOR_SHIPMENT orders "
+                        "(packed, awaiting carrier handoff). Use SENT only when explicitly "
+                        "asking about already-shipped orders."
+                    ),
                 },
-            },
+            ),
         },
     },
     {
@@ -1036,14 +1087,20 @@ ALLEGRO_TOOLS: list[dict] = [
 # which resolves it from the tool(s) it actually called and asks the model to
 # format the final answer accordingly.
 TOOL_OUTPUT_FORMAT: dict[str, str] = {
-    # Zamówienia
+    # Zamówienia — wszystkie listowania zamówień zwracają ZWYKŁY TEKST.
+    # One implementation (AllegroAgent._orders_listing) renders all three, so
+    # they must also share one format: with get_orders/get_orders_delivery as
+    # "table" the same question answered by a different preset came back as a
+    # markdown table, which web/js/app.js (_isDoc) hides behind the document
+    # viewer — "nowe zamówienia" gave chat text, "zamówienia do wysłania" gave
+    # a document. The listing text is already final; nothing here reshapes it.
     "get_new_orders": "chat",
-    "get_orders": "table",
+    "get_orders": "chat",
     # "chat" (not "document") — a single order's details are a short, factual
     # answer to a question the user just asked; wrapping them in a document
     # artifact hid them behind a "zobacz pełną odpowiedź" click for no gain.
     "get_order_details": "chat",
-    "get_orders_delivery": "table",
+    "get_orders_delivery": "chat",
     # Oferty
     "get_active_offers": "table",
     "get_offers_summary": "dashboard",
