@@ -425,7 +425,10 @@ class TestRenderedViews:
         assert lines[3] == "| — | None |"
 
     @pytest.mark.asyncio
-    async def test_orders_table_carries_status_and_dispatch_deadline(self):
+    async def test_order_listing_is_a_bullet_list_never_a_table(self):
+        """Orders are the one listing that deliberately stays plain chat text —
+        a markdown table would be hidden behind the document view in the PWA
+        (see _ORDERS_PRESETS / _order_bullet). Rendered in Python all the same."""
         from models.allegro import AllegroOrder, AllegroOrderLine
 
         order = AllegroOrder(
@@ -445,13 +448,23 @@ class TestRenderedViews:
         agent._allegro.get_orders = AsyncMock(return_value=[order])
 
         result = await agent._dispatch("get_orders", {})
-        lines = result.splitlines()
 
-        assert lines[0] == "# Zamówienia"
-        assert "| Zamówienie | Kupujący | Status realizacji | Wysyłka do | Wartość | Opłacone | Dostawa | Szt. |" in lines
-        assert "[abc-123](https://allegro.pl/sprzedaz/zamowienia/abc-123)" in result
-        assert "Nowe" in result
-        assert lines[-1] == "Znaleziono **1** zamówienie na łączną kwotę **189,98 PLN**."
+        assert result.startswith("**Zamówienie** `abc-123`")
+        assert "|" not in result
+        assert "- Status: **Nowe**" in result
+        assert "- Wysyłka do:" in result
+
+    @pytest.mark.asyncio
+    async def test_order_listing_count_only_is_the_final_sentence(self):
+        agent = self._agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[object(), object()])
+
+        assert (await agent._dispatch("get_orders", {"count_only": True})).startswith(
+            "Masz łącznie **2** zamówienia."
+        )
+        assert (await agent._dispatch("get_orders_delivery", {"count_only": True})).startswith(
+            "Do wysłania: **2** zamówienia."
+        )
 
     def test_dashboard_chart_json_matches_the_bullets(self):
         agent = self._agent()

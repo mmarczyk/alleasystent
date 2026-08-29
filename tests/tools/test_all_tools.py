@@ -24,8 +24,15 @@ ERROR_MARKERS = (
 )
 
 
+# ask_clarifying_question never reaches _dispatch: AllegroAgent.run() answers it
+# with the model's own question and returns (see the clarify_call short-circuit),
+# so there is no tool execution for a case here to drive. Its behavior is covered
+# in tests/unit/test_allegro_agent_run.py instead.
+NOT_DISPATCHED = {"ask_clarifying_question"}
+
+
 def test_every_tool_has_a_case():
-    assert TOOL_NAMES - COVERED_TOOLS == set(), "tools with no test case"
+    assert TOOL_NAMES - COVERED_TOOLS - NOT_DISPATCHED == set(), "tools with no test case"
 
 
 def test_no_case_targets_an_unknown_tool():
@@ -80,6 +87,23 @@ async def test_sales_summary_fee_breakdown_sits_under_the_fee_line():
     first_fee_type = out.index("  - Prowizja od sprzedaży")
     first_refund_type = out.index("  - Zwrot prowizji")
     assert fees < first_fee_type < refunds < first_refund_type
+
+
+async def test_order_listings_answer_in_one_shape():
+    """get_new_orders / get_orders / get_orders_delivery are one implementation
+    behind three intent presets (AllegroAgent._ORDERS_PRESETS), so the seller
+    must get the same plain-text bullet block from all of them. They used to
+    differ: "nowe zamówienia" came back as chat text while "zamówienia do
+    wysłania" came back as a markdown table the PWA hides behind the document
+    viewer."""
+    fields = ("- Zamawiający:", "- Status:", "- Wysyłka do:", "- Rodzaj dostawy:",
+              "- Ilość:", "- Wartość:", "- Link:")
+    for case_id in ("get_new_orders", "get_orders", "get_orders_delivery"):
+        result = await run_case(CASES_BY_ID[case_id])
+        assert result["format"] == "chat", f"{case_id} is not plain text"
+        assert "|---" not in result["output"], f"{case_id} rendered a markdown table"
+        for field in fields:
+            assert field in result["output"], f"{case_id} is missing {field}"
 
 
 async def test_issue_invoice_checks_the_infakt_task_before_sleeping():

@@ -84,6 +84,32 @@ def _match_get_new_orders(query: str) -> dict | None:
     return {}
 
 
+# ── zamowienia: get_orders_delivery ────────────────────────────────────────
+# "Zamówienia do wysłania" is a preset of the same listing (see
+# _ORDERS_PRESETS in AllegroAgent), so resolving it here costs nothing extra
+# and keeps the two most common order questions — "nowe" and "do wysłania" —
+# on the same, LLM-free path. Deliberately narrow: only wording that names
+# the ready-to-ship state outright, never a deadline question ("wysyłka do
+# kiedy"), which is a filter this layer can't compute.
+_ORDERS_TO_SEND_RE = re.compile(
+    r"do\s+wys[łl]ani|do\s+wysy[łl]k|niewys[łl]an|nie\s+wys[łl]an[oey]|"
+    r"gotow\w*\s+do\s+wysy[łl]k|czekaj\w*\s+na\s+wysy[łl]k",
+    re.IGNORECASE,
+)
+
+
+def _match_get_orders_delivery(query: str) -> dict | None:
+    if not (_ORDERS_TOPIC_RE.search(query) and _ORDERS_TO_SEND_RE.search(query)):
+        return None
+    if _PERIOD_RE.search(query):
+        return None  # a date window needs bought_/dispatch_ bounds this layer can't compute
+    if _ORDERS_SINGULAR_RE.search(query):
+        return None  # "ostatnie do wysłania" — a limit=1 guess isn't worth the risk
+    if _is_count_only(query, _ORDERS_TOPIC_RE):
+        return {"count_only": True}
+    return {}
+
+
 # "Szczegóły/status/koszty/faktura ostatniego (nowego) zamówienia" — the
 # two-hop get_new_orders(limit=1) -> get_order_details chain (see
 # AllegroAgent._resolve_latest_order_chain). Deliberately narrower than a
@@ -250,7 +276,10 @@ def _match_monitoring(query: str) -> tuple[str, dict] | None:
 # Single-return matchers (tool name implied by the registry key) plus the
 # multi-outcome monitoring matcher (handled separately below).
 _LABEL_MATCHERS: dict[str, list[tuple[str, Callable[[str], dict | None]]]] = {
-    "zamowienia": [("get_new_orders", _match_get_new_orders)],
+    "zamowienia": [
+        ("get_orders_delivery", _match_get_orders_delivery),
+        ("get_new_orders", _match_get_new_orders),
+    ],
     "wiadomosci": [("get_message_threads", _match_get_message_threads)],
     "konto":      [("get_account_info", _match_get_account_info)],
     "oferty":     [("get_offers_summary", _match_get_offers_summary)],

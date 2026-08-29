@@ -215,6 +215,46 @@ class TestEmptyReplyGuards:
         assert agent._execute_tool.await_count == 0
 
 
+class TestAskClarifyingQuestion:
+    """The one tool that never reaches _dispatch: run() answers with the model's
+    own question and returns, so no Allegro call and no interpret round happen
+    (see the clarify_call short-circuit in AllegroAgent.run)."""
+
+    @pytest.mark.asyncio
+    async def test_question_is_returned_verbatim_without_touching_allegro(self):
+        agent = _agent()
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call(
+                "c1", "ask_clarifying_question",
+                {"question": "Której oferty dotyczy zmiana ceny?"},
+            )]),
+        ])
+
+        response = await agent.run("zmień cenę")
+
+        assert response.text == "Której oferty dotyczy zmiana ceny?"
+        assert response.metadata["output_format"] == "chat"
+        assert agent._execute_tool.await_count == 0
+        assert agent._client.chat.completions.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_other_tools_in_the_same_round_are_dropped(self):
+        """A bundled call would run against exactly the arguments the model
+        admitted it had to guess."""
+        agent = _agent()
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[
+                _tool_call("c1", "get_order_details", {"order_id": "zgadnięte"}),
+                _tool_call("c2", "ask_clarifying_question", {"question": "Które zamówienie?"}),
+            ]),
+        ])
+
+        response = await agent.run("szczegóły zamówienia")
+
+        assert response.text == "Które zamówienie?"
+        assert agent._execute_tool.await_count == 0
+
+
 class TestFormatInstruction:
     """Every tool's dispatch renders the finished view (table, document,
     dashboard, bullet list) in Python — see _RENDERED_VIEW_TOOLS. So when the
