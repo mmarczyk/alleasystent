@@ -202,16 +202,21 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
         "Użyj WYŁĄCZNIE danych zwróconych przez narzędzie powyżej — nigdy nie zmyślaj "
         "produktów, cen ani statusu faktury."
     ),
+    # The dispatch already returns the finished answer (heading + markdown table
+    # + trailing summary — see AllegroAgent._render_offers_table), so this only
+    # runs for the turns that still reach the interpret call (English query, or
+    # several tools in one turn) and its whole job is "don't touch it".
     "get_active_offers": (
-        "[FORMAT ODPOWIEDZI: TABELA]\n"
-        "Zbuduj tabelę markdown z danych zwróconych przez narzędzie powyżej, zachowując "
-        "DOKŁADNIE tę kolejność wierszy — dane są już posortowane rosnąco wg stanu "
-        "magazynowego (od najmniejszej ilości szt.) i zagregowane po nazwie produktu (stan "
-        "zsumowany dla tego samego produktu). NIE sortuj ponownie, NIE grupuj inaczej, NIE "
-        "pomijaj wierszy oznaczonych jako „(zakończona — wyprzedana)” — to wyprzedane, "
-        "zakończone oferty wymagające wznowienia i też mają się znaleźć w tabeli. Kolumny: "
-        "Nazwa, Stan (szt.), Cena, ID ofert. Bez wstępu ani potwierdzenia przed tabelą. "
-        "Maksymalnie 1-2 zdania podsumowania PO tabeli."
+        "[FORMAT ODPOWIEDZI: GOTOWA TABELA — PRZEPISZ BEZ ZMIAN]\n"
+        "Dane powyżej to już gotowa odpowiedź: nagłówek, tabela markdown i JEDNO zdanie "
+        "podsumowania na końcu, PO tabeli. Przepisz je dokładnie w tej samej kolejności — "
+        "ten sam nagłówek, te same kolumny (Nazwa, Stan (szt.), Cena, ID ofert), ta sama "
+        "kolejność wierszy (rosnąco wg stanu magazynowego), wszystkie wiersze bez pomijania "
+        "(łącznie z oznaczonymi „(zakończona — wyprzedana)”), i podsumowanie na samym końcu "
+        "— to ono trafia do dymka czatu, więc nie przenoś go przed tabelę ani nie usuwaj. "
+        "NIE sortuj ponownie, NIE grupuj inaczej, NIE skracaj tabeli, nie dodawaj wstępu. "
+        "Jeśli użytkownik pytał po angielsku — przetłumacz tylko nagłówek, nazwy kolumn i "
+        "zdanie podsumowania; dane w wierszach zostaw bez zmian."
     ),
     "query_offers_by_stock": (
         "[FORMAT ODPOWIEDZI: TABELA]\n"
@@ -228,12 +233,14 @@ _TOOL_SPECIFIC_INSTRUCTIONS: dict[str, str] = {
 
 # Tools whose dispatch output is already the final answer verbatim — see the
 # "Skip the interpret call entirely" block in AllegroAgent.run() for the full
-# reasoning. None of these have a _TOOL_SPECIFIC_INSTRUCTIONS entry asking the
-# interpret call to reshape anything, so for a confidently-Polish query that
-# call is pure passthrough and gets skipped.
+# reasoning. Their _TOOL_SPECIFIC_INSTRUCTIONS entries (where they have one)
+# only restate the shape the dispatch already produced, so for a
+# confidently-Polish query the interpret call is pure passthrough and gets
+# skipped; an English one still runs it, to translate the Polish labels.
 _PASSTHROUGH_TOOLS = frozenset({
     "get_new_orders",
     "get_order_details",
+    "get_active_offers",
     "get_new_returns",
     "get_returns_to_process",
     "get_new_complaints",
@@ -1046,6 +1053,73 @@ class AllegroAgent(BaseAgent):
                 g["ended_only"] = False
         return sorted(groups.values(), key=lambda g: g["total_stock"])
 
+    @staticmethod
+    def _plural_pl(n: int, one: str, few: str, many: str) -> str:
+        """Polish count form: 1 oferta / 2-4 oferty / 5+ ofert, with the usual
+        11-14 exception (11 ofert, not 11 oferty)."""
+        if n == 1:
+            return one
+        if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+            return few
+        return many
+
+    @classmethod
+    def _render_offers_table(
+        cls, aggregated: list[dict], raw: list[dict], name_filter: str | None = None
+    ) -> str:
+        """The final, ready-to-display answer for get_active_offers: a heading,
+        the markdown table, and — last — a one-sentence summary.
+
+        Built here instead of handed to the interpret LLM (see _PASSTHROUGH_TOOLS)
+        for the same reason as get_order_details: _TOOL_SPECIFIC_INSTRUCTIONS
+        already prescribed the exact columns and row order, so the model had no
+        judgment left to apply — just hundreds of rows to re-type, slowly and with
+        a real chance of dropping, reordering or truncating some of them.
+
+        The layout is what the PWA needs to split the reply the way the seller
+        expects (web/js/app.js): the leading '# ' heading names the document tab
+        (without it the tab title is a garbled '| Nazwa | Stan…' row), and the
+        summary must come AFTER the table because _tablePreview shows the text
+        following the table as the chat-bubble preview — so the chat says "masz
+        obecnie XX aktywnych ofert" and the table stays in the document.
+        """
+        heading = "# Aktywne oferty"
+        rows = [
+            "| Nazwa | Stan (szt.) | Cena | ID ofert |",
+            "| --- | ---: | ---: | --- |",
+        ]
+        for g in aggregated:  # already sorted ascending by stock
+            # A '|' in an offer name would otherwise split the cell in two and
+            # shift every following column of that row.
+            name = str(g["name"]).replace("|", "\\|")
+            ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
+            ids_str = ", ".join(f"`{i}`" for i in g["ids"])
+            rows.append(
+                f"| {name}{ended_marker} | {g['total_stock']} | "
+                f"{cls._format_price(g['price'], g['currency'])} | {ids_str} |"
+            )
+
+        ended_offers = sum(1 for o in raw if o.get("_ended"))
+        active_offers = len(raw) - ended_offers
+        products = len(aggregated)
+        filter_note = f" (filtr nazwy: „{name_filter}”)" if name_filter else ""
+        # Kept short on purpose: this sentence IS the chat bubble, and the
+        # preview cuts off at 220 characters.
+        summary = (
+            f"Masz obecnie **{active_offers}** "
+            f"{cls._plural_pl(active_offers, 'aktywną ofertę', 'aktywne oferty', 'aktywnych ofert')}"
+            f"{filter_note} — w tabeli **{products}** "
+            f"{cls._plural_pl(products, 'produkt', 'produkty', 'produktów')} "
+            f"po zsumowaniu ofert o tej samej nazwie."
+        )
+        if ended_offers:
+            summary += (
+                f" W tym **{ended_offers}** "
+                f"{cls._plural_pl(ended_offers, 'zakończona', 'zakończone', 'zakończonych')}"
+                " przez wyprzedanie — do wznowienia."
+            )
+        return "\n".join([heading, "", *rows, "", summary])
+
     async def _get_stock_relevant_offers(self, name: str | None = None) -> list[dict]:
         """Active offers plus ended offers that sold out to zero stock.
 
@@ -1759,19 +1833,13 @@ class AllegroAgent(BaseAgent):
             raw = await self._get_stock_relevant_offers(name_filter)
             logger.info("get_active_offers: %d raw offers fetched", len(raw))
             if not raw:
-                return "Brak aktywnych ofert."
+                return (
+                    f"Brak aktywnych ofert pasujących do „{name_filter}”."
+                    if name_filter else "Brak aktywnych ofert."
+                )
             aggregated = self._aggregate_offers_by_name(raw)
             logger.info("get_active_offers: %d unique products after name aggregation", len(aggregated))
-            lines = [f"Łącznie **{len(raw)}** ofert / **{len(aggregated)}** unikalnych produktów, posortowane rosnąco wg stanu:\n"]
-            for g in aggregated:  # already sorted ascending by stock
-                ids_str = ", ".join(f"`{i}`" for i in g["ids"])
-                price_str = self._format_price(g["price"], g["currency"])
-                ended_marker = " *(zakończona — wyprzedana)*" if g["ended_only"] else ""
-                lines.append(
-                    f"- **{g['name']}**{ended_marker} — {price_str} — "
-                    f"stan: **{g['total_stock']} szt.** — ID: {ids_str}"
-                )
-            return "\n".join(lines)
+            return self._render_offers_table(aggregated, raw, name_filter)
 
         if tool_name == "get_offers_summary":
             offers = await self._allegro.get_all_offers()

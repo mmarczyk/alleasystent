@@ -259,6 +259,138 @@ class TestPassthroughGeneralizedToOtherTools:
         assert agent._client.chat.completions.create.call_count == 3
 
 
+class TestGetActiveOffersDispatch:
+    """_dispatch's get_active_offers branch builds the finished reply in Python
+    (heading + markdown table + trailing summary) instead of asking the interpret
+    LLM to turn a bullet list into a table — see AllegroAgent._render_offers_table.
+    The layout is what splits the answer in the PWA: summary sentence in the chat
+    bubble, table in the document viewer (web/js/app.js _tablePreview/_docTitle)."""
+
+    def _offer(self, oid, name, price, stock, ended=False):
+        offer = {
+            "id": oid,
+            "name": name,
+            "sellingMode": {"price": {"amount": str(price), "currency": "PLN"}},
+            "stock": {"available": stock},
+        }
+        if ended:
+            offer["_ended"] = True
+        return offer
+
+    def _make_agent_with_offers(self, active, ended=None):
+        agent = _make_agent()
+        agent._allegro.get_all_offers = AsyncMock(
+            side_effect=lambda status="ACTIVE": active if status == "ACTIVE" else (ended or [])
+        )
+        agent._allegro.get_offers = AsyncMock(
+            side_effect=lambda publication_status="ACTIVE", **kw: (
+                (active, len(active)) if publication_status == "ACTIVE" else (ended or [], len(ended or []))
+            )
+        )
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_heading_table_and_trailing_summary(self):
+        agent = self._make_agent_with_offers(
+            active=[
+                self._offer("111", "Czajnik Bosch", 109.0, 27),
+                self._offer("222", "Toster Russell Hobbs", 179.0, 0),
+                self._offer("333", "Czajnik Bosch", 109.0, 3),
+            ],
+            ended=[self._offer("444", "Żelazko Philips", 329.0, 0)],
+        )
+
+        result = await agent._dispatch("get_active_offers", {})
+        lines = result.splitlines()
+
+        # Heading first — it names the document tab; without it the tab title is
+        # a garbled '| Nazwa | Stan…' row.
+        assert lines[0] == "# Aktywne oferty"
+        assert "| Nazwa | Stan (szt.) | Cena | ID ofert |" in lines
+        assert "| --- | ---: | ---: | --- |" in lines
+        # Rows ascending by stock, same-name offers aggregated, ended-and-sold-out
+        # offers flagged rather than dropped.
+        rows = [ln for ln in lines if ln.startswith("| ") and "---" not in ln][1:]
+        assert rows == [
+            "| Toster Russell Hobbs | 0 | 179,00 PLN | `222` |",
+            "| Żelazko Philips *(zakończona — wyprzedana)* | 0 | 329,00 PLN | `444` |",
+            "| Czajnik Bosch | 30 | 109,00 PLN | `111`, `333` |",
+        ]
+        # The summary is LAST — that is the half the chat bubble shows.
+        assert lines[-1].startswith("Masz obecnie **3** aktywne oferty")
+        assert "w tabeli **3** produkty" in lines[-1]
+        assert "W tym **1** zakończona przez wyprzedanie" in lines[-1]
+
+    @pytest.mark.asyncio
+    async def test_summary_omits_ended_clause_when_there_are_none(self):
+        agent = self._make_agent_with_offers(active=[self._offer("111", "Czajnik Bosch", 109.0, 27)])
+
+        result = await agent._dispatch("get_active_offers", {})
+
+        assert result.splitlines()[-1] == (
+            "Masz obecnie **1** aktywną ofertę — w tabeli **1** produkt "
+            "po zsumowaniu ofert o tej samej nazwie."
+        )
+
+    @pytest.mark.asyncio
+    async def test_name_filter_is_named_in_the_summary(self):
+        agent = self._make_agent_with_offers(
+            active=[self._offer("111", "Ekspres DeLonghi", 1249.0, 4)]
+        )
+
+        result = await agent._dispatch("get_active_offers", {"name": "ekspres"})
+
+        assert "(filtr nazwy: „ekspres”)" in result.splitlines()[-1]
+
+    @pytest.mark.asyncio
+    async def test_pipe_in_offer_name_is_escaped(self):
+        agent = self._make_agent_with_offers(
+            active=[self._offer("111", "Czajnik | Bosch", 109.0, 5)]
+        )
+
+        result = await agent._dispatch("get_active_offers", {})
+
+        assert "| Czajnik \\| Bosch | 5 | 109,00 PLN | `111` |" in result
+
+    @pytest.mark.asyncio
+    async def test_no_offers_answers_in_one_sentence_without_a_table(self):
+        agent = self._make_agent_with_offers(active=[])
+
+        assert await agent._dispatch("get_active_offers", {}) == "Brak aktywnych ofert."
+        assert await agent._dispatch("get_active_offers", {"name": "ekspres"}) == (
+            "Brak aktywnych ofert pasujących do „ekspres”."
+        )
+
+    @pytest.mark.asyncio
+    async def test_polish_query_skips_the_interpret_call(self):
+        """get_active_offers is in _PASSTHROUGH_TOOLS now that its dispatch
+        output is the finished answer — a Polish query must reach the user
+        verbatim, table and summary intact, with no interpret round to retype
+        (and truncate) hundreds of rows."""
+        agent = _make_agent()
+        table = (
+            "# Aktywne oferty\n\n"
+            "| Nazwa | Stan (szt.) | Cena | ID ofert |\n"
+            "| --- | ---: | ---: | --- |\n"
+            "| Czajnik Bosch | 27 | 109,00 PLN | `111` |\n\n"
+            "Masz obecnie **1** aktywną ofertę — w tabeli **1** produkt "
+            "po zsumowaniu ofert o tej samej nazwie."
+        )
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=[_tool_select_response([_tool_call("get_active_offers", {})]),
+                         _no_more_tools_response()]
+        )
+        agent._dispatch = AsyncMock(return_value=table)
+
+        response = await agent.run("pokaż moje aktywne oferty")
+
+        assert response.text == table
+        assert response.metadata["output_format"] == "table"
+        assert "interpret_llm" not in response.metadata["perf_stages"]
+        # Tool-select round + the "anything else?" round, and no interpret call.
+        assert agent._client.chat.completions.create.call_count == 2
+
+
 class TestGetOrderDetailsDispatch:
     """_dispatch's get_order_details branch now builds the final, ready-to-
     display plain-text bullet list directly in Python instead of handing

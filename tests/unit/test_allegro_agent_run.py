@@ -132,13 +132,17 @@ class TestToolChaining:
         re-sends it plus every tool schema just to hear 'nothing else'."""
         from agents.allegro.allegro_agent import _CHAIN_RESULT_BUDGET
 
-        agent = _agent({"get_active_offers": "x" * (_CHAIN_RESULT_BUDGET + 1)})
+        # get_billing_summary rather than get_active_offers: the latter is now
+        # in _PASSTHROUGH_TOOLS (its dispatch builds the finished table, see
+        # AllegroAgent._render_offers_table), so a Polish query to it skips the
+        # interpret round this test counts.
+        agent = _agent({"get_billing_summary": "x" * (_CHAIN_RESULT_BUDGET + 1)})
         agent._client.chat.completions.create = AsyncMock(side_effect=[
-            _resp(tool_calls=[_tool_call("c1", "get_active_offers", {})]),
+            _resp(tool_calls=[_tool_call("c1", "get_billing_summary", {})]),
             _resp("| Nazwa | Stan |"),
         ])
 
-        response = await agent.run("pokaż wszystkie oferty")
+        response = await agent.run("pokaż wszystkie opłaty z tego miesiąca")
 
         assert response.text == "| Nazwa | Stan |"
         assert agent._client.chat.completions.create.await_count == 2
