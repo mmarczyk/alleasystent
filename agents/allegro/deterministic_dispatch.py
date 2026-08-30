@@ -221,9 +221,45 @@ def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
     return _match
 
 
-# get_new_orders last: the stage matchers above are the specific ones, and
+# ── zamowienia: get_orders_due_today ───────────────────────────────────────
+# The deadline question is the one order question where a date word is not a
+# reason to bail: "dzisiaj" IS this tool's default cut-off (end of today, see
+# _ORDERS_PRESETS), so the layer can serve it without a clock of its own. Any
+# other horizon ("do jutra", "w piątek", a date) needs a computed cut-off and
+# still goes to the LLM — hence the today-word requirement rather than a
+# general deadline match.
+_TODAY_RE = re.compile(r"dzisiaj|dzi[śs]\b|\btoday\b", re.IGNORECASE)
+_DISPATCH_INTENT_RE = re.compile(
+    r"wys[łl]a[ćc]|wys[łl]ani|wysy[łl]k|nada[ćc]|nadani|termin", re.IGNORECASE,
+)
+
+
+def _match_get_orders_due_today(query: str) -> dict | None:
+    if not (_TODAY_RE.search(query) and _DISPATCH_INTENT_RE.search(query)):
+        return None
+    if _ORDER_DETAIL_INTENT_RE.search(query) or _ORDERS_SINGULAR_RE.search(query):
+        return None
+    # "ile dziś wysłałem?" is today + shipping words, but it asks about parcels
+    # that already LEFT — the WYSŁANE stage, and a period one at that, so it
+    # belongs to the LLM, not to a deadline listing. Blank the plan phrases out
+    # first (same overlap as in _order_stage): "co mam dziś do wysłania" is not
+    # a past-tense question just because it shares the 'wysłan-' stem.
+    if _STATUS_SHIPPED_RE.search(_STATUS_TO_SHIP_RE.sub(" ", query)):
+        return None
+    # Today is the only period this tool resolves on its own; blank it out and
+    # anything left ("do jutra", "w tym tygodniu", a date) means a cut-off the
+    # layer can't compute.
+    if _PERIOD_RE.search(_TODAY_RE.sub(" ", query)):
+        return None
+    return {"count_only": True} if _is_count_only(query, _ORDERS_COUNT_TOPIC_RE) else {}
+
+
+# get_orders_due_today first: "co muszę wysłać dzisiaj" also reads as the DO
+# WYSŁANIA stage, but the deadline is the narrower, more useful answer.
+# get_new_orders last: the stage matchers are the specific ones, and
 # _match_get_new_orders' count-only branch fires on a stage-less question.
 _ORDERS_MATCHERS: list[tuple[str, Callable[[str], dict | None]]] = [
+    ("get_orders_due_today", _match_get_orders_due_today),
     *((tool, _stage_matcher(stage)) for stage, (tool, _) in _ORDER_STAGE_TOOLS.items()),
     ("get_new_orders", _match_get_new_orders),
 ]

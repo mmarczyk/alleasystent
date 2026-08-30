@@ -60,6 +60,7 @@ _TOOL_LABELS = {
     "get_new_orders":                  "Nowe zamówienia",
     "get_orders":                      "Zamówienia",
     "get_orders_delivery":             "Zamówienia (dostawa)",
+    "get_orders_due_today":            "Zamówienia na dziś",
     "get_order_details":               "Szczegóły zamówienia",
     "get_orders_pending_invoice":      "Faktury do wystawienia",
     "get_order_invoice_data":          "Dane do faktury",

@@ -600,6 +600,48 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_orders_due_today",
+            "description": (
+                "The DEADLINE view: orders that still have to be handed to the carrier and whose "
+                "dispatch deadline ('Wysyłka do' — delivery.time.dispatch.to) falls at or before "
+                "the END OF TODAY, overdue ones included, earliest deadline first, with courier "
+                "details on. Anything already handed over or no longer to be handed over (SENT, "
+                "PICKED_UP, CANCELLED, SUSPENDED) is excluded, whatever its deadline was. "
+                "USE THIS for 'co muszę wysłać dzisiaj', 'co mam dziś do wysyłki', 'co się pali', "
+                "'jakie mam dzisiaj terminy', 'ile paczek muszę dziś nadać', 'co muszę dziś zdążyć "
+                "nadać' — any question tying orders to TODAY'S dispatch deadline. "
+                "NOT the same as get_orders_delivery: that one is the PACKING-STATE view "
+                "(everything READY_FOR_SHIPMENT, whatever its deadline, including parcels due next "
+                "week); this one is the DEADLINE view (everything due today, including orders "
+                "nobody has packed yet). A question naming a day or a deadline is this tool; a "
+                "question naming the packing state ('gotowe do wysyłki', 'zapakowane') is that one. "
+                "OTHER HORIZONS: pass dispatch_before_local for a different cut-off — 'do jutra' → "
+                "tomorrow 23:59, 'do piątku' → that date 23:59. For ONLY the already-overdue ones "
+                "('co jest po terminie') pass dispatch_before_local with the CURRENT time instead."
+            ),
+            "parameters": _order_params(
+                "dispatch_after_local", "dispatch_before_local", "buyer_login", "count_only", "limit",
+                dispatch_before_local={
+                    "description": (
+                        "Deadline cut-off. Defaults to the end of today ('23:59'), which is what "
+                        "'co muszę wysłać dzisiaj' means — pass a value only for a different "
+                        "horizon ('YYYY-MM-DD 23:59' for 'do jutra'/'do piątku', or the current "
+                        "time 'HH:MM' to see only what is already overdue)."
+                    ),
+                },
+                dispatch_after_local={
+                    "description": (
+                        "Lower bound on the deadline. Leave EMPTY by default: 'co muszę wysłać "
+                        "dzisiaj' has to include orders whose deadline already passed — those are "
+                        "the most urgent ones, not the ones to hide."
+                    ),
+                },
+            ),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_orders_pending_invoice",
             "description": (
                 "Find all paid orders for a given month where the buyer requested a VAT invoice "
@@ -1146,6 +1188,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # artifact hid them behind a "zobacz pełną odpowiedź" click for no gain.
     "get_order_details": "chat",
     "get_orders_delivery": "chat",
+    "get_orders_due_today": "chat",
     # Oferty
     "get_active_offers": "table",
     "get_offers_summary": "dashboard",
@@ -1226,6 +1269,7 @@ _TOOL_LABELS: dict[str, str] = {
     "get_orders":                      "zamowienia",
     "get_order_details":               "zamowienia",
     "get_orders_delivery":             "zamowienia",
+    "get_orders_due_today":            "zamowienia",
     # oferty
     "get_active_offers":               "oferty",
     "get_offers_summary":              "oferty",
@@ -1295,7 +1339,7 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
                    "trakci", "realizacj", "zrealizow", "przetwarz", "kompletu", "kompletow",
                    "robocie", "nieskoncz", "nieukoncz", "dokoncz", "wywoz", "transporcie",
                    "przewozn", "poszl", "wyjecha", "dotar", "odebr", "odbior", "dostarcz",
-                   "zakonczon", "zamkni", "odhaczy"),
+                   "zakonczon", "zamkni", "odhaczy", "termin", "paczek", "nadac", "nadaj"),
     "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj"),
     "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),

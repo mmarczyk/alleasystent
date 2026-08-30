@@ -599,3 +599,138 @@ class TestGetOrderDetailsDispatch:
             result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
 
             assert expected_substr in result, result
+
+
+class TestOrdersDueToday:
+    """get_orders_due_today is the deadline view: what still has to be handed
+    to the carrier by the end of today. Unlike the other order presets it is
+    defined by exclusion (see _ORDERS_PRESETS), so these pin what it drops."""
+
+    @staticmethod
+    def _order(order_id: str, fulfillment_status: str, dispatch_to: str):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+
+        return AllegroOrder(
+            order_id=order_id,
+            buyer_login="kupujacy",
+            buyer_email="k@example.com",
+            status="READY_FOR_PROCESSING",
+            fulfillment_status=fulfillment_status,
+            total_price=99.0,
+            currency="PLN",
+            created_at="2026-08-27T10:00:00Z",
+            paid_at="2026-08-27T10:05:00Z",
+            delivery={"method": {"id": "dpd", "name": "Kurier DPD"}},
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=1, price=99.0)],
+            invoice_required=False,
+            dispatch_to=dispatch_to,
+        )
+
+    @staticmethod
+    def _deadline(days: int, hhmm: str) -> str:
+        """A dispatch deadline at a Warsaw-local wall-clock time, built through
+        the same conversion the filter uses. Deliberately anchored to calendar
+        days rather than "now + N hours": the tool's cut-off is the end of the
+        local day, so an offset-based fixture would land on the wrong side of
+        it when the suite happens to run near midnight."""
+        from datetime import date, timedelta
+
+        from agents.allegro.allegro_agent import AllegroAgent
+
+        day = (date.today() + timedelta(days=days)).isoformat()
+        return AllegroAgent._local_to_utc(f"{day} {hhmm}")
+
+    def _agent_with(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=orders)
+        agent._allegro.get_carriers = AsyncMock(return_value=[{"id": "dpd", "name": "Kurier DPD"}])
+        return agent
+
+    def _all_orders(self):
+        return [
+            self._order("overdue", "NEW", self._deadline(-1, "08:00")),
+            self._order("morning", "PROCESSING", self._deadline(0, "09:00")),
+            self._order("evening", "READY_FOR_SHIPMENT", self._deadline(0, "23:00")),
+            self._order("sent", "SENT", self._deadline(-1, "10:00")),
+            self._order("picked-up", "PICKED_UP", self._deadline(-1, "11:00")),
+            self._order("cancelled", "CANCELLED", self._deadline(-1, "12:00")),
+            self._order("tomorrow", "NEW", self._deadline(1, "10:00")),
+            self._order("next-week", "NEW", self._deadline(7, "10:00")),
+            self._order("no-deadline", "NEW", ""),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_lists_everything_still_to_be_handed_over_and_due_today(self):
+        agent = self._agent_with(self._all_orders())
+
+        result = await agent._dispatch("get_orders_due_today", {})
+
+        # Not packed yet (NEW) and half-done (PROCESSING) count too — the
+        # deadline doesn't care how far along the order is.
+        assert "`overdue`" in result and "`morning`" in result and "`evening`" in result
+
+    @pytest.mark.asyncio
+    async def test_drops_what_no_longer_has_to_be_handed_over(self):
+        agent = self._agent_with(self._all_orders())
+
+        result = await agent._dispatch("get_orders_due_today", {})
+
+        for order_id in ("sent", "picked-up", "cancelled"):
+            assert f"`{order_id}`" not in result, f"{order_id} is not waiting to be dispatched"
+
+    @pytest.mark.asyncio
+    async def test_drops_deadlines_beyond_today_and_unknown_ones(self):
+        agent = self._agent_with(self._all_orders())
+
+        result = await agent._dispatch("get_orders_due_today", {})
+
+        assert "`tomorrow`" not in result and "`next-week`" not in result
+        # An unknown deadline must never be rendered as an urgent one
+        # (see _dispatch_within).
+        assert "`no-deadline`" not in result
+
+    @pytest.mark.asyncio
+    async def test_overdue_first_then_by_deadline(self):
+        agent = self._agent_with(self._all_orders())
+
+        result = await agent._dispatch("get_orders_due_today", {})
+
+        assert result.index("`overdue`") < result.index("`morning`") < result.index("`evening`")
+
+    @pytest.mark.asyncio
+    async def test_count_only_counts_the_same_set(self):
+        agent = self._agent_with(self._all_orders())
+
+        result = await agent._dispatch("get_orders_due_today", {"count_only": True})
+
+        assert "Na dziś do wysłania: **3** zamówienia." in result
+
+    @pytest.mark.asyncio
+    async def test_empty_result_says_nothing_is_due(self):
+        agent = self._agent_with([self._order("next-week", "NEW", self._deadline(7, "10:00"))])
+
+        result = await agent._dispatch("get_orders_due_today", {})
+
+        assert result == "Nic nie czeka na wysyłkę z dzisiejszym terminem."
+
+    @pytest.mark.asyncio
+    async def test_explicit_cut_off_overrides_the_end_of_today_default(self):
+        from datetime import date, timedelta
+
+        agent = self._agent_with(self._all_orders())
+        tomorrow_2359 = (date.today() + timedelta(days=1)).isoformat() + " 23:59"
+
+        result = await agent._dispatch("get_orders_due_today", {"dispatch_before_local": tomorrow_2359})
+
+        assert "`tomorrow`" in result and "`next-week`" not in result
+
+    @pytest.mark.asyncio
+    async def test_fetches_a_full_page_because_both_filters_are_client_side(self):
+        """The status exclusion and the deadline filter both run on our side,
+        so a limit=5 request must still fetch a whole page — otherwise the
+        page could be all already-sent orders and the answer empty."""
+        agent = self._agent_with(self._all_orders())
+
+        await agent._dispatch("get_orders_due_today", {"limit": 5})
+
+        assert agent._allegro.get_orders.call_args.kwargs["limit"] == 100
