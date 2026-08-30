@@ -985,6 +985,21 @@ class AllegroAgent(BaseAgent):
             return few
         return many
 
+    @classmethod
+    def _count_sentence(
+        cls, count: int, lead: str, forms: tuple[str, str, str], none: str, scope: str = ""
+    ) -> str:
+        """A count_only answer, finished: "Masz **3** nowe zamówienia.", never a
+        "Liczba nowych zamówień: 3." label waiting for someone to reword it —
+        this text reaches the user as-is (see _RENDERED_VIEW_TOOLS).
+
+        `scope` is the optional period/filter note that goes inside the sentence
+        ("Masz **3** zwroty (2026-08-01 – 2026-08-28).").
+        """
+        if not count:
+            return none
+        return f"{lead} **{count}** {cls._plural_pl(count, *forms)}{scope}."
+
     @staticmethod
     def _cell(value: Any) -> str:
         """One markdown table cell. A '|' inside the value would split the cell in
@@ -1801,11 +1816,7 @@ class AllegroAgent(BaseAgent):
             empty_msg, count_none = preset["empty"], preset["count_none"]
             count_lead, count_forms = preset["count_lead"], preset["count_forms"]
         if tool_input.get("count_only"):
-            count = len(orders)
-            sentence = count_none if not count else (
-                f"{count_lead} **{count}** {self._plural_pl(count, *count_forms)}."
-            )
-            return sentence + suffix
+            return self._count_sentence(len(orders), count_lead, count_forms, count_none) + suffix
         if not orders:
             return empty_msg + suffix
 
@@ -2395,11 +2406,11 @@ class AllegroAgent(BaseAgent):
                 buyers = ", ".join(
                     (t.get("interlocutor") or {}).get("login", "—") for t in unread[:5]
                 )
-                return (
-                    f"Masz **{len(unread)}** "
-                    f"{self._plural_pl(len(unread), 'nową wiadomość', 'nowe wiadomości', 'nowych wiadomości')} "
-                    f"(od: {buyers}). Pokazać szczegóły?"
-                )
+                return self._count_sentence(
+                    len(unread), "Masz",
+                    ("nową wiadomość", "nowe wiadomości", "nowych wiadomości"),
+                    none="Nie masz nowych wiadomości.", scope=f" (od: {buyers})",
+                ) + " Pokazać szczegóły?"
             # The thread ID stays in the line: send_message_to_buyer needs it, and
             # it is read back from this very text on the next turn.
             return "\n".join(
@@ -2634,7 +2645,10 @@ class AllegroAgent(BaseAgent):
             )
             suffix = f" ({period_label})" if period_label else ""
             if tool_input.get("count_only"):
-                body = f"Liczba zwrotów{suffix}: {len(returns)}."
+                body = self._count_sentence(
+                    len(returns), "Masz", ("zwrot", "zwroty", "zwrotów"),
+                    none=f"Brak zwrotów{suffix}.", scope=suffix,
+                )
             else:
                 body = (
                     f"Brak zwrotów{suffix}." if not returns
@@ -2649,7 +2663,14 @@ class AllegroAgent(BaseAgent):
             )
             suffix = f" ({period_label})" if period_label else ""
             if tool_input.get("count_only"):
-                body = f"Liczba zwrotów do obsłużenia{suffix}: {len(returns)}."
+                body = self._count_sentence(
+                    len(returns), "Do obsłużenia masz", ("zwrot", "zwroty", "zwrotów"),
+                    none=(
+                        f"Brak zwrotów do obsłużenia{suffix} — żaden zwrócony towar nie dotarł "
+                        "jeszcze z powrotem."
+                    ),
+                    scope=suffix,
+                )
             else:
                 body = (
                     f"Brak zwrotów do obsłużenia{suffix} — żaden zwrócony towar nie dotarł jeszcze "
@@ -2664,7 +2685,10 @@ class AllegroAgent(BaseAgent):
             issues = await self._allegro.get_issues(limit=50, date_from=date_from, date_to=date_to)
             suffix = f" ({period_label})" if period_label else ""
             if tool_input.get("count_only"):
-                body = f"Liczba reklamacji{suffix}: {len(issues)}."
+                body = self._count_sentence(
+                    len(issues), "Masz", ("reklamację", "reklamacje", "reklamacji"),
+                    none=f"Brak reklamacji{suffix}.", scope=suffix,
+                )
             else:
                 body = (
                     f"Brak reklamacji{suffix}." if not issues
