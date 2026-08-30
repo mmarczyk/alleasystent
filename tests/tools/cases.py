@@ -234,7 +234,7 @@ CASES: list[Case] = [
          note="Wszystkie zwroty + blok monitoringu zwrotów."),
     Case("get_new_returns__count", "get_new_returns", {"count_only": True},
          "Ile mam zwrotów?",
-         ("Liczba zwrotów: 4",),
+         ("Masz **4** zwroty.",),
          note="count_only — sama liczba zwrotów."),
     Case("get_returns_to_process", "get_returns_to_process", {},
          "Które zwroty muszę obsłużyć?",

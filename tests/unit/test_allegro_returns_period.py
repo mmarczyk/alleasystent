@@ -227,7 +227,7 @@ class TestAgentPeriodHandling:
             {"count_only": True, "date_from_local": "2026-08-01", "date_to_local": "2026-08-28"},
         )
 
-        assert "Liczba zwrotów (2026-08-01 – 2026-08-28): 3." in text
+        assert "Masz **3** zwroty (2026-08-01 – 2026-08-28)." in text
         kwargs = agent._allegro.get_customer_returns.call_args.kwargs
         # Warsaw local midnight, not UTC midnight — August is UTC+2.
         assert kwargs["date_from"] == "2026-07-31T22:00:00Z"
@@ -243,7 +243,7 @@ class TestAgentPeriodHandling:
             {"count_only": True, "date_from_local": "2026-08-01", "date_to_local": "2026-08-28"},
         )
 
-        assert "Liczba zwrotów do obsłużenia (2026-08-01 – 2026-08-28): 0." in text
+        assert text.startswith("Brak zwrotów do obsłużenia (2026-08-01 – 2026-08-28)")
         assert agent._allegro.get_customer_returns.call_args.kwargs["status"] == "DELIVERED"
 
     async def test_complaints_period_is_forwarded(self):
@@ -256,16 +256,16 @@ class TestAgentPeriodHandling:
             {"count_only": True, "date_from_local": "2026-08-01", "date_to_local": "2026-08-28"},
         )
 
-        assert "Liczba reklamacji (2026-08-01 – 2026-08-28): 1." in text
+        assert "Masz **1** reklamację (2026-08-01 – 2026-08-28)." in text
         assert agent._allegro.get_issues.call_args.kwargs["date_from"] == "2026-07-31T22:00:00Z"
 
-    async def test_no_period_keeps_the_old_wording(self):
+    async def test_no_period_drops_the_window_note(self):
         agent = _agent()
         agent._allegro.get_customer_returns = AsyncMock(return_value=_returns(2, "2026-08"))
 
         text = await AllegroAgent._dispatch(agent, "get_new_returns", {"count_only": True})
 
-        assert text.startswith("Liczba zwrotów: 2.")
+        assert text.startswith("Masz **2** zwroty.")
         kwargs = agent._allegro.get_customer_returns.call_args.kwargs
         assert kwargs["date_from"] is None and kwargs["date_to"] is None
 
@@ -279,7 +279,7 @@ class TestAgentPeriodHandling:
             {"count_only": True, "date_from_local": "w tym miesiącu", "date_to_local": "dzisiaj"},
         )
 
-        assert text.startswith("Liczba zwrotów: 0.")
+        assert text.startswith("Brak zwrotów.")
         assert agent._allegro.get_customer_returns.call_args.kwargs["date_from"] is None
 
     async def test_listing_is_newest_first_with_a_count_header(self):

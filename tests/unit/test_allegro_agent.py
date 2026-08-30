@@ -192,11 +192,11 @@ class TestPassthroughGeneralizedToOtherTools:
         agent._client.chat.completions.create = AsyncMock(
             side_effect=AssertionError("no LLM call expected — deterministic match")
         )
-        agent._dispatch = AsyncMock(return_value="Liczba zwrotów: 2.")
+        agent._dispatch = AsyncMock(return_value="Masz **2** zwroty.")
 
         response = await agent.run("czy mam jakieś zwroty")
 
-        assert response.text == "Liczba zwrotów: 2."
+        assert response.text == "Masz **2** zwroty."
         assert agent._client.chat.completions.create.call_count == 0
 
     @pytest.mark.asyncio
@@ -492,6 +492,43 @@ class TestRenderedViews:
         result = await agent._dispatch("get_new_orders", {"count_only": True})
 
         assert result.startswith("Masz **3** nowe zamówienia.")
+
+    @pytest.mark.asyncio
+    async def test_every_count_only_answer_is_one_finished_sentence(self):
+        """One helper words them all (see _count_sentence) — no "Liczba X: N."
+        label survives anywhere, because nothing downstream rewords it."""
+        agent = self._agent()
+        agent._returns_monitoring_status_block = AsyncMock(return_value="")
+        agent._allegro.get_customer_returns = AsyncMock(return_value=[object()] * 2)
+        agent._allegro.get_issues = AsyncMock(return_value=[object()])
+        agent._allegro.get_message_threads = AsyncMock(return_value=[
+            {"id": "t1", "read": False, "interlocutor": {"login": "jan"}},
+        ])
+
+        assert (await agent._dispatch("get_new_returns", {"count_only": True})).startswith(
+            "Masz **2** zwroty."
+        )
+        assert (await agent._dispatch("get_returns_to_process", {"count_only": True})).startswith(
+            "Do obsłużenia masz **2** zwroty."
+        )
+        assert (await agent._dispatch("get_new_complaints", {"count_only": True})).startswith(
+            "Masz **1** reklamację."
+        )
+        assert (await agent._dispatch("get_message_threads", {"count_only": True})) == (
+            "Masz **1** nową wiadomość (od: jan). Pokazać szczegóły?"
+        )
+
+    def test_count_sentence_uses_polish_plural_forms_and_a_zero_case(self):
+        agent = self._agent()
+        forms = ("zwrot", "zwroty", "zwrotów")
+
+        assert agent._count_sentence(0, "Masz", forms, none="Brak zwrotów.") == "Brak zwrotów."
+        assert agent._count_sentence(1, "Masz", forms, none="x") == "Masz **1** zwrot."
+        assert agent._count_sentence(3, "Masz", forms, none="x") == "Masz **3** zwroty."
+        assert agent._count_sentence(12, "Masz", forms, none="x") == "Masz **12** zwrotów."
+        assert agent._count_sentence(2, "Masz", forms, none="x", scope=" (sierpień)") == (
+            "Masz **2** zwroty (sierpień)."
+        )
 
     @pytest.mark.asyncio
     async def test_no_new_orders_count_only(self):
