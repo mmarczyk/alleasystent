@@ -904,11 +904,31 @@ class AllegroService:
         latest = data.get("latestEvent") or {}
         return {"latest_event_id": latest.get("id"), "occurred_at": latest.get("occurredAt")}
 
+    @staticmethod
+    def order_event_details(order: AllegroOrder) -> dict[str, Any]:
+        """The order facts a new-order notification carries beyond its ID.
+
+        The monitor announces a new order without the seller having to open
+        anything, so the push has to answer what they always ask next: how much
+        is it worth, how does it ship, and does it need an invoice.
+        """
+        delivery = order.delivery if isinstance(order.delivery, dict) else {}
+        method = delivery.get("method") if isinstance(delivery.get("method"), dict) else {}
+        return {
+            "total_price": order.total_price,
+            "currency": order.currency,
+            "delivery_method": method.get("name") or "",
+            "invoice_required": order.invoice_required,
+        }
+
     async def get_order_events(self, since_event_id: str | None = None) -> dict[str, Any]:
         """Fetch new READY_FOR_PROCESSING order events since a given event ID.
 
         Verifies fulfillment.status == NEW to avoid false positives from orders
         that were cancelled and re-paid (payment event fires again but order is SENT).
+        Each returned order also carries the details the push notification shows
+        (value, delivery method, invoice flag) — they come from the very
+        checkout-form fetched for that verification, so they cost no extra call.
         """
         import asyncio
 
@@ -935,15 +955,22 @@ class AllegroService:
                 *[self.get_order(c["order_id"]) for c in candidates if c["order_id"]],
                 return_exceptions=True,
             )
-            fulfillment_map: dict[str, str] = {}
+            order_map: dict[str, AllegroOrder] = {}
             for result in order_results:
                 if isinstance(result, BaseException):
                     continue
-                fulfillment_map[result.order_id] = result.fulfillment_status
-            candidates = [
-                c for c in candidates
-                if fulfillment_map.get(c["order_id"], "NEW") == "NEW"
-            ]
+                order_map[result.order_id] = result
+            kept: list[dict[str, Any]] = []
+            for c in candidates:
+                order = order_map.get(c["order_id"])
+                # An order whose fetch failed stays in (unknown status is treated
+                # as NEW, as before) — it just goes out without the extra details.
+                if order is not None:
+                    if order.fulfillment_status != "NEW":
+                        continue
+                    c.update(self.order_event_details(order))
+                kept.append(c)
+            candidates = kept
 
         return {
             "new_orders": candidates,
