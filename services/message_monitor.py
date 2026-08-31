@@ -76,7 +76,9 @@ async def _poll_all_users() -> None:
 
 
 async def _poll_user(r, user_id: str) -> None:
-    from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
+    from services.allegro_service import (
+        AllegroService, AllegroAuthError, AllegroAPIError, is_thread_unread,
+    )
 
     if not await r.exists(f"allegro:tokens:{user_id}"):
         return
@@ -92,7 +94,7 @@ async def _poll_user(r, user_id: str) -> None:
         logger.warning("Message monitor: Allegro API error user=%s: %s", user_id, exc)
         return
 
-    markers = [_marker(t) for t in threads if t.get("hasUnreadMessages") and t.get("id")]
+    markers = [_marker(t) for t in threads if is_thread_unread(t) and t.get("id")]
     new_markers = await _diff_and_record(r, _SEEN_KEY.format(user_id=user_id), markers)
     if not new_markers:
         return
@@ -108,8 +110,13 @@ def _marker(thread: dict) -> str:
     alone (which is all the browser-side monitor tracked) so a follow-up
     message in a thread already reported still counts as new — otherwise a
     buyer writing twice about the same order would be announced only once.
+
+    Both fields come from services.allegro_service rather than being spelled
+    out here; see is_thread_unread for why getting these names wrong fails
+    silently instead of raising.
     """
-    return f"{thread.get('id')}@{thread.get('lastMessageCreatedAt') or ''}"
+    from services.allegro_service import thread_last_message_at
+    return f"{thread.get('id')}@{thread_last_message_at(thread)}"
 
 
 async def _diff_and_record(r, seen_key: str, current_markers: list[str]) -> list[str]:

@@ -131,6 +131,27 @@ class AllegroAPIError(Exception):
         super().__init__(f"Allegro API error {status_code}: {detail}")
 
 
+def is_thread_unread(thread: dict[str, Any]) -> bool:
+    """Whether an Allegro messaging thread has unread buyer messages.
+
+    Allegro's /messaging/threads marks this with a `read` boolean — there is no
+    `hasUnreadMessages` field. Reading it wrong is silent: the caller just sees
+    zero unread forever instead of erroring, which is exactly how
+    /allegro/unread-messages and the message monitor both went months without
+    ever firing a notification. Hence one shared predicate next to the API call
+    rather than the field name spelled out at each call site.
+
+    A thread missing the field counts as read, so a schema change can't flip
+    every thread to "new" and spam the user.
+    """
+    return not thread.get("read", True)
+
+
+def thread_last_message_at(thread: dict[str, Any]) -> str:
+    """Timestamp of a thread's most recent message (Allegro: lastMessageDateTime)."""
+    return thread.get("lastMessageDateTime") or ""
+
+
 class AllegroService:
     """
     Wraps the Allegro REST API.
