@@ -290,3 +290,104 @@ class TestReminderIsChatOnly:
         assert "o1" in text and "o2" in text
         notify.assert_not_awaited()
         push.assert_not_awaited()
+
+
+class TestReminderOwnsReply:
+    """The reminder must not claim a message that answers a DIFFERENT question
+    the assistant just asked. This was a real, critical bug: the assistant
+    asked "Masz 1 nową wiadomość (od: Modelinarnia). Pokazać szczegóły?", the
+    seller answered "Tak", and the open invoice reminder took that "Tak" as
+    consent and issued 3 real VAT invoices."""
+
+    ASK = "🧾 Masz 3 niewystawionych faktur dla już wysłanych zamówień: `o1`, `o2`, `o3`.\n\nWystawić je teraz?"
+    OTHER_ASK = "Masz **1** nową wiadomość (od: Modelinarnia). Pokazać szczegóły?"
+
+    def test_bare_yes_after_an_unrelated_question_is_not_the_reminders(self):
+        from services.invoice_reminder import _reminder_owns_reply
+        assert _reminder_owns_reply("Tak", self.OTHER_ASK) is False
+
+    def test_bare_yes_after_the_reminders_own_ask_is_the_reminders(self):
+        from services.invoice_reminder import _reminder_owns_reply
+        assert _reminder_owns_reply("Tak", self.ASK) is True
+
+    @pytest.mark.asyncio
+    async def test_all_three_ask_variants_are_recognized(self):
+        """Guards against the asks and the matcher drifting apart: whatever
+        _ask actually sends must read back as the reminder's own question."""
+        from services import invoice_reminder
+
+        for again, awaiting in ((False, False), (True, False), (True, True)):
+            with patch.object(invoice_reminder, "_notify", AsyncMock()) as notify:
+                await invoice_reminder._ask(
+                    "u1", ["o1", "o2"], again=again, awaiting_duration=awaiting,
+                )
+            text = notify.await_args.kwargs["chat_text"]
+            assert invoice_reminder._reminder_owns_reply("tak", text) is True
+
+    def test_duration_reply_after_the_how_long_follow_up_is_the_reminders(self):
+        """"2 godziny" names no invoice, but it answers the reminder's own
+        follow-up question — losing this would break the snooze flow."""
+        from services.invoice_reminder import _ASK_DURATION_TEXT, _reminder_owns_reply
+        assert _reminder_owns_reply("2 godziny", _ASK_DURATION_TEXT) is True
+
+    def test_message_naming_invoices_is_the_reminders_whatever_was_asked(self):
+        from services.invoice_reminder import _reminder_owns_reply
+        assert _reminder_owns_reply("wystaw te faktury", self.OTHER_ASK) is True
+        assert _reminder_owns_reply("przypomnij mi o fakturach jutro", self.OTHER_ASK) is True
+
+    def test_no_assistant_turn_in_thread_keeps_the_cross_thread_case_working(self):
+        """The reminder may be answered from a thread it was never written
+        into (see the module docstring) — with nothing else to answer there,
+        the reply is still the reminder's."""
+        from services.invoice_reminder import _reminder_owns_reply
+        assert _reminder_owns_reply("tak", None) is True
+        assert _reminder_owns_reply("tak", "   ") is True
+
+
+class TestHandleReplyRespectsOtherQuestions:
+    OTHER_ASK = "Masz **1** nową wiadomość (od: Modelinarnia). Pokazać szczegóły?"
+
+    @pytest.mark.asyncio
+    async def test_yes_to_another_question_never_issues_invoices(self):
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1", "o2", "o3"]}
+        mock_issue_all = AsyncMock(return_value="Wystawiam 3 faktur:")
+        mock_classify = AsyncMock(return_value=("issue", 0))
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", mock_classify), \
+             patch.object(invoice_reminder, "_issue_all", mock_issue_all):
+            result = await invoice_reminder.handle_reply("user1", "Tak", self.OTHER_ASK)
+
+        assert result is None                 # falls through to normal routing
+        mock_issue_all.assert_not_awaited()   # nothing was issued
+        mock_classify.assert_not_awaited()    # not even classified
+
+    @pytest.mark.asyncio
+    async def test_yes_to_the_reminders_own_ask_still_issues(self):
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"]}
+        mock_issue_all = AsyncMock(return_value="wystawione")
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", AsyncMock(return_value=("issue", 0))), \
+             patch.object(invoice_reminder, "_issue_all", mock_issue_all):
+            result = await invoice_reminder.handle_reply(
+                "user1", "Tak",
+                "🧾 Masz 1 niewystawioną fakturę dla już wysłanych zamówień: `o1`.\n\nWystawić je teraz?",
+            )
+        assert result == "wystawione"
+        mock_issue_all.assert_awaited_once_with("user1", state)
+
+    @pytest.mark.asyncio
+    async def test_last_assistant_turn_is_passed_to_the_classifier(self):
+        """Second layer: even on a message the reminder may claim, the
+        classifier is told what the assistant last asked."""
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"]}
+        mock_classify = AsyncMock(return_value=("unrelated", 0))
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", mock_classify):
+            await invoice_reminder.handle_reply("user1", "wystaw faktury", self.OTHER_ASK)
+        mock_classify.assert_awaited_once_with("wystaw faktury", state, self.OTHER_ASK)
