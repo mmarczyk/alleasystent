@@ -9,7 +9,24 @@
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icons/icon-192.svg" />
   <link rel="stylesheet" href="css/app.css" />
-  <link rel="stylesheet" href="css/vendor/github-dark.min.css" />
+  <link id="hljs-dark"  rel="stylesheet" href="css/vendor/github-dark.min.css" />
+  <link id="hljs-light" rel="stylesheet" href="css/vendor/github.min.css" disabled />
+  <script>
+    // Apply the saved theme before the first paint — doing this from app.js
+    // would flash the dark default at anyone who picked light.
+    (function () {
+      var t;
+      try { t = localStorage.getItem('ae_theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') t = 'dark';   // dark stays the default
+      document.documentElement.setAttribute('data-theme', t);
+      var dark = document.getElementById('hljs-dark');
+      var light = document.getElementById('hljs-light');
+      if (dark)  dark.disabled  = (t === 'light');
+      if (light) light.disabled = (t !== 'light');
+      var meta = document.querySelector('meta[name=theme-color]');
+      if (meta) meta.setAttribute('content', t === 'light' ? '#f6f7fb' : '#0f0f1a');
+    })();
+  </script>
   <script src="js/vendor/marked.min.js"></script>
   <script src="js/vendor/highlight.min.js"></script>
   <script src="js/vendor/chart.min.js"></script>
@@ -116,6 +133,18 @@
         </label>
       </div>
       <small class="muted">Włączniki działają tak samo jak polecenia w czacie — możesz sterować powiadomieniami z dowolnego miejsca.</small>
+    </div>
+    <div class="settings-divider"></div>
+    <div class="form-group">
+      <label>Wygląd</label>
+      <div class="toggle-row">
+        <span>🌙 Ciemny motyw</span>
+        <label class="switch">
+          <input type="checkbox" id="set-toggle-theme" onchange="UI.toggleDarkTheme(this.checked)" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <small class="muted">Wyłącz, żeby przełączyć się na jasną wersję interfejsu. Wybór zapamiętujemy na tym urządzeniu.</small>
     </div>
     <div class="settings-divider"></div>
     <button class="btn btn-outline w-full" onclick="UI.exportChat()">↓ Eksportuj rozmowę</button>

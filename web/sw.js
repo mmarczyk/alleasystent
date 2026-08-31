@@ -11,6 +11,7 @@ const SHELL = [
   './config.js',
   './css/app.css',
   './css/vendor/github-dark.min.css',
+  './css/vendor/github.min.css',
   './js/app.js',
   './js/vendor/marked.min.js',
   './js/vendor/highlight.min.js',
