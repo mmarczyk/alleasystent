@@ -223,8 +223,17 @@ class FakeInfaktAPI:
 
     TASK_REF = "task-ref-77123"
 
+    # inFakt's in-progress codes, consumed one per status call when a test sets
+    # pending_codes — the default happy path reports the invoice as created on
+    # the first check.
+    PENDING_DESCRIPTIONS = {
+        100: "Zlecenie przyjęte",
+        140: "Zlecenie jest w trakcie przetwarzania",
+    }
+
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
+        self.pending_codes: list[int] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = urlparse(str(request.url)).path
@@ -235,6 +244,12 @@ class FakeInfaktAPI:
             return FakeAllegroAPI._json({"invoice_task_reference_number": self.TASK_REF})
 
         if request.method == "GET" and "/async/invoices/status/" in path:
+            if self.pending_codes:
+                code = self.pending_codes.pop(0)
+                return FakeAllegroAPI._json({
+                    "processing_code": code,
+                    "processing_description": self.PENDING_DESCRIPTIONS.get(code, "W trakcie"),
+                })
             return FakeAllegroAPI._json({
                 "processing_code": 201,
                 "processing_description": "Invoice created",

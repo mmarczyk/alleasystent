@@ -117,3 +117,24 @@ async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
     status_calls = [c for c in result["api_calls"] if "async/invoices/status" in c]
     assert len(status_calls) == 1, status_calls
     assert result["duration_ms"] < 1000, f"still waiting up front: {result['duration_ms']} ms"
+
+
+async def test_issue_invoice_waits_out_infakts_mid_processing_status():
+    """inFakt answers 140 "Zlecenie jest w trakcie przetwarzania" while it is
+    still building the invoice. Only 100 counted as pending, so a task caught
+    mid-processing came back to the seller as "❌ Nie udało się wystawić
+    faktury" for an invoice inFakt then created anyway. The task has to be
+    re-checked until it actually resolves."""
+    from unittest.mock import patch
+
+    from tests.tools import dataset as ds
+    from tests.tools.harness import tool_harness
+
+    async with tool_harness() as h:
+        h.infakt_api.pending_codes = [100, 140, 140]
+        with patch("asyncio.sleep"):  # don't spend 3 × poll_interval on this
+            out = await h.run("issue_invoice_for_order", {"order_id": ds.ORD_1})
+
+    assert out.startswith("✅"), out
+    assert not h.infakt_api.pending_codes, "the task was not polled to completion"
+    assert "140" not in out

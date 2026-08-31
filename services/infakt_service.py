@@ -31,10 +31,16 @@ from models.allegro import AllegroOrder
 
 logger = logging.getLogger(__name__)
 
-# processing_code returned while the async task is still being worked on.
-_PROCESSING_CODE_PENDING = 100
 # processing_code returned once the invoice was created successfully.
 _PROCESSING_CODE_SUCCESS = 201
+# inFakt uses the whole 1xx range for "not finished yet", with more than one
+# code in it: 100 "Zlecenie przyjęte" right after the POST, then 140 "Zlecenie
+# jest w trakcie przetwarzania" while the invoice is actually being built.
+# Only 100 used to count as pending here, so a task that happened to be caught
+# mid-processing was reported to the seller as a failed issuance — for an
+# invoice inFakt then went on to create normally. Anything below this
+# threshold means "keep polling", not "failed".
+_PROCESSING_CODE_TERMINAL_FROM = 200
 
 
 class InfaktAPIError(Exception):
@@ -108,10 +114,15 @@ class InfaktService:
         self,
         invoice_payload: dict,
         poll_interval: float = 1.5,
-        max_attempts: int = 20,
+        max_attempts: int = 40,
     ) -> dict[str, Any]:
         """
         Create an invoice and poll until the async task resolves.
+
+        A pending task is checked repeatedly (up to max_attempts times, ~1 min
+        at the default interval) — inFakt reports several distinct in-progress
+        codes and needs a moment to build the invoice, so one look at the task
+        is not enough to tell "still working" from "failed".
 
         Returns the final status payload (includes invoice_uuid on success).
         Raises InfaktTaskError if inFakt rejects the invoice (validation errors
@@ -119,21 +130,41 @@ class InfaktService:
         if the task is still pending after max_attempts.
         """
         task_ref = await self.create_invoice_async(invoice_payload)
+        last_transient: InfaktAPIError | None = None
         for attempt in range(max_attempts):
             # Check first, sleep only between checks — a small invoice is often
             # already done, and sleeping up front added poll_interval to every
             # issuance for nothing.
-            status = await self.get_task_status(task_ref)
-            code = status.get("processing_code")
-            if code == _PROCESSING_CODE_PENDING:
+            try:
+                status = await self.get_task_status(task_ref)
+            except InfaktAPIError as exc:
+                # The invoice may well be getting created while the status check
+                # blips; a network error or a 5xx on one poll says nothing about
+                # the task, so keep checking instead of reporting a failure.
+                # A 4xx (bad key, unknown task ref) will not fix itself — raise.
+                if exc.status_code != 0 and exc.status_code < 500:
+                    raise
+                logger.warning("inFakt task %s: status check failed, retrying: %s", task_ref, exc)
+                last_transient = exc
                 await asyncio.sleep(poll_interval)
                 continue
+
+            code = status.get("processing_code")
             if code == _PROCESSING_CODE_SUCCESS:
                 return status
+            if not isinstance(code, int) or code < _PROCESSING_CODE_TERMINAL_FROM:
+                # Still queued or mid-processing (1xx), or a status payload we
+                # can't read — either way inFakt hasn't said "done" or "failed".
+                await asyncio.sleep(poll_interval)
+                continue
             raise InfaktTaskError(
                 code, status.get("processing_description", ""), status.get("invoice_errors")
             )
-        raise TimeoutError(f"inFakt invoice task {task_ref} still pending after {max_attempts} polls")
+
+        pending_detail = f" (last status check failed: {last_transient})" if last_transient else ""
+        raise TimeoutError(
+            f"inFakt invoice task {task_ref} still pending after {max_attempts} polls{pending_detail}"
+        )
 
     async def get_share_link(self, invoice_uuid: str) -> str:
         """Generate a shareable, no-login-required view link for an invoice."""
@@ -281,6 +312,19 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
             f"Nabywca: {buyer_kind}.\n"
             "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
         )
-    except (InfaktAPIError, InfaktTaskError, TimeoutError) as exc:
+    except TimeoutError as exc:
+        # The task was accepted by inFakt and simply hasn't finished within the
+        # polling window — the invoice may still appear a moment later, so this
+        # must not read as "nothing happened, try again": a blind retry would
+        # create a second invoice for the same order.
+        logger.error("issue_invoice_for_order: order %s still pending: %s", order_id, exc)
+        return (
+            f"⏳ inFakt przyjął zlecenie faktury dla zamówienia `{order_id}`, ale nie potwierdził "
+            "jej wystawienia w czasie oczekiwania. Faktura prawdopodobnie i tak się utworzy — "
+            "sprawdź panel inFakt za chwilę i NIE wystawiaj jej ponownie, dopóki tego nie "
+            "zweryfikujesz (inaczej powstanie duplikat).\n"
+            f"Szczegóły: {exc}"
+        )
+    except (InfaktAPIError, InfaktTaskError) as exc:
         logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
         return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
