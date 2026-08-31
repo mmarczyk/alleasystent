@@ -267,3 +267,126 @@ class TestMarkRequest:
         _, since_start_s = orch._mark_request()
 
         assert since_start_s >= 5
+
+
+class TestInvoiceReminderGetsTheOpenQuestion:
+    """The invoice reminder gets first look at every message, and its state
+    lives in Redis rather than in the session — so on its own it cannot tell
+    a "Tak" meant for it from a "Tak" answering the question the assistant
+    asked a second ago. It once took the seller's "Tak" to "Masz 1 nową
+    wiadomość (od: Modelinarnia). Pokazać szczegóły?" and issued 3 real VAT
+    invoices. handle() must hand it the thread's last assistant turn."""
+
+    def _orchestrator_with_session(self):
+        from models.conversation import ChannelType, ConversationSession
+
+        orc = _make_orchestrator()
+        session = ConversationSession(session_id="s1", channel=ChannelType.API, sender_id="u1")
+        orc._session_store.get_or_create_session = AsyncMock(return_value=session)
+        orc._session_store.save_session = AsyncMock()
+        return orc, session
+
+    def _message(self, text: str):
+        from models.conversation import ChannelType, IncomingMessage
+        return IncomingMessage(text=text, session_id="s1", channel=ChannelType.API, sender_id="u1")
+
+    @pytest.mark.asyncio
+    async def test_last_assistant_turn_is_passed_to_the_reminder(self):
+        from models.conversation import AgentResponse, MessageRole
+
+        orc, session = self._orchestrator_with_session()
+        session.add_message(MessageRole.USER, "Czy mam jakieś nowe wiadomości?")
+        session.add_message(
+            MessageRole.ASSISTANT,
+            "Masz **1** nową wiadomość (od: Modelinarnia). Pokazać szczegóły?",
+        )
+        orc._classify = AsyncMock(return_value="allegro_messages")
+        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro_messages:chat"))
+        handle_reply = AsyncMock(return_value=None)
+
+        with patch("services.invoice_reminder.handle_reply", handle_reply):
+            await orc.handle(self._message("Tak"), user_id="u1")
+
+        handle_reply.assert_awaited_once_with(
+            "u1", "Tak", "Masz **1** nową wiadomość (od: Modelinarnia). Pokazać szczegóły?",
+        )
+
+    @pytest.mark.asyncio
+    async def test_falling_through_still_routes_normally(self):
+        from models.conversation import AgentResponse, MessageRole
+
+        orc, session = self._orchestrator_with_session()
+        session.add_message(MessageRole.ASSISTANT, "Masz **1** nową wiadomość. Pokazać szczegóły?")
+        orc._classify = AsyncMock(return_value="allegro_messages")
+        orc._route = AsyncMock(
+            return_value=AgentResponse(text="treść wiadomości", agent_type="allegro_messages:chat"),
+        )
+
+        with patch("services.invoice_reminder.handle_reply", AsyncMock(return_value=None)):
+            response = await orc.handle(self._message("Tak"), user_id="u1")
+
+        assert response.text == "treść wiadomości"
+        orc._route.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_thread_passes_none(self):
+        from models.conversation import AgentResponse
+
+        orc, _ = self._orchestrator_with_session()
+        orc._classify = AsyncMock(return_value="none")
+        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="none:chat"))
+        handle_reply = AsyncMock(return_value=None)
+
+        with patch("services.invoice_reminder.handle_reply", handle_reply):
+            await orc.handle(self._message("tak"), user_id="u1")
+
+        assert handle_reply.await_args[0][2] is None
+
+    @pytest.mark.asyncio
+    async def test_handled_reply_short_circuits_routing(self):
+        orc, _ = self._orchestrator_with_session()
+        orc._classify = AsyncMock()
+        orc._route = AsyncMock()
+
+        with patch("services.invoice_reminder.handle_reply", AsyncMock(return_value="Wystawiam 1 fakturę:")):
+            response = await orc.handle(self._message("tak, wystaw faktury"), user_id="u1")
+
+        assert response.agent_type == "invoice_reminder"
+        assert response.text == "Wystawiam 1 fakturę:"
+        orc._route.assert_not_awaited()
+
+
+class TestLastAssistantText:
+    def _session(self):
+        from models.conversation import ChannelType, ConversationSession
+        return ConversationSession(session_id="s1", channel=ChannelType.API, sender_id="u1")
+
+    def test_none_when_the_assistant_has_not_spoken(self):
+        from agents.orchestrator import _last_assistant_text
+        from models.conversation import MessageRole
+
+        session = self._session()
+        session.add_message(MessageRole.USER, "cześć")
+        assert _last_assistant_text(session) is None
+
+    def test_returns_the_most_recent_assistant_turn(self):
+        from agents.orchestrator import _last_assistant_text
+        from models.conversation import MessageRole
+
+        session = self._session()
+        session.add_message(MessageRole.ASSISTANT, "pierwsza")
+        session.add_message(MessageRole.USER, "ok")
+        session.add_message(MessageRole.ASSISTANT, "druga")
+        session.add_message(MessageRole.USER, "tak")
+        assert _last_assistant_text(session) == "druga"
+
+    def test_blank_assistant_turns_are_skipped(self):
+        """A stored empty reply must not mask the real open question."""
+        from agents.orchestrator import _last_assistant_text
+        from models.conversation import MessageRole
+
+        session = self._session()
+        session.add_message(MessageRole.ASSISTANT, "Pokazać szczegóły?")
+        session.add_message(MessageRole.USER, "tak")
+        session.add_message(MessageRole.ASSISTANT, "   ")
+        assert _last_assistant_text(session) == "Pokazać szczegóły?"

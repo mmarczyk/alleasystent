@@ -174,6 +174,21 @@ _EMPTY_REPLY_FALLBACK = (
 )
 
 
+def _last_assistant_text(session) -> str | None:
+    """The last thing the assistant said in this thread, or None if it hasn't
+    spoken yet. Used to tell which open question a short reply ("tak") is
+    answering — see the invoice-reminder check in Orchestrator.handle().
+
+    Deliberately not age-limited like the history sent to the agents: a stale
+    question is exactly the case where a bare "tak" must NOT be read as
+    consent to a write action.
+    """
+    for msg in reversed(session.messages):
+        if msg.role == MessageRole.ASSISTANT and msg.content.strip():
+            return msg.content
+    return None
+
+
 class Orchestrator:
     """
     Routes incoming messages to the correct specialized agent.
@@ -226,41 +241,44 @@ class Orchestrator:
             )
         perf = StageTimer("orchestrator.handle")
 
-        # Give the invoice reminder first look at every incoming message: if it
-        # has an open "wystawić faktury?" ask outstanding for this user, this
-        # interprets the reply (issue now / snooze / snooze-for-how-long /
-        # turn reminders off) and answers directly — it never relies on the
-        # normal session-store conversation history, since the seller may
-        # reply from a different chat thread than the one the reminder was
-        # written into (see services/invoice_reminder.py's module docstring).
-        # A message unrelated to an open reminder falls through unchanged.
-        if user_id:
-            with perf.stage("invoice_reminder_check"):
-                try:
-                    from services.invoice_reminder import handle_reply as _handle_invoice_reminder_reply
-                    reminder_text = await _handle_invoice_reminder_reply(user_id, message.text)
-                except Exception as exc:
-                    logger.warning("Invoice reminder reply handling failed: %s", exc)
-                    reminder_text = None
-            if reminder_text is not None:
-                session = await self._session_store.get_or_create_session(
-                    session_id=message.session_id,
-                    channel=message.channel,
-                    sender_id=message.sender_id,
-                )
-                response = AgentResponse(text=reminder_text, agent_type="invoice_reminder")
-                session.add_message(MessageRole.USER, message.text)
-                session.add_message(MessageRole.ASSISTANT, response.text)
-                await self._session_store.save_session(session)
-                perf.log(source="invoice_reminder", channel=message.channel)
-                return response
-
         with perf.stage("session_load"):
             session = await self._session_store.get_or_create_session(
                 session_id=message.session_id,
                 channel=message.channel,
                 sender_id=message.sender_id,
             )
+
+        # Give the invoice reminder first look at every incoming message: if it
+        # has an open "wystawić faktury?" ask outstanding for this user, this
+        # interprets the reply (issue now / snooze / snooze-for-how-long /
+        # turn reminders off) and answers directly. Its STATE lives in Redis
+        # rather than in this session, since the seller may reply from a
+        # different chat thread than the one the reminder was written into
+        # (see services/invoice_reminder.py's module docstring).
+        #
+        # The last assistant turn of THIS thread still goes with it, because
+        # Redis state alone cannot tell "tak" answering the reminder from "tak"
+        # answering whatever the assistant asked a second ago ("Masz 1 nową
+        # wiadomość. Pokazać szczegóły?"). Without it that "tak" was taken as
+        # consent and issued real VAT invoices. A message unrelated to an open
+        # reminder falls through unchanged.
+        if user_id:
+            with perf.stage("invoice_reminder_check"):
+                try:
+                    from services.invoice_reminder import handle_reply as _handle_invoice_reminder_reply
+                    reminder_text = await _handle_invoice_reminder_reply(
+                        user_id, message.text, _last_assistant_text(session),
+                    )
+                except Exception as exc:
+                    logger.warning("Invoice reminder reply handling failed: %s", exc)
+                    reminder_text = None
+            if reminder_text is not None:
+                response = AgentResponse(text=reminder_text, agent_type="invoice_reminder")
+                session.add_message(MessageRole.USER, message.text)
+                session.add_message(MessageRole.ASSISTANT, response.text)
+                await self._session_store.save_session(session)
+                perf.log(source="invoice_reminder", channel=message.channel)
+                return response
 
         # Classify the data source
         try:

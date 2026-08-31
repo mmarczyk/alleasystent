@@ -20,6 +20,14 @@ conversation context. Instead the reminder's own question/answer loop is
 tracked here and consulted by agents.orchestrator.Orchestrator.handle() on
 every incoming message, regardless of which thread or channel it lands on.
 
+That state says an answer is outstanding, never that a given message IS the
+answer — and the assistant asks plenty of its own questions in between
+("Pokazać szczegóły?"). So handle_reply() also takes the last assistant turn
+of the thread the seller is actually replying in, and hands anything that
+answers a DIFFERENT open question back to normal routing untouched
+(_reminder_owns_reply). Without that, a "tak" meant for the assistant's own
+question issued real, irreversible VAT invoices.
+
 The reminder's TEXT is a separate matter: it is recorded as an assistant turn
 in whichever conversation it finally gets delivered to (see
 main.py._record_assistant_turns), so the assistant can see what it said and
@@ -29,6 +37,7 @@ depend on that, for the same reason — the seller may answer from elsewhere.
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -49,6 +58,25 @@ _MAX_SNOOZE_MINUTES = 60 * 24 * 14  # 2 weeks — sanity cap on a misparsed dura
 _STATUS_IDLE = "idle"
 _STATUS_AWAITING_RESPONSE = "awaiting_response"
 _STATUS_AWAITING_DURATION = "awaiting_duration"
+
+# The follow-up the reminder itself asks when the seller defers without saying
+# for how long. A constant because _reminder_owns_reply below has to recognize
+# it as one of the reminder's OWN questions (see there).
+_ASK_DURATION_TEXT = "Jasne — na jak długo mam odłożyć to przypomnienie?"
+
+# Wording unique to the reminder's own outgoing messages: the three "wystawić
+# faktury?" asks (all of which say "niewystawioną fakturę"/"niewystawionych
+# faktur") and the "na jak długo?" follow-up above. Matched against the LAST
+# ASSISTANT TURN — never against the seller's message — to tell whether the
+# assistant's open question really is the invoice one.
+_OWN_ASK_RE = re.compile(
+    r"niewystawion\w*\s+faktur|na\s+jak\s+d[łl]ugo\s+mam\s+od[łl]o[żz]y[ćc]",
+    re.IGNORECASE,
+)
+
+# The only thing that lets a reply be read as an invoice reply when the
+# assistant's last question was about something else entirely.
+_INVOICE_TOPIC_RE = re.compile(r"faktur", re.IGNORECASE)
 
 
 def _valid_redis_url(url: str | None) -> bool:
@@ -261,17 +289,62 @@ async def get_pending_state(user_id: str) -> dict | None:
     return state
 
 
-async def handle_reply(user_id: str, text: str) -> str | None:
+def _reminder_owns_reply(text: str, last_assistant_text: str | None) -> bool:
+    """Whether an open reminder may claim this message at all.
+
+    An open reminder is NOT the only thing the assistant may be waiting on an
+    answer to. The assistant asks its own questions in the chat ("Masz 1 nową
+    wiadomość (od: X). Pokazać szczegóły?"), and a bare "tak" answers the
+    question the seller just read — not a reminder they may have been shown
+    hours earlier, possibly in another thread. Letting the reminder take that
+    "tak" issued real VAT invoices in response to a question about messages,
+    which is unacceptable and irreversible.
+
+    So the reminder only claims a message when the seller can actually have
+    been answering IT:
+      - the assistant's last turn was one of the reminder's own questions, or
+      - there is no assistant turn in this thread to answer instead (the
+        cross-thread case this module is built for — see the module
+        docstring), or
+      - the message names invoices itself ("wystaw faktury", "przypomnij mi
+        o fakturach jutro"), which is unambiguous whatever was asked before.
+    Anything else falls through to normal routing, where the actual open
+    question gets answered.
+    """
+    if last_assistant_text is None or not last_assistant_text.strip():
+        return True
+    if _OWN_ASK_RE.search(last_assistant_text):
+        return True
+    return bool(_INVOICE_TOPIC_RE.search(text))
+
+
+async def handle_reply(
+    user_id: str, text: str, last_assistant_text: str | None = None,
+) -> str | None:
     """Interpret a chat message as a possible reply to an open invoice
     reminder. Returns the reply text to show the user if it WAS handled as
     such a reply (the caller should show this instead of routing normally),
     or None if there's no open reminder, or the message is unrelated to it
-    (caller should fall through to normal routing)."""
+    (caller should fall through to normal routing).
+
+    `last_assistant_text` is the last thing the assistant said in the thread
+    the seller is replying in, when the caller can supply it. It decides
+    whether this reminder gets to read the message at all
+    (_reminder_owns_reply) and is given to the classifier as context.
+    """
     state = await get_pending_state(user_id)
     if not state:
         return None
 
-    action, minutes = await _classify_reply(text, state)
+    if not _reminder_owns_reply(text, last_assistant_text):
+        logger.info(
+            "Invoice reminder: user=%s reply left to normal routing — the assistant's "
+            "last turn was a different question",
+            user_id,
+        )
+        return None
+
+    action, minutes = await _classify_reply(text, state, last_assistant_text)
 
     if action == "unrelated":
         return None
@@ -293,7 +366,7 @@ async def handle_reply(user_id: str, text: str) -> str | None:
 
     # snooze_unspecified — the seller wants to defer but didn't say for how long
     await _await_duration(user_id, state)
-    return "Jasne — na jak długo mam odłożyć to przypomnienie?"
+    return _ASK_DURATION_TEXT
 
 
 async def _issue_all(user_id: str, state: dict) -> str:
@@ -356,6 +429,19 @@ UNRELATED
 Odpowiedz TYLKO jednym z: ISSUE / SNOOZE:<liczba> / SNOOZE_UNSPECIFIED / DECLINE / UNRELATED.
 """.strip()
 
+# Second layer under _reminder_owns_reply: even when the reminder may claim
+# the message, the assistant's last turn tells the classifier what the seller
+# was most likely answering. Truncated because a last turn can be a full order
+# listing, and only its opening (where the question would be) matters here.
+_LAST_TURN_CHARS = 600
+_LAST_TURN_TEMPLATE = (
+    "OSTATNIA WIADOMOŚĆ ASYSTENTA w tej rozmowie — to na nią sprzedawca "
+    "najprawdopodobniej odpowiada:\n\"\"\"{last}\"\"\"\n"
+    "Jeśli wiadomość sprzedawcy odpowiada na TO pytanie, a nie na przypomnienie "
+    "o fakturach (np. asystent zapytał o coś zupełnie innego, a sprzedawca "
+    "odpowiedział „tak”), odpowiedz UNRELATED."
+)
+
 _AWAITING_DURATION_HINT = (
     " Asystent WŁAŚNIE zapytał sprzedawcę, na jak długo odłożyć przypomnienie — jeśli "
     "odpowiedź to sam czas (np. „2 godziny”, „jutro”), bez czasownika, potraktuj to "
@@ -363,7 +449,9 @@ _AWAITING_DURATION_HINT = (
 )
 
 
-async def _classify_reply(text: str, state: dict) -> tuple[str, int]:
+async def _classify_reply(
+    text: str, state: dict, last_assistant_text: str | None = None,
+) -> tuple[str, int]:
     from openai import AsyncOpenAI
 
     from agents.base_agent import _call_with_retry
@@ -374,6 +462,14 @@ async def _classify_reply(text: str, state: dict) -> tuple[str, int]:
     extra = _AWAITING_DURATION_HINT if state.get("status") == _STATUS_AWAITING_DURATION else ""
     system = _CLASSIFY_SYSTEM_TEMPLATE.format(count=count, extra=extra)
     now_local = datetime.now(_TZ)
+    context_messages = []
+    if last_assistant_text and last_assistant_text.strip():
+        context_messages.append({
+            "role": "user",
+            "content": _LAST_TURN_TEMPLATE.format(
+                last=last_assistant_text.strip()[:_LAST_TURN_CHARS],
+            ),
+        })
 
     client = AsyncOpenAI(
         api_key=settings.google_api_key,
@@ -393,6 +489,7 @@ async def _classify_reply(text: str, state: dict) -> tuple[str, int]:
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": f"Aktualna data i godzina: {now_local.strftime('%Y-%m-%d %H:%M %A')}"},
+                *context_messages,
                 {"role": "user", "content": text},
             ],
         )
