@@ -309,24 +309,43 @@ const DocViewer = (() => {
   // (built in Python by AllegroAgent._render_dashboard). Marked renders
   // those as <pre><code class="language-chart">...</code></pre> — swap each
   // one for a live Chart.js canvas instead of showing raw JSON.
-  const CHART_PALETTE = ['#818cf8', '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16'];
+  const CHART_PALETTE_FALLBACK = ['#818cf8', '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16'];
+
+  // Chart.js paints onto a canvas, so it can't inherit CSS variables — read
+  // them out at build time instead, and rebuild the charts when the theme
+  // flips (Theme.apply → DocViewer.rerender).
+  function _cssVar(name, fallback) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  }
+
+  function _chartPalette() {
+    const raw = _cssVar('--chart-palette', '');
+    const list = raw.split(',').map(c => c.trim()).filter(Boolean);
+    return list.length ? list : CHART_PALETTE_FALLBACK;
+  }
 
   function _chartConfig(spec) {
     const type = ['bar', 'line', 'pie', 'doughnut'].includes(spec.type) ? spec.type : 'bar';
     const isSliced = type === 'pie' || type === 'doughnut';
     const labels = Array.isArray(spec.labels) ? spec.labels : [];
     const series = Array.isArray(spec.series) ? spec.series : [];
+    const palette = _chartPalette();
+    const surface = _cssVar('--bg2', '#0f0f1a');   // .chart-wrap background
     const datasets = series.map((s, i) => ({
       label: s.name || `Seria ${i + 1}`,
       data: Array.isArray(s.data) ? s.data : [],
       backgroundColor: isSliced
-        ? labels.map((_, j) => CHART_PALETTE[j % CHART_PALETTE.length])
-        : CHART_PALETTE[i % CHART_PALETTE.length],
-      borderColor: isSliced ? '#0f0f1a' : CHART_PALETTE[i % CHART_PALETTE.length],
+        ? labels.map((_, j) => palette[j % palette.length])
+        : palette[i % palette.length],
+      borderColor: isSliced ? surface : palette[i % palette.length],
       borderWidth: isSliced ? 2 : (type === 'line' ? 2 : 1),
       fill: type === 'line' ? false : true,
       tension: .3,
     }));
+    const text = _cssVar('--text', '#e2e8f0');
+    const muted = _cssVar('--muted', '#94a3b8');
+    const grid = _cssVar('--chart-grid', 'rgba(148,163,184,.12)');
     return {
       type,
       data: { labels, datasets },
@@ -336,12 +355,12 @@ const DocViewer = (() => {
         plugins: {
           legend: {
             display: datasets.length > 1 || isSliced,
-            labels: { color: '#e2e8f0' },
+            labels: { color: text },
           },
         },
         scales: isSliced ? {} : {
-          x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,.12)' } },
-          y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,.12)' }, beginAtZero: true },
+          x: { ticks: { color: muted }, grid: { color: grid } },
+          y: { ticks: { color: muted }, grid: { color: grid }, beginAtZero: true },
         },
       },
     };
@@ -400,7 +419,54 @@ const DocViewer = (() => {
     return _registry[key]?.content || null;
   }
 
-  return { open, openFromKey, setActive, closeTab, close, copyActive, register, getContent };
+  return { open, openFromKey, setActive, closeTab, close, copyActive, register, getContent, rerender: _render };
+})();
+
+// ── Theme (dark / light) ─────────────────────────
+// Dark is the default; the choice is per-device and lives in localStorage.
+// index.html applies it inline before the first paint — this module owns the
+// runtime switch (Settings → "Ciemny motyw").
+const Theme = (() => {
+  const KEY = 'ae_theme';
+  const DEFAULT = 'dark';
+  const META_COLOR = { dark: '#0f0f1a', light: '#f6f7fb' };
+
+  function stored() {
+    try {
+      const t = localStorage.getItem(KEY);
+      return (t === 'light' || t === 'dark') ? t : null;
+    } catch { return null; }
+  }
+
+  function current() {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  }
+
+  function apply(theme) {
+    const t = theme === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+    // highlight.js ships one stylesheet per theme — swap which one is live
+    const dark  = document.getElementById('hljs-dark');
+    const light = document.getElementById('hljs-light');
+    if (dark)  dark.disabled  = (t === 'light');
+    if (light) light.disabled = (t !== 'light');
+    // Browser/PWA chrome (address bar, task switcher)
+    const meta = document.querySelector('meta[name=theme-color]');
+    if (meta) meta.setAttribute('content', META_COLOR[t]);
+    // Chart.js bakes its colours into the canvas, so an open document has to
+    // be repainted for its charts to follow the theme.
+    try { DocViewer.rerender(); } catch {}
+  }
+
+  function set(theme) {
+    const t = theme === 'light' ? 'light' : 'dark';
+    try { localStorage.setItem(KEY, t); } catch {}
+    apply(t);
+  }
+
+  function init() { apply(stored() || DEFAULT); }
+
+  return { init, set, apply, current, isDark: () => current() === 'dark' };
 })();
 
 // ── Settings ─────────────────────────────────────
@@ -1601,6 +1667,7 @@ const UI = (() => {
     document.getElementById('set-toggle-messages').checked = MessageMonitor.isEnabled();
     document.getElementById('set-toggle-returns').checked = ReturnsMonitor.isEnabled();
     document.getElementById('set-toggle-invoice-reminder').checked = InvoiceReminder.isEnabled();
+    document.getElementById('set-toggle-theme').checked = Theme.isDark();
     updateVersionInfo();
   }
 
@@ -1629,6 +1696,10 @@ const UI = (() => {
     if (on) InvoiceReminder.enable(); else InvoiceReminder.disable();
   }
 
+  function toggleDarkTheme(on) {
+    Theme.set(on ? 'dark' : 'light');
+  }
+
   function toggleSidebar() {
     document.getElementById('sidebar').classList.toggle('open');
   }
@@ -1655,7 +1726,7 @@ const UI = (() => {
   return {
     toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
     toggleOrderMonitoring, toggleInvoiceMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
-    toggleInvoiceReminder,
+    toggleInvoiceReminder, toggleDarkTheme,
   };
 })();
 
@@ -2195,6 +2266,7 @@ window.AllegroAuth = { start: startAllegroLogin };
 window.addEventListener('DOMContentLoaded', async () => {
   OfflineBanner.init();
   Settings.load();
+  Theme.init();
   Store.load();
   updateVersionInfo();
 

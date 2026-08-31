@@ -2,7 +2,13 @@
    AllEasystent Chat UI
    ═══════════════════════════════════════════════════ */
 
+/* Dark is the default theme; the light one below is opted into by
+   <html data-theme="light">, set from localStorage before first paint
+   (see the inline script in index.html) and toggled in Settings.
+   Every colour the UI paints must come from a variable defined in BOTH
+   blocks — a hardcoded hex here is a spot that stays dark in light mode. */
 :root {
+  color-scheme: dark;
   --bg:        #0f0f1a;
   --bg2:       #16162a;
   --bg3:       #1e1e36;
@@ -13,14 +19,72 @@
   --accent:    #818cf8;
   --text:      #e2e8f0;
   --muted:     #64748b;
+  --text-muted: #64748b;   /* alias used by inline styles in index.html */
   --user-bg:   #1e3a5f;
+  --user-bd:   #2a4a70;
   --bot-bg:    #1a1a30;
   --success:   #10b981;
   --danger:    #ef4444;
+  --warning:   #f59e0b;
+  --strong:    #c7d2fe;
+  --em:        #a5b4fc;
+  --code-bg:   #0d1117;
+  --code-inline-bg: rgba(99,102,241,.2);
+  --code-inline-bd: rgba(99,102,241,.3);
+  --row-alt:   rgba(255,255,255,.03);
+  --row-alt-2: rgba(255,255,255,.025);
+  --row-hover: rgba(99,102,241,.07);
+  --overlay:   rgba(0,0,0,.6);
+  --shadow:    rgba(0,0,0,.5);
+  --error-bg:  rgba(239,68,68,.1);
+  --error-bd:  rgba(239,68,68,.3);
+  --error-tx:  #fca5a5;
+  --on-primary: #fff;
+  /* Chart.js reads these through getComputedStyle (see _chartConfig) */
+  --chart-grid: rgba(148,163,184,.12);
+  --chart-palette: #818cf8,#6366f1,#10b981,#f59e0b,#ef4444,#06b6d4,#ec4899,#84cc16;
   --sidebar-w: 260px;
   --top-h:     56px;
   --radius:    12px;
   --radius-sm: 8px;
+}
+
+/* ── LIGHT THEME ─────────────────────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg:        #f6f7fb;
+  --bg2:       #ffffff;
+  --bg3:       #eceff7;
+  --card:      #ffffff;
+  --border:    #dde1ec;
+  --primary:   #4f46e5;
+  --primary-d: #4338ca;
+  --accent:    #4338ca;
+  --text:      #1a1d29;
+  --muted:     #667085;
+  --text-muted: #667085;
+  --user-bg:   #e0e7ff;
+  --user-bd:   #c3ccf7;
+  --bot-bg:    #ffffff;
+  --success:   #047857;
+  --danger:    #dc2626;
+  --warning:   #b45309;
+  --strong:    #3730a3;
+  --em:        #4f46e5;
+  --code-bg:   #f4f5fa;
+  --code-inline-bg: rgba(79,70,229,.1);
+  --code-inline-bd: rgba(79,70,229,.22);
+  --row-alt:   rgba(15,23,42,.035);
+  --row-alt-2: rgba(15,23,42,.03);
+  --row-hover: rgba(79,70,229,.08);
+  --overlay:   rgba(15,23,42,.35);
+  --shadow:    rgba(15,23,42,.18);
+  --error-bg:  rgba(220,38,38,.08);
+  --error-bd:  rgba(220,38,38,.35);
+  --error-tx:  #b42318;
+  --on-primary: #fff;
+  --chart-grid: rgba(71,85,105,.16);
+  --chart-palette: #4f46e5,#6366f1,#059669,#d97706,#dc2626,#0891b2,#db2777,#65a30d;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -42,7 +106,7 @@ html, body {
 
 /* ── OVERLAY ─────────────────────────────────────── */
 .overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,.6);
+  position: fixed; inset: 0; background: var(--overlay);
   z-index: 40; backdrop-filter: blur(2px);
 }
 
@@ -271,7 +335,7 @@ select option { background: var(--bg2); }
   position: relative;
 }
 .msg-user .msg-bubble {
-  background: var(--user-bg); border: 1px solid #2a4a70;
+  background: var(--user-bg); border: 1px solid var(--user-bd);
   border-bottom-right-radius: 4px;
 }
 .msg-bot .msg-bubble {
@@ -287,8 +351,8 @@ select option { background: var(--bg2); }
 .msg-bubble p:last-child  { margin-bottom: 0; }
 .msg-bubble ul,.msg-bubble ol { padding-left: 1.4rem; margin: .4rem 0; }
 .msg-bubble li { margin: .2rem 0; }
-.msg-bubble strong { color: #c7d2fe; }
-.msg-bubble em     { color: #a5b4fc; }
+.msg-bubble strong { color: var(--strong); }
+.msg-bubble em     { color: var(--em); }
 .msg-bubble a      { color: var(--accent); }
 .msg-bubble blockquote {
   border-left: 3px solid var(--primary); margin: .5rem 0;
@@ -301,14 +365,14 @@ select option { background: var(--bg2); }
 }
 .msg-bubble th,.msg-bubble td { border: 1px solid var(--border); padding: .4rem .65rem; text-align: left; white-space: nowrap; }
 .msg-bubble th { background: var(--bg3); color: var(--accent); font-weight: 600; }
-.msg-bubble tr:nth-child(even) td { background: rgba(255,255,255,.03); }
+.msg-bubble tr:nth-child(even) td { background: var(--row-alt); }
 .msg-bubble pre {
-  background: #0d1117; border: 1px solid var(--border);
+  background: var(--code-bg); border: 1px solid var(--border);
   border-radius: var(--radius-sm); margin: .5rem 0; overflow-x: auto;
 }
 .msg-bubble pre code { padding: .75rem 1rem; display: block; font-size: .85rem; font-family: 'Cascadia Code', 'Fira Code', monospace; }
 .msg-bubble code:not(pre code) {
-  background: rgba(99,102,241,.2); border: 1px solid rgba(99,102,241,.3);
+  background: var(--code-inline-bg); border: 1px solid var(--code-inline-bd);
   border-radius: 4px; padding: .1rem .35rem; font-size: .87rem;
   font-family: 'Cascadia Code', 'Fira Code', monospace;
 }
@@ -345,8 +409,8 @@ select option { background: var(--bg2); }
 
 /* ERROR BUBBLE */
 .msg-error {
-  background: rgba(239,68,68,.1); border-color: rgba(239,68,68,.3);
-  color: #fca5a5;
+  background: var(--error-bg); border-color: var(--error-bd);
+  color: var(--error-tx);
 }
 
 /* ── INPUT AREA ──────────────────────────────────── */
@@ -416,7 +480,7 @@ select option { background: var(--bg2); }
     position: fixed; left: 0; top: 0; bottom: 0; z-index: 30;
     transform: translateX(-100%);
   }
-  .sidebar.open { transform: translateX(0); box-shadow: 4px 0 20px rgba(0,0,0,.5); }
+  .sidebar.open { transform: translateX(0); box-shadow: 4px 0 20px var(--shadow); }
   .suggestions { grid-template-columns: 1fr; }
   .msg-content { max-width: 90%; }
   .messages { padding: 1rem .75rem; }
@@ -498,7 +562,7 @@ select option { background: var(--bg2); }
 
 .btn-invoice-reminder {
   display: inline-flex; align-items: center; gap: .4rem;
-  background: var(--warning, #f59e0b); color: #fff;
+  background: var(--warning); color: #fff;
   border: none; border-radius: var(--radius-sm);
   padding: .5rem 1rem; font-size: .88rem; font-weight: 600;
   cursor: pointer; margin-top: .5rem; transition: filter .15s;
@@ -597,8 +661,8 @@ select option { background: var(--bg2); }
 .doc-content p:last-child { margin-bottom: 0; }
 .doc-content ul, .doc-content ol { margin: 0 0 .9rem 1.5rem; }
 .doc-content li { margin-bottom: .35rem; }
-.doc-content strong { color: #c7d2fe; }
-.doc-content em { color: #a5b4fc; }
+.doc-content strong { color: var(--strong); }
+.doc-content em { color: var(--em); }
 .doc-content a { color: var(--accent); }
 .doc-content hr { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
 .doc-content blockquote {
@@ -608,12 +672,12 @@ select option { background: var(--bg2); }
   color: var(--muted);
 }
 .doc-content code {
-  background: rgba(99,102,241,.18); border: 1px solid rgba(99,102,241,.3);
+  background: var(--code-inline-bg); border: 1px solid var(--code-inline-bd);
   border-radius: 4px; padding: .1em .4em;
   font-size: .88em; font-family: 'Cascadia Code','Fira Code',monospace;
 }
 .doc-content pre {
-  background: #0d1117; border: 1px solid var(--border);
+  background: var(--code-bg); border: 1px solid var(--border);
   border-radius: var(--radius-sm); margin: .75rem 0; overflow-x: auto;
 }
 .doc-content pre code {
@@ -638,7 +702,7 @@ select option { background: var(--bg2); }
   vertical-align: top;
 }
 .doc-content tbody tr:last-child td { border-bottom: none; }
-.doc-content tbody tr:nth-child(even) { background: rgba(255,255,255,.025); }
+.doc-content tbody tr:nth-child(even) { background: var(--row-alt-2); }
 
 /* Table-format replies: wider canvas, sticky header for long lists */
 .doc-content[data-kind="table"] { max-width: 1200px; }
@@ -666,7 +730,7 @@ select option { background: var(--bg2); }
 .doc-content[data-kind="dashboard"] .dash-section strong {
   font-size: 1em; color: var(--accent);
 }
-.doc-content tbody tr:hover { background: rgba(99,102,241,.07); }
+.doc-content tbody tr:hover { background: var(--row-hover); }
 
 /* Charts embedded in dashboard-format replies (see DocViewer._renderCharts) */
 .chart-wrap {
@@ -684,8 +748,8 @@ select option { background: var(--bg2); }
 }
 
 /* Button in chat bubble to open doc viewer */
-.msg-act-doc { color: var(--accent) !important; border-color: rgba(99,102,241,.4) !important; }
-.msg-act-doc:hover { background: rgba(99,102,241,.12) !important; border-color: var(--accent) !important; }
+.msg-act-doc { color: var(--accent) !important; border-color: var(--code-inline-bd) !important; }
+.msg-act-doc:hover { background: var(--code-inline-bg) !important; border-color: var(--accent) !important; }
 
 @media (max-width: 768px) {
   .doc-body { padding: 1.5rem .75rem; }
