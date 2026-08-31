@@ -56,7 +56,15 @@ class FakePipeline:
 
 
 def _thread(tid: str, unread: bool = True, at: str = "2026-08-26T01:00:00Z"):
-    return {"id": tid, "hasUnreadMessages": unread, "lastMessageCreatedAt": at}
+    """A thread shaped like Allegro's real /messaging/threads response.
+
+    The field names matter more than they look: `read` and `lastMessageDateTime`
+    are what Allegro actually sends. An earlier version of this file invented
+    `hasUnreadMessages`/`lastMessageCreatedAt` to match the (equally wrong)
+    production code, so the whole suite passed green while the monitor saw zero
+    unread threads forever and never sent a single notification.
+    """
+    return {"id": tid, "read": not unread, "lastMessageDateTime": at}
 
 
 class TestMarker:
@@ -231,3 +239,82 @@ class TestScanKeyMatchesFlagKey:
         pattern = f"allegro:{mm._MONITOR_KIND}_monitor:enabled:*"
         assert fnmatch(written, pattern)
         assert written.count(":") >= 3 and written.split(":")[3] == "user-1"
+
+
+class TestAllegroThreadSchema:
+    """Pin the unread/timestamp field names against Allegro's real payload.
+
+    This is the regression that mattered: /allegro/unread-messages and the
+    monitor both read `hasUnreadMessages`/`lastMessageCreatedAt`, which Allegro
+    never sends. `.get()` returns None instead of raising, so both saw zero
+    unread threads forever and no notification was ever sent — with a green
+    test suite, because the fixtures used the invented names too.
+    """
+
+    def test_unread_thread_from_real_payload_is_detected(self):
+        from services.allegro_service import is_thread_unread
+        assert is_thread_unread({"id": "t1", "read": False}) is True
+
+    def test_read_thread_is_not_unread(self):
+        from services.allegro_service import is_thread_unread
+        assert is_thread_unread({"id": "t1", "read": True}) is False
+
+    def test_thread_missing_the_field_counts_as_read(self):
+        """Fail closed: a schema surprise must not flip every thread to "new"."""
+        from services.allegro_service import is_thread_unread
+        assert is_thread_unread({"id": "t1"}) is False
+
+    def test_phantom_field_is_not_honoured(self):
+        """The exact shape of the old bug, now asserted against."""
+        from services.allegro_service import is_thread_unread
+        assert is_thread_unread({"id": "t1", "hasUnreadMessages": True}) is False
+
+    def test_last_message_timestamp_reads_allegro_field(self):
+        from services.allegro_service import thread_last_message_at
+        assert thread_last_message_at(
+            {"id": "t1", "lastMessageDateTime": "2026-08-31T02:14:00Z"}
+        ) == "2026-08-31T02:14:00Z"
+        assert thread_last_message_at({"id": "t1", "lastMessageCreatedAt": "x"}) == ""
+
+    async def test_realistic_thread_payload_reaches_notify(self):
+        """End-to-end over _poll_user with a thread shaped like the real API."""
+        import services.message_monitor as mm
+
+        thread = {
+            "id": "t-real",
+            "read": False,
+            "interlocutor": {"login": "kupujacy123"},
+            "lastMessageDateTime": "2026-08-31T02:14:00Z",
+        }
+        r = FakeRedis({"allegro:monitor:messages:seen:user-1": {"t-old@2026-08-30T00:00:00Z"}})
+        r.exists = AsyncMock(side_effect=lambda key: 1 if key.startswith("allegro:tokens:")
+                             else (1 if key in r.sets else 0))
+        allegro = MagicMock()
+        allegro._tokens = {"access_token": "x"}
+        allegro._load_tokens_from_redis = AsyncMock()
+        allegro.get_message_threads = AsyncMock(return_value=[thread])
+
+        with patch("services.allegro_service.AllegroService") as svc, \
+             patch.object(mm, "_notify", new=AsyncMock()) as notify:
+            svc.get_instance.return_value = allegro
+            await mm._poll_user(r, "user-1")
+        notify.assert_awaited_once()
+        assert notify.await_args.kwargs["count"] == 1
+
+
+class TestSingleSourceOfTruth:
+    """The monitor, the HTTP endpoint and the chat agent must all decide
+    "is this unread?" the same way — they disagreed before, and the two that
+    were wrong failed silently."""
+
+    def test_monitor_endpoint_and_agent_share_the_predicate(self):
+        import inspect
+        import services.message_monitor as mm
+        import main
+        from agents.allegro import allegro_agent
+
+        for module in (mm, main, allegro_agent):
+            src = inspect.getsource(module)
+            assert "hasUnreadMessages" not in src, module.__name__
+            assert "lastMessageCreatedAt" not in src, module.__name__
+            assert "is_thread_unread" in src, module.__name__

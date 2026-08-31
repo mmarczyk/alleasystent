@@ -854,7 +854,10 @@ async def allegro_message_monitor_disable(request: Request):
 async def allegro_unread_messages(request: Request):
     """Return buyer message threads that currently have unread messages."""
     from services.auth_service import get_current_user
-    from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
+    from services.allegro_service import (
+        AllegroService, AllegroAuthError, AllegroAPIError,
+        is_thread_unread, thread_last_message_at,
+    )
 
     user = await get_current_user(request)
     service = AllegroService.get_instance(user["sub"])
@@ -868,13 +871,13 @@ async def allegro_unread_messages(request: Request):
         raise HTTPException(401, "Allegro auth error")
     except AllegroAPIError as exc:
         raise HTTPException(502, str(exc))
-    unread = [t for t in threads if t.get("hasUnreadMessages")]
+    unread = [t for t in threads if is_thread_unread(t)]
     return {
         "threads": [
             {
                 "thread_id": t.get("id"),
-                "subject": (t.get("subject") or {}).get("name"),
-                "last_message_at": t.get("lastMessageCreatedAt"),
+                "buyer": (t.get("interlocutor") or {}).get("login"),
+                "last_message_at": thread_last_message_at(t),
             }
             for t in unread
         ],

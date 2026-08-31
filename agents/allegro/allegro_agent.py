@@ -27,7 +27,10 @@ from agents.allegro.deterministic_dispatch import resolve_deterministic, wants_l
 from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
-from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
+from services.allegro_service import (
+    AllegroAPIError, AllegroAuthError, AllegroService,
+    is_thread_unread, thread_last_message_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2441,7 +2444,7 @@ class AllegroAgent(BaseAgent):
                     "Nie masz nowych wiadomości." if tool_input.get("count_only")
                     else "Brak wątków wiadomości."
                 )
-            unread = [t for t in threads if not t.get("read", True)]
+            unread = [t for t in threads if is_thread_unread(t)]
             if tool_input.get("count_only"):
                 if not unread:
                     return "Nie masz nowych wiadomości."
@@ -2457,8 +2460,8 @@ class AllegroAgent(BaseAgent):
             # it is read back from this very text on the next turn.
             return "\n".join(
                 f"- **{(t.get('interlocutor') or {}).get('login', '—')}** — "
-                f"{'🔴 nieprzeczytana' if not t.get('read', True) else 'przeczytana'} — "
-                f"ostatnia wiadomość: {self._format_dt_pl(t.get('lastMessageDateTime', ''))} — "
+                f"{'🔴 nieprzeczytana' if is_thread_unread(t) else 'przeczytana'} — "
+                f"ostatnia wiadomość: {self._format_dt_pl(thread_last_message_at(t))} — "
                 f"wątek `{t.get('id')}`"
                 for t in threads
             )
@@ -2484,7 +2487,7 @@ class AllegroAgent(BaseAgent):
                     )
                     candidates = [
                         t for t in candidates
-                        if self._to_warsaw_date(t.get("lastMessageDateTime", "")) == target_date
+                        if self._to_warsaw_date(thread_last_message_at(t)) == target_date
                     ]
                 if not candidates:
                     return "Nie znalazłem wątku pasującego do podanego kupującego / daty."
