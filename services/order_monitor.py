@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _STATE_KEY      = "allegro:monitor:last_event:{user_id}"
 _STATE_TTL      = 86400 * 30  # 30 days
 _ENABLED_KEY    = "allegro:monitor:enabled:{user_id}"
+_MAX_DELIVERY_NAMES = 3  # distinct courier names printed in a multi-order push body
 
 
 async def is_monitor_enabled(user_id: str) -> bool:
@@ -55,6 +56,76 @@ async def set_monitor_enabled(user_id: str, enabled: bool) -> None:
             await r.delete(key)
     finally:
         await r.aclose()
+
+
+def _format_price(amount: float, currency: str = "PLN") -> str:
+    """Same shape the agent prints prices in (AllegroAgent._format_price)."""
+    return f"{amount:.2f}".replace(".", ",") + f" {currency}"
+
+
+def _format_totals(orders: list[dict]) -> str:
+    """Summed order value, per currency — orders in one pass are practically
+    always PLN, but a mixed batch must not silently add złote to euro."""
+    totals: dict[str, float] = {}
+    for o in orders:
+        currency = o.get("currency") or "PLN"
+        totals[currency] = totals.get(currency, 0.0) + float(o.get("total_price") or 0.0)
+    return " + ".join(_format_price(amount, currency) for currency, amount in totals.items())
+
+
+def _format_delivery_methods(orders: list[dict]) -> str:
+    """Distinct delivery methods, in first-seen order, capped so the push body
+    stays readable when a batch spans many couriers."""
+    names: list[str] = []
+    for o in orders:
+        name = (o.get("delivery_method") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return ""
+    if len(names) <= _MAX_DELIVERY_NAMES:
+        return ", ".join(names)
+    shown = names[:_MAX_DELIVERY_NAMES]
+    return ", ".join(shown) + f" +{len(names) - len(shown)}"
+
+
+def build_notification_body(new_orders: list[dict]) -> str:
+    """The push/inbox body for a batch of new orders.
+
+    Beyond "you have new orders", the seller immediately wants the three facts
+    that decide whether to drop everything and pack now: what the order is
+    worth, how it ships, and whether an invoice has to be issued. They ride
+    along in the event payload (see AllegroService.order_event_details), so the
+    notification can state them without the seller opening anything.
+
+    Details are best-effort: an order whose checkout-form fetch failed carries
+    none, and every line is dropped rather than printed empty — worst case the
+    body degrades to the plain count sentence it was before.
+    """
+    count = len(new_orders)
+    priced   = [o for o in new_orders if o.get("total_price") is not None]
+    invoiced = [o for o in new_orders if "invoice_required" in o]
+    delivery = _format_delivery_methods(new_orders)
+
+    if count == 1:
+        lines: list[str] = []
+        if priced:
+            lines.append(f"Wartość: {_format_totals(priced)}")
+        if delivery:
+            lines.append(f"Dostawa: {delivery}")
+        if invoiced:
+            lines.append("Faktura: tak" if invoiced[0].get("invoice_required") else "Faktura: nie")
+        return "\n".join(lines) if lines else "Zamówienie czeka na realizację."
+
+    lines = [f"{count} zamówień czeka na realizację."]
+    if priced:
+        lines.append(f"Łączna wartość: {_format_totals(priced)}")
+    if delivery:
+        lines.append(f"Dostawa: {delivery}")
+    if invoiced:
+        wanted = sum(1 for o in invoiced if o.get("invoice_required"))
+        lines.append(f"Faktura: {wanted} z {count}")
+    return "\n".join(lines)
 
 
 async def run_once() -> None:
@@ -137,7 +208,7 @@ async def _poll_user(r, user_id: str) -> None:
     logger.info("Order monitor: %d new order(s) for user=%s", count, user_id)
 
     title = "Nowe zamówienie na Allegro" if count == 1 else f"{count} nowych zamówień na Allegro"
-    body  = "Zamówienie czeka na realizację." if count == 1 else f"{count} zamówień czeka na realizację."
+    body  = build_notification_body(new_orders)
     prompt = (
         "Podaj mi szczegóły ostatniego nowego zamówienia."
         if count == 1 else

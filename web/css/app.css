@@ -529,7 +529,9 @@ select option { background: var(--bg2); }
   border-radius: 50%; background: var(--primary); margin-right: .4rem;
 }
 .notif-title { font-weight: 600; font-size: .92rem; }
-.notif-body { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
+/* Monitor bodies are multi-line (value / delivery / invoice on their own
+   lines, as the OS notification shows them), so keep the breaks. */
+.notif-body { font-size: .85rem; color: var(--muted); margin-top: .2rem; white-space: pre-line; }
 .notif-time { font-size: .75rem; color: var(--muted); opacity: .7; margin-top: .3rem; }
 .notif-empty { text-align: center; padding: 2rem 0; }
 
