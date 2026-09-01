@@ -958,3 +958,102 @@ class TestBuyersReport:
         )
 
         assert "Statusu faktury nie udało się sprawdzić dla 1 zamówienia" in result
+
+
+class TestSalesSummaryMonthlyBreakdown:
+    """A period longer than one calendar month gets a month-by-month section —
+    "podsumuj sprzedaż z tego roku z podziałem na miesiące" is one call for the
+    whole year, and the breakdown is built here, not by the interpret LLM
+    (see AllegroAgent._monthly_sales_section)."""
+
+    @staticmethod
+    def _order(order_id, price, paid_at):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+
+        return AllegroOrder(
+            order_id=order_id,
+            buyer_login="jan",
+            status="READY_FOR_PROCESSING",
+            fulfillment_status="SENT",
+            total_price=price,
+            currency="PLN",
+            created_at=paid_at,
+            paid_at=paid_at,
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Włóczka", quantity=1, price=price)],
+        )
+
+    def _agent_with(self, orders, billing=()):
+        agent = _make_agent()
+        agent._allegro.get_all_paid_orders_in_period = AsyncMock(return_value=orders)
+        agent._allegro.get_billing_entries_in_period = AsyncMock(return_value=list(billing))
+        return agent
+
+    def _rows(self, result):
+        section = result.split("## Sprzedaż wg miesięcy")[1].split("## ")[0]
+        return [ln for ln in section.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+
+    @pytest.mark.asyncio
+    async def test_one_row_per_month_including_months_with_no_sales(self):
+        agent = self._agent_with([
+            self._order("a", 100.0, "2026-01-10T10:00:00Z"),
+            self._order("b", 300.0, "2026-01-20T10:00:00Z"),
+            # Nothing in February — it must still show as a zero row.
+            self._order("c", 250.0, "2026-03-02T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch(
+            "get_sales_summary", {"date_from_local": "2026-01-01", "date_to_local": "2026-03-31"}
+        )
+
+        assert self._rows(result) == [
+            "| styczeń 2026 | 2 | 400,00 PLN | 200,00 PLN |",
+            "| luty 2026 | 0 | 0,00 PLN | 0,00 PLN |",
+            "| marzec 2026 | 1 | 250,00 PLN | 250,00 PLN |",
+        ]
+        assert "Najlepszy miesiąc: **styczeń 2026** (400,00 PLN)." in result
+
+    @pytest.mark.asyncio
+    async def test_monthly_rows_sum_to_the_period_total(self):
+        agent = self._agent_with([
+            self._order("a", 100.0, "2026-01-10T10:00:00Z"),
+            self._order("b", 300.0, "2026-05-20T10:00:00Z"),
+            self._order("c", 250.0, "2026-09-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch(
+            "get_sales_summary", {"date_from_local": "2026-01-01", "date_to_local": "2026-09-01"}
+        )
+
+        assert "łączny przychód: **650,00 PLN**" in result
+        assert len(self._rows(result)) == 9
+        spec = json.loads(result.split("```chart\n")[1].split("\n```")[0])
+        assert spec["labels"][0] == "01.2026" and spec["labels"][-1] == "09.2026"
+        assert sum(spec["series"][0]["data"]) == 650.0
+
+    @pytest.mark.asyncio
+    async def test_an_order_paid_after_local_midnight_counts_in_the_local_month(self):
+        """23:30 UTC on 31 March is already 01:30 on 1 April in Warsaw — the
+        period bounds are Warsaw-local, so the month buckets must be too."""
+        agent = self._agent_with([
+            self._order("a", 100.0, "2026-03-31T23:30:00Z"),
+            self._order("b", 50.0, "2026-03-31T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch(
+            "get_sales_summary", {"date_from_local": "2026-03-01", "date_to_local": "2026-04-30"}
+        )
+
+        assert self._rows(result) == [
+            "| marzec 2026 | 1 | 50,00 PLN | 50,00 PLN |",
+            "| kwiecień 2026 | 1 | 100,00 PLN | 100,00 PLN |",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_single_month_period_has_no_breakdown(self):
+        agent = self._agent_with([self._order("a", 100.0, "2026-03-10T10:00:00Z")])
+
+        result = await agent._dispatch(
+            "get_sales_summary", {"date_from_local": "2026-03-01", "date_to_local": "2026-03-31"}
+        )
+
+        assert "Sprzedaż wg miesięcy" not in result

@@ -377,7 +377,13 @@ class AllegroAgent(BaseAgent):
         "specified the channel(s) upfront as above.\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
-        "2) Period earnings/profit ('ile zarobiłem', 'zysk', 'przychód po opłatach') → get_sales_summary. "
+        "2) Period earnings/profit ('ile zarobiłem', 'zysk', 'przychód po opłatach', 'podsumuj sprzedaż') "
+        "→ get_sales_summary, ONE call covering the WHOLE period asked about. Resolve the period from the "
+        "current date in your context ('z tego roku'/'w tym roku' → 1 January of the current year through "
+        "today — never January alone; 'w tym miesiącu' → the 1st of the current month through today; "
+        "'w zeszłym roku' → 1 January to 31 December of the previous year). NEVER call it once per month to "
+        "build a 'podział na miesiące' — the report already breaks any period longer than one month down "
+        "month by month, and a per-month call answers a narrower question than the one asked. "
         "3) Period billing only → get_billing_summary. "
         "4) Plain order LIST for a period, no cost/profit wording → get_orders, NOT get_sales_summary "
         "(see the order-list rule above). "
@@ -1093,6 +1099,123 @@ class AllegroAgent(BaseAgent):
                 "```",
             ]
         return "\n".join(out)
+
+    # ── Sprzedaż wg miesięcy ──────────────────────────────────────────────────
+    _MONTH_NAMES_PL = (
+        "styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec",
+        "lipiec", "sierpień", "wrzesień", "październik", "listopad", "grudzień",
+    )
+    # A month-by-month table only stays readable for so long; past this the
+    # period is almost certainly a mistake (or an all-time question), and the
+    # breakdown is dropped rather than printing a hundred rows.
+    _MONTH_ROWS_CAP = 36
+
+    @classmethod
+    def _local_month(cls, iso_str: str) -> str:
+        """ISO 8601 (UTC) → 'YYYY-MM' in Warsaw local time, '' when unparseable.
+
+        Warsaw-local, not UTC: the period bounds the seller asked for are local
+        calendar dates (see _local_day_bounds_to_utc), so an order paid at 00:30
+        on 1 March local time belongs to March here too — bucketing it by its
+        UTC month would file it under February and make the monthly rows
+        disagree with the period total above them.
+        """
+        date_str = cls._to_warsaw_date(iso_str)
+        return date_str[:7] if date_str else ""
+
+    @classmethod
+    def _month_label_pl(cls, month_key: str) -> str:
+        """'2026-03' → 'marzec 2026'."""
+        year, _, month = month_key.partition("-")
+        try:
+            return f"{cls._MONTH_NAMES_PL[int(month) - 1]} {year}"
+        except (ValueError, IndexError):
+            return month_key
+
+    @classmethod
+    def _months_in_range(cls, first: str, last: str) -> list[str]:
+        """Every 'YYYY-MM' from `first` to `last` inclusive — gaps included, so a
+        month with no sales shows up as a zero row instead of silently vanishing
+        from a "podział na miesiące" report."""
+        months: list[str] = []
+        year, month = int(first[:4]), int(first[5:7])
+        end_year, end_month = int(last[:4]), int(last[5:7])
+        while (year, month) <= (end_year, end_month) and len(months) <= cls._MONTH_ROWS_CAP:
+            months.append(f"{year:04d}-{month:02d}")
+            year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+        return months
+
+    @classmethod
+    def _monthly_sales_section(cls, orders: list[Any], period_from: str, period_to: str) -> list[str]:
+        """Per-month order count and revenue — the "podsumuj sprzedaż z podziałem
+        na miesiące" view, built here rather than left to the interpret LLM for
+        the same reason as every other table in this file: it is arithmetic over
+        the order list, and a model retyping it can silently drop or invent a month.
+
+        Returns [] for a period inside a single calendar month (the summary above
+        already IS that month) or one too long to tabulate (see _MONTH_ROWS_CAP).
+        """
+        by_month: dict[str, dict[str, float]] = defaultdict(lambda: {"orders": 0.0, "revenue": 0.0})
+        for o in orders:
+            key = cls._local_month(o.paid_at or o.created_at)
+            if not key:
+                continue
+            by_month[key]["orders"] += 1
+            by_month[key]["revenue"] += o.total_price
+        if not by_month:
+            return []
+        # Span the period the seller asked for, not just the months that happen to
+        # have orders — a zero month is an answer, and a missing one reads as an
+        # oversight. Fall back to the months with data when the period bounds
+        # can't be read.
+        first = period_from[:7] if len(period_from) >= 7 else min(by_month)
+        last = period_to[:7] if len(period_to) >= 7 else max(by_month)
+        months = cls._months_in_range(min(first, min(by_month)), max(last, max(by_month)))
+        if len(months) < 2 or len(months) > cls._MONTH_ROWS_CAP:
+            return []
+
+        rows = []
+        for m in months:
+            count = int(by_month[m]["orders"]) if m in by_month else 0
+            revenue = by_month[m]["revenue"] if m in by_month else 0.0
+            avg = revenue / count if count else 0.0
+            rows.append([
+                cls._month_label_pl(m),
+                count,
+                cls._format_price(revenue),
+                cls._format_price(avg),
+            ])
+        best = max(months, key=lambda m: by_month[m]["revenue"] if m in by_month else 0.0)
+        return [
+            "",
+            "## Sprzedaż wg miesięcy",
+            "",
+            *cls._md_table(
+                ["Miesiąc", "Zamówienia", "Przychód", "Śr. wartość"],
+                rows,
+                align="lrrr",
+            ),
+            "",
+            f"Najlepszy miesiąc: **{cls._month_label_pl(best)}** "
+            f"({cls._format_price(by_month[best]['revenue'])}).",
+            "",
+            "```chart",
+            json.dumps(
+                {
+                    "type": "bar",
+                    "title": "Przychód wg miesiąca",
+                    # Short labels on purpose — a bar chart with twelve
+                    # "październik 2026" ticks turns into an unreadable fan.
+                    "labels": [f"{m[5:7]}.{m[:4]}" for m in months],
+                    "series": [{
+                        "name": "Przychód (PLN)",
+                        "data": [round(by_month[m]["revenue"], 2) if m in by_month else 0 for m in months],
+                    }],
+                },
+                ensure_ascii=False,
+            ),
+            "```",
+        ]
 
     @classmethod
     def _render_offers_table(
@@ -2447,6 +2570,13 @@ class AllegroAgent(BaseAgent):
             top = sorted(product_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
 
             sections: list[str] = []
+            # Month-by-month first: for any period longer than a single month
+            # ("sprzedaż z tego roku", "ostatni kwartał") this is the shape of
+            # the answer the seller asked for, and the totals above are just
+            # its sum.
+            sections += self._monthly_sales_section(
+                orders, tool_input["date_from_local"], tool_input["date_to_local"]
+            )
             if top:
                 sections += [
                     "",

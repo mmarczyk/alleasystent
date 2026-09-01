@@ -266,19 +266,24 @@ const DocViewer = (() => {
     const existing = _tabs.find(t => t.regKey === key);
     if (existing) {
       _activeId = existing.id;
-      _render();
-      document.getElementById('doc-viewer').classList.remove('hidden');
+      _show();
       return;
     }
     open(_titleFromContent(entry.content), entry.content, entry.kind, key);
+  }
+
+  // Unhide BEFORE rendering: the viewer is display:none until then, so a chart
+  // built first measures a zero-width canvas and lays itself out for it.
+  function _show() {
+    document.getElementById('doc-viewer').classList.remove('hidden');
+    _render();
   }
 
   function open(title, content, kind, regKey) {
     const id = ++_nextId;
     _tabs.push({ id, title: (title || _titleFromContent(content)).slice(0, 60), content, kind, regKey });
     _activeId = id;
-    _render();
-    document.getElementById('doc-viewer').classList.remove('hidden');
+    _show();
   }
 
   function setActive(id) {
@@ -351,10 +356,58 @@ const DocViewer = (() => {
     return list.length ? list : CHART_PALETTE_FALLBACK;
   }
 
-  function _chartConfig(spec) {
+  // Chart.js reserves room for a rotated category label by padding the chart
+  // area — and product names ("Włóczka Himalaya Dolphin Baby 100g 80319 319 19
+  // jasny różowy") are long enough that the padding ate the entire canvas: the
+  // seller got an axis, a fan of overlapping label text and no bars at all.
+  // Two guards, applied together: names go on the LONG axis (horizontal bars),
+  // and every displayed label is truncated. Full text stays in the tooltip.
+  const _CHART_LABEL_MAX = 30;
+  // Hard ceiling on how much of the canvas the name axis may take, whatever the
+  // labels turn out to measure — the plot area (i.e. the bars) always keeps the
+  // majority of it.
+  const _CAT_AXIS_MAX_SHARE = .45;
+  // Rough width of one tick character at Chart.js's default 12px font, plus the
+  // axis padding — used to fit a horizontal chart's labels inside the ceiling
+  // above, since anything longer is simply clipped by it.
+  const _TICK_CHAR_PX = 7;
+  const _TICK_PADDING_PX = 12;
+
+  const _NUM_FMT = new Intl.NumberFormat('pl-PL', { maximumFractionDigits: 2 });
+
+  // How many characters of a label fit inside the ceiling above, at this box's
+  // width. Vertical charts rotate their labels, so the width budget is the
+  // height cap's job there — they just take the flat maximum.
+  function _labelBudget(horizontal, boxWidth) {
+    if (!horizontal || !boxWidth) return _CHART_LABEL_MAX;
+    const fits = Math.floor((boxWidth * _CAT_AXIS_MAX_SHARE - _TICK_PADDING_PX) / _TICK_CHAR_PX);
+    return Math.max(8, Math.min(_CHART_LABEL_MAX, fits));
+  }
+
+  // Ellipsis in the MIDDLE, not at the end: these labels are product names
+  // whose distinguishing part is the tail ("… 80319 319 19 jasny różowy"), so
+  // head-only truncation turned every colour of the same yarn into the same bar.
+  function _truncLabel(s, max) {
+    const t = String(s);
+    if (t.length <= max) return t;
+    const head = Math.ceil((max - 1) * 0.6);
+    return t.slice(0, head).trimEnd() + '…' + t.slice(t.length - (max - 1 - head)).trimStart();
+  }
+
+  // Bars whose categories are names, not dates, read better lying down — and a
+  // vertical bar chart is what collapses when those names are long.
+  function _isHorizontal(type, labels) {
+    if (type !== 'bar') return false;
+    const longest = labels.reduce((m, l) => Math.max(m, l.length), 0);
+    return longest > 14 || labels.length > 12;
+  }
+
+  function _chartConfig(spec, boxWidth) {
     const type = ['bar', 'line', 'pie', 'doughnut'].includes(spec.type) ? spec.type : 'bar';
     const isSliced = type === 'pie' || type === 'doughnut';
-    const labels = Array.isArray(spec.labels) ? spec.labels : [];
+    const fullLabels = (Array.isArray(spec.labels) ? spec.labels : []).map(String);
+    const horizontal = _isHorizontal(type, fullLabels);
+    const labels = fullLabels.map(l => _truncLabel(l, _labelBudget(horizontal, boxWidth)));
     const series = Array.isArray(spec.series) ? spec.series : [];
     const palette = _chartPalette();
     const surface = _cssVar('--bg2', '#0f0f1a');   // .chart-wrap background
@@ -372,10 +425,26 @@ const DocViewer = (() => {
     const text = _cssVar('--text', '#e2e8f0');
     const muted = _cssVar('--muted', '#94a3b8');
     const grid = _cssVar('--chart-grid', 'rgba(148,163,184,.12)');
+    // The category axis carries the (truncated) names; the other one carries
+    // the values. Which is which flips with `horizontal`.
+    const catAxis = {
+      ticks: { color: muted, autoSkip: false, maxRotation: horizontal ? 0 : 45 },
+      grid: { color: grid, display: !horizontal },
+      afterFit: scale => {
+        if (horizontal) scale.width = Math.min(scale.width, scale.chart.width * _CAT_AXIS_MAX_SHARE);
+        else scale.height = Math.min(scale.height, scale.chart.height * _CAT_AXIS_MAX_SHARE);
+      },
+    };
+    const valAxis = {
+      beginAtZero: true,
+      ticks: { color: muted, callback: v => _NUM_FMT.format(v) },
+      grid: { color: grid },
+    };
     return {
       type,
       data: { labels, datasets },
       options: {
+        indexAxis: horizontal ? 'y' : 'x',
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
@@ -383,17 +452,28 @@ const DocViewer = (() => {
             display: datasets.length > 1 || isSliced,
             labels: { color: text },
           },
+          tooltip: {
+            callbacks: {
+              // Truncation is a display trick — the tooltip still names the
+              // product in full.
+              title: items => fullLabels[items[0]?.dataIndex] ?? '',
+              label: ctx => `${ctx.dataset.label}: ${_NUM_FMT.format(ctx.parsed[horizontal ? 'x' : 'y'])}`,
+            },
+          },
         },
-        scales: isSliced ? {} : {
-          x: { ticks: { color: muted }, grid: { color: grid } },
-          y: { ticks: { color: muted }, grid: { color: grid }, beginAtZero: true },
-        },
+        scales: isSliced ? {} : (horizontal
+          ? { x: valAxis, y: catAxis }
+          : { x: catAxis, y: valAxis }),
       },
     };
   }
 
   function _renderCharts(container) {
     if (typeof Chart === 'undefined') return;
+    // Nothing to measure while the viewer is hidden — Theme.apply repaints an
+    // unopened document too, and a chart built at zero width stays broken.
+    // _show() re-renders on the way in, so skipping here loses nothing.
+    if (!container.clientWidth) return;
     container.querySelectorAll('code[class*="language-chart"]').forEach(codeEl => {
       let spec;
       try { spec = JSON.parse(codeEl.textContent); } catch { return; }
@@ -415,7 +495,15 @@ const DocViewer = (() => {
       wrap.appendChild(canvasBox);
 
       pre.replaceWith(wrap);
-      try { new Chart(canvas.getContext('2d'), _chartConfig(spec)); } catch (e) { console.error('[Chart]', e); }
+      // Now that the box is in the document it has a width — the label budget
+      // (and, for horizontal bars, the height needed for one row per bar)
+      // depend on it.
+      const config = _chartConfig(spec, canvasBox.clientWidth);
+      if (config.options.indexAxis === 'y') {
+        const bars = config.data.labels.length;
+        canvasBox.style.height = Math.max(180, bars * 34 + 40) + 'px';
+      }
+      try { new Chart(canvas.getContext('2d'), config); } catch (e) { console.error('[Chart]', e); }
     });
   }
 
@@ -1749,6 +1837,13 @@ const Chat = (() => {
     }
   }
 
+  // Fenced blocks (```chart, ```json, ```summary) are machine payloads for the
+  // doc viewer, never prose — a preview built over them printed the raw chart
+  // JSON into the chat bubble, brackets stripped, as if it were a sentence.
+  function _stripFencedBlocks(content) {
+    return content.replace(/```[\s\S]*?```/g, '');
+  }
+
   // Finds the markdown table (if any) in a bot reply and counts its data rows.
   // Shared by _tablePreview (chat-bubble summary) and buildBubble (decides
   // whether a table-format reply is substantial enough to be treated as an
@@ -1776,8 +1871,8 @@ const Chat = (() => {
   function _tablePreview(content) {
     const stats = _tableStats(content);
     if (!stats.hasTable) return null;
-    const trailing = stats.lines.slice(stats.lastTableLineIdx + 1).join(' ')
-      .replace(/[#*`_[\]]/g, '').trim();
+    const trailing = _stripFencedBlocks(stats.lines.slice(stats.lastTableLineIdx + 1).join('\n'))
+      .replace(/\s+/g, ' ').replace(/[#*`_[\]]/g, '').trim();
     if (trailing) {
       return trailing.slice(0, 220) + (trailing.length > 220 ? '…' : '');
     }
@@ -1824,9 +1919,9 @@ const Chat = (() => {
     // right under its heading (see AllegroAgent._render_* ) and the table,
     // bullets and ```chart blocks below it are the document's body — flattening
     // those into the bubble printed a line of garbled pipes.
-    const lead = (rest.split('\n')
+    const lead = (_stripFencedBlocks(rest).split('\n')
       .map(l => l.trim())
-      .find(l => l && !/^[|#>*-]/.test(l) && !l.startsWith('```')) || '')
+      .find(l => l && !/^[|#>*-]/.test(l)) || '')
       .replace(/[*`_[\]]/g, '').replace(/\s+/g, ' ').trim();
     const leadShort = lead.slice(0, 160) + (lead.length > 160 ? '…' : '');
     const icon = format === 'dashboard' ? '📊' : '📄';
@@ -1877,18 +1972,22 @@ const Chat = (() => {
         // single truncated line.
         previewHtml = `<div style="font-size:.88rem;margin:0 0 .5rem">${renderMarkdown(summaryBlock)}</div>`;
       } else {
-        const tablePreview = _tablePreview(bodyText);
+        // Document/dashboard first: those replies lead with their own heading
+        // and summary sentence, and they often ALSO contain a table — going by
+        // the table instead previewed a sales dashboard with the footnote
+        // printed under its last table, or with the raw chart JSON that
+        // followed it.
+        const docPreview = _docPreview(bodyText, format);
+        const tablePreview = docPreview === null ? _tablePreview(bodyText) : null;
         let previewShort;
-        if (tablePreview !== null) {
+        if (docPreview !== null) {
+          previewShort = escHtml(docPreview);
+        } else if (tablePreview !== null) {
           previewShort = escHtml(tablePreview);
         } else {
-          const docPreview = _docPreview(bodyText, format);
-          if (docPreview !== null) {
-            previewShort = escHtml(docPreview);
-          } else {
-            const preview = bodyText.replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
-            previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
-          }
+          const preview = _stripFencedBlocks(bodyText)
+            .replace(/^#+\s*/mg, '').replace(/[*`_[\]]/g, '').trim();
+          previewShort = escHtml(preview.slice(0, 220)) + (preview.length > 220 ? '…' : '');
         }
         previewHtml = `<p style="color:var(--muted);font-size:.88rem;margin:0 0 .5rem">${previewShort}</p>`;
       }
