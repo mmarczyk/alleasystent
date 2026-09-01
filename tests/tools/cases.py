@@ -184,8 +184,11 @@ CASES: list[Case] = [
     # ── Kupujący ─────────────────────────────────────────────────────────────
     Case("get_buyers", "get_buyers", {},
          "Pokaż listę kupujących z tego roku",
-         ("# Kupujący", "| Kupujący | Typ | NIP |", "Firma", "Osoba prywatna", "kupujących w okresie"),
-         note="Jeden wiersz na kupującego (domyślnie bieżący rok), najwięksi na górze."),
+         ("# Kupujący", "| Kupujący | Typ | NIP |", "Firma", "Osoba prywatna",
+          "Katarzyna Wójcik", "kupujących w okresie"),
+         note="Jeden wiersz na kupującego (domyślnie bieżący rok), najwięksi na górze. "
+              "Kupujący bez faktury pokazani z imienia i nazwiska z danych dostawy, "
+              "nie z loginu Allegro."),
     Case("get_buyers__companies_invoiced", "get_buyers",
          {"buyer_type": "company", "invoice_status": "issued"},
          "Lista kupujących z tego roku, dla których wystawiałem faktury VAT — tylko firmy",
