@@ -136,6 +136,141 @@ class TestQueryEndpoint:
         assert resp.json()["agent"] == "allegro"
 
 
+class TestConversationsApi:
+    """The chat list and its history are served per user, so a thread started
+    on one device opens on the next one."""
+
+    @staticmethod
+    def _token(sub="seller1"):
+        from services.auth_service import create_session_token
+        return create_session_token({"sub": sub, "name": sub})
+
+    @staticmethod
+    def _session(conv_id="c1", user="seller1", messages=(), title=None):
+        from models.conversation import ChannelType, ConversationSession, MessageRole
+        session = ConversationSession(
+            session_id=f"{user}:{conv_id}", channel=ChannelType.API, sender_id=user,
+        )
+        for role, content, meta in messages:
+            session.add_message(MessageRole(role), content, meta)
+        if title:
+            session.metadata["title"] = title
+        return session
+
+    def _store(self, **methods):
+        store = MagicMock()
+        for name, value in methods.items():
+            store.__setattr__(name, AsyncMock(return_value=value))
+        return store
+
+    def test_list_requires_auth(self, client):
+        assert client.get("/conversations").status_code == 401
+
+    def test_list_returns_the_users_conversations(self, client):
+        import main
+        sessions = [
+            self._session("c1", messages=[("user", "pokaż zamówienia", None),
+                                          ("assistant", "| a |", {"agent": "allegro_orders:table"})]),
+            self._session("c2", messages=[("user", "co z fakturami?", None)]),
+        ]
+        store = self._store(list_user_sessions=sessions)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.get("/conversations", cookies={"session": self._token()})
+
+        assert resp.status_code == 200
+        convs = resp.json()["conversations"]
+        assert [c["id"] for c in convs] == ["c1", "c2"]
+        # Title falls back to the opening question, so the list is readable on a
+        # device that has never seen the thread.
+        assert convs[0]["title"] == "pokaż zamówienia"
+        assert convs[0]["messageCount"] == 2
+        assert isinstance(convs[0]["updatedAt"], int)
+
+    def test_list_prefers_a_user_set_title(self, client):
+        import main
+        store = self._store(list_user_sessions=[
+            self._session("c1", messages=[("user", "pokaż zamówienia", None)], title="Zamówienia"),
+        ])
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.get("/conversations", cookies={"session": self._token()})
+        assert resp.json()["conversations"][0]["title"] == "Zamówienia"
+
+    def test_get_returns_full_history_with_reply_formats(self, client):
+        import main
+        session = self._session("c1", messages=[
+            ("user", "pokaż zamówienia", None),
+            ("assistant", "| nr | kwota |", {"agent": "allegro_orders:table"}),
+            ("assistant", "gotowe", None),          # stored before formats were recorded
+        ])
+        store = self._store(get_session=session)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.get("/conversations/c1", cookies={"session": self._token()})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert store.get_session.await_args.args[0] == "seller1:c1"
+        assert [m["format"] for m in body["messages"]] == ["chat", "table", "chat"]
+        assert body["messages"][0]["content"] == "pokaż zamówienia"
+
+    def test_get_missing_conversation_is_404(self, client):
+        import main
+        store = self._store(get_session=None)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.get("/conversations/nope", cookies={"session": self._token()})
+        assert resp.status_code == 404
+
+    def test_rejects_an_id_that_is_not_a_plain_identifier(self, client):
+        """Ids are minted by the client and become part of a storage key."""
+        import main
+        store = self._store(get_session=None)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.get("/conversations/a:b", cookies={"session": self._token()})
+        assert resp.status_code == 400
+        store.get_session.assert_not_awaited()
+
+    def test_rename_persists_the_title(self, client):
+        import main
+        session = self._session("c1", messages=[("user", "pokaż zamówienia", None)])
+        store = self._store(get_session=session, save_session=None)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.patch("/conversations/c1", json={"title": "  Zamówienia  "},
+                                cookies={"session": self._token()})
+
+        assert resp.status_code == 200
+        assert resp.json()["title"] == "Zamówienia"
+        assert session.metadata["title"] == "Zamówienia"
+        store.save_session.assert_awaited_once()
+
+    def test_rename_rejects_an_empty_title(self, client):
+        import main
+        store = self._store(get_session=self._session(), save_session=None)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.patch("/conversations/c1", json={"title": "   "},
+                                cookies={"session": self._token()})
+        assert resp.status_code == 400
+        store.save_session.assert_not_awaited()
+
+    def test_delete_removes_it_for_every_device(self, client):
+        import main
+        store = self._store(delete_session=True)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.delete("/conversations/c1", cookies={"session": self._token()})
+
+        assert resp.status_code == 200
+        assert resp.json()["existed"] is True
+        assert store.delete_session.await_args.args[0] == "seller1:c1"
+        assert store.delete_session.await_args.kwargs["user_id"] == "seller1"
+
+    def test_delete_is_idempotent(self, client):
+        """A draft that never left one device is still "gone" when deleted."""
+        import main
+        store = self._store(delete_session=False)
+        with patch.object(main._orchestrator, "_session_store", store):
+            resp = client.delete("/conversations/local-only", cookies={"session": self._token()})
+        assert resp.status_code == 200
+        assert resp.json()["existed"] is False
+
+
 class TestPushSubscribe:
     def test_subscribe_requires_auth(self, client):
         resp = client.post("/push/subscribe", json={"endpoint": "https://push.example.com"})

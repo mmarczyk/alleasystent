@@ -171,17 +171,26 @@
         <span class="logo-icon">🛒</span>
         <span class="logo-text">AlleAsystent</span>
       </div>
+      <button class="btn btn-new-chat" onclick="Chat.newConversation()">
+        + Nowa rozmowa
+      </button>
     </div>
     <div class="sidebar-sections">
       <div class="sidebar-tabs" role="tablist">
-        <button class="sidebar-tab active" id="sidebar-tab-faq" role="tab" aria-selected="true" onclick="Sidebar.switchTab('faq')">
-          <span class="stab-icon">💡</span><span class="stab-label">Pytania</span>
+        <button class="sidebar-tab active" id="sidebar-tab-chats" role="tab" aria-selected="true" onclick="Sidebar.switchTab('chats')">
+          <span class="stab-label">Rozmowy</span>
+        </button>
+        <button class="sidebar-tab" id="sidebar-tab-faq" role="tab" aria-selected="false" onclick="Sidebar.switchTab('faq')">
+          <span class="stab-label">Pytania</span>
         </button>
         <button class="sidebar-tab" id="sidebar-tab-docs" role="tab" aria-selected="false" onclick="Sidebar.switchTab('docs')">
-          <span class="stab-icon">📄</span><span class="stab-label">Dokumenty</span>
+          <span class="stab-label">Dokumenty</span>
         </button>
       </div>
-      <div class="sidebar-section-list" id="sidebar-faq" role="tabpanel">
+      <div class="sidebar-section-list" id="sidebar-chats" role="tabpanel">
+        <!-- conversation list injected by JS -->
+      </div>
+      <div class="sidebar-section-list hidden" id="sidebar-faq" role="tabpanel">
         <!-- aggregated question list injected by JS -->
       </div>
       <div class="sidebar-section-list hidden" id="sidebar-docs" role="tabpanel">

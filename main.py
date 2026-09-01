@@ -18,6 +18,7 @@ import hmac as _hmac
 import logging
 import os
 import pathlib
+import re
 import secrets as _secrets
 
 # Disable ChromaDB telemetry before it is imported anywhere
@@ -510,6 +511,148 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
         "agent": response.agent_type,
         "sources": response.sources,
     }
+
+
+# ── Conversations (several chats, shared across the user's devices) ───────────
+# Every conversation already lives server-side, keyed `<user>:<conversation>`
+# (see /query above), so it is stored per user and not per device. These
+# endpoints expose that store to the app: the phone lists and opens the very
+# same threads the desktop wrote, and the local copy in the browser is only a
+# cache for instant paint and offline reading.
+
+# Conversation ids are minted by the client and become part of a Redis key, so
+# only a plain identifier is accepted.
+_CONV_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_CONV_TITLE_MAX = 60
+
+
+def _conv_key(user_sub: str, conv_id: str) -> str:
+    """Storage key for one user's conversation — same shape /query writes."""
+    if not _CONV_ID_RE.match(conv_id):
+        raise HTTPException(status_code=400, detail="Invalid conversation id")
+    return f"{user_sub}:{conv_id}"
+
+
+def _conv_ms(value) -> int:
+    """Model timestamps are naive UTC (datetime.utcnow); the app wants epoch ms."""
+    from datetime import timezone
+
+    return int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _conv_title(session) -> str:
+    """A renamed title if the user set one, else the opening question."""
+    title = (session.metadata or {}).get("title")
+    if title:
+        return title
+    from models.conversation import MessageRole
+
+    for msg in session.messages:
+        if msg.role == MessageRole.USER and msg.content.strip():
+            return msg.content.strip().replace("\n", " ")[:_CONV_TITLE_MAX]
+    return "Nowa rozmowa"
+
+
+def _conv_msg_format(msg) -> str:
+    """Output format of a stored turn ("table", "document", "dashboard", "chat").
+
+    Read from the agent type recorded with the turn (see orchestrator). Turns
+    written before that was stored have none, and read back as plain chat.
+    """
+    agent = (msg.metadata or {}).get("agent") or ""
+    return agent.split(":")[1] if ":" in agent else "chat"
+
+
+def _conv_summary(session) -> dict:
+    # Keys are "<user>:<conversation>" and a conversation id never contains a
+    # colon (_CONV_ID_RE), so the id is whatever follows the last one.
+    _, _, conv_id = session.session_id.rpartition(":")
+    return {
+        "id": conv_id,
+        "title": _conv_title(session),
+        "createdAt": _conv_ms(session.created_at),
+        "updatedAt": _conv_ms(session.updated_at),
+        "messageCount": len(session.messages),
+    }
+
+
+def _conv_detail(session) -> dict:
+    return {
+        **_conv_summary(session),
+        "messages": [
+            {
+                "role": msg.role.value,
+                "content": msg.content,
+                "ts": _conv_ms(msg.timestamp),
+                "format": _conv_msg_format(msg),
+            }
+            for msg in session.messages
+            if msg.role.value in ("user", "assistant")
+        ],
+    }
+
+
+class ConversationPatch(BaseModel):
+    title: str
+
+
+@app.get("/conversations", tags=["Chat"])
+async def conversations_list(request: Request, limit: int = 50) -> dict:
+    """List the current user's conversations, most recently updated first."""
+    from services.auth_service import get_current_user
+
+    user = await get_current_user(request)
+    sessions = await _orchestrator._session_store.list_user_sessions(
+        user["sub"], limit=max(1, min(limit, 200)),
+    )
+    return {"conversations": [_conv_summary(s) for s in sessions]}
+
+
+@app.get("/conversations/{conv_id}", tags=["Chat"])
+async def conversation_get(conv_id: str, request: Request) -> dict:
+    """Full message history of one conversation."""
+    from services.auth_service import get_current_user
+
+    user = await get_current_user(request)
+    session = await _orchestrator._session_store.get_session(_conv_key(user["sub"], conv_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return _conv_detail(session)
+
+
+@app.patch("/conversations/{conv_id}", tags=["Chat"])
+async def conversation_rename(conv_id: str, body: ConversationPatch, request: Request) -> dict:
+    """Rename a conversation — the new title follows the user to every device."""
+    from services.auth_service import get_current_user
+
+    user = await get_current_user(request)
+    store = _orchestrator._session_store
+    session = await store.get_session(_conv_key(user["sub"], conv_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    title = body.title.strip().replace("\n", " ")[:_CONV_TITLE_MAX]
+    if not title:
+        raise HTTPException(status_code=400, detail="Title must not be empty")
+    session.metadata["title"] = title
+    await store.save_session(session)
+    return _conv_summary(session)
+
+
+@app.delete("/conversations/{conv_id}", tags=["Chat"])
+async def conversation_delete(conv_id: str, request: Request) -> dict:
+    """Delete a conversation for every device at once.
+
+    Idempotent: deleting a conversation that only ever existed on one device
+    (a draft that never reached the server) is a success, not a 404 — the
+    client is telling us it is gone, and it is.
+    """
+    from services.auth_service import get_current_user
+
+    user = await get_current_user(request)
+    deleted = await _orchestrator._session_store.delete_session(
+        _conv_key(user["sub"], conv_id), user_id=user["sub"],
+    )
+    return {"status": "deleted", "existed": deleted}
 
 
 # ── Analytics API (dashboard lives in the alleasystent-analytics repo) ────────
