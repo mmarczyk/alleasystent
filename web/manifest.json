@@ -1,6 +1,6 @@
 {
-  "name": "AllEasystent — Asystent AI",
-  "short_name": "AllEasystent",
+  "name": "AlleAsystent — Asystent AI",
+  "short_name": "AlleAsystent",
   "description": "AI asystent dla właścicieli sklepów na Allegro",
   "start_url": "./",
   "display": "standalone",

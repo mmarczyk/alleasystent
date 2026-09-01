@@ -1,4 +1,4 @@
-name: Deploy AllEasystent Backend to Cloud Run
+name: Deploy AlleAsystent Backend to Cloud Run
 
 on:
   push:

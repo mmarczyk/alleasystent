@@ -1,4 +1,4 @@
-name: Deploy AllEasystent Background Jobs to Cloud Run
+name: Deploy AlleAsystent Background Jobs to Cloud Run
 
 # order-monitor deploys as a Cloud Run *service* (small always-there HTTP
 # endpoint hit by Cloud Scheduler), not a Cloud Run Job — Jobs cold-start a

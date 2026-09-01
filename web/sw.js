@@ -50,7 +50,7 @@ self.addEventListener('activate', e =>
 self.addEventListener('push', e => {
   const data = e.data?.json() ?? {};
   e.waitUntil(
-    self.registration.showNotification(data.title ?? 'AllEasystent', {
+    self.registration.showNotification(data.title ?? 'AlleAsystent', {
       body: data.body ?? '',
       icon: './icons/icon-192.svg',
       badge: './icons/icon-192.svg',
