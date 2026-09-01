@@ -713,6 +713,108 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_buyers",
+            "description": (
+                "The BUYER view of a period: one row per CUSTOMER instead of one row per order — "
+                "who bought, how many orders, for how much in total, when they last bought, and "
+                "how many of their orders already have a VAT invoice. "
+                "USE THIS for any question about the buyers themselves: 'lista kupujących', "
+                "'lista klientów', 'kto u mnie kupował', 'ilu miałem klientów', 'moi najlepsi "
+                "klienci', 'stali klienci', 'kto kupuje najwięcej', 'jakie firmy u mnie kupowały', "
+                "'lista kupujących, dla których wystawiłem faktury VAT', 'klienci z NIP-em', "
+                "'zestawienie kontrahentów'. "
+                "FIRMA vs OSOBA PRYWATNA: the ONLY place Allegro states this is the VAT-invoice "
+                "address on the order (company name + NIP), so buyer_type='company' means exactly "
+                "'gave company invoice details on at least one order in the period' — a business "
+                "that never asked for an invoice is indistinguishable from a private person and "
+                "counts as 'person'. "
+                "GROUPING: orders are grouped by NIP where there is one, otherwise by company "
+                "name, otherwise by the buyer's Allegro login. "
+                "PERIOD: date_from_local/date_to_local are Warsaw-local 'YYYY-MM-DD' calendar "
+                "dates; resolve the period yourself from the current date exactly as for "
+                "get_sales_summary ('w tym roku' → 1 January of the current year through today, "
+                "'w tym miesiącu' → the 1st of the current month through today, 'w zeszłym roku' → "
+                "1 January to 31 December of the previous year). Omit BOTH to get the current "
+                "calendar year, which is what a period-less 'lista kupujących' means — never ask "
+                "the user for a period just to call this tool. Orders are counted by payment date, "
+                "the same basis as get_sales_summary, so the two agree on the same period. "
+                "NOT get_sales_summary (that answers 'ile zarobiłem' — revenue, Allegro fees and "
+                "top products, and never names a buyer) and NOT get_orders (one bullet per order, "
+                "no per-buyer totals)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_from_local": {
+                        "type": "string",
+                        "description": (
+                            "Start of period as a Warsaw-local calendar date, 'YYYY-MM-DD'. "
+                            "Defaults, together with date_to_local, to the current calendar year."
+                        ),
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": (
+                            "End of period as a Warsaw-local calendar date, 'YYYY-MM-DD' "
+                            "(inclusive). Defaults to today."
+                        ),
+                    },
+                    "buyer_type": {
+                        "type": "string",
+                        "description": (
+                            "Which buyers to keep: 'company' = only those who gave company invoice "
+                            "details (firmy, 'na firmę', 'z NIP-em', B2B), 'person' = everyone else "
+                            "(osoby prywatne), 'any' = both. Pass 'company'/'person' whenever the "
+                            "question names one of them."
+                        ),
+                        "enum": ["any", "company", "person"],
+                        "default": "any",
+                    },
+                    "invoice_status": {
+                        "type": "string",
+                        "description": (
+                            "Filter on the VAT invoice: 'issued' = only buyers who already have an "
+                            "invoice attached to at least one order in the period ('dla których "
+                            "wystawiłem faktury', 'komu wystawiłem fakturę VAT'), 'missing' = only "
+                            "those who asked for one that has NOT been issued yet, 'requested' = "
+                            "those who asked for an invoice regardless of whether it exists, 'any' "
+                            "= no invoice filter."
+                        ),
+                        "enum": ["any", "issued", "missing", "requested"],
+                        "default": "any",
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": (
+                            "Row order: 'value' = highest total spend first (default, the 'najlepsi "
+                            "klienci' order), 'orders' = most orders first ('stali klienci', 'kto "
+                            "kupuje najczęściej'), 'recent' = most recent purchase first."
+                        ),
+                        "enum": ["value", "orders", "recent"],
+                        "default": "value",
+                    },
+                    "count_only": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true when the user only wants the NUMBER of buyers ('ilu miałem "
+                            "klientów', 'ile firm u mnie kupowało') — the reply is one sentence "
+                            "with the count and no table. Do NOT set it when they want to see the "
+                            "buyers themselves ('lista', 'pokaż', 'kto')."
+                        ),
+                        "default": False,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max buyers listed in the table (1–200).",
+                        "default": 100,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "suggest_order_monitoring",
             "description": (
                 "Present the user with a button to enable automatic background order monitoring. "
@@ -1210,6 +1312,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_account_info": "chat",
     "get_billing_summary": "table",
     "get_sales_summary": "dashboard",
+    "get_buyers": "table",
     # Faktury
     "get_orders_pending_invoice": "chat",
     "get_order_invoice_data": "chat",
@@ -1288,6 +1391,8 @@ _TOOL_LABELS: dict[str, str] = {
     # finanse
     "get_billing_summary":             "finanse",
     "get_sales_summary":               "finanse",
+    # kupujacy
+    "get_buyers":                      "kupujacy",
     # faktury
     "get_orders_pending_invoice":      "faktury",
     "get_order_invoice_data":          "faktury",
@@ -1345,6 +1450,19 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),
     "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz", "bilans"),
     "faktury":    ("faktur", "nip", "ksef", "vat"),
+    # A buyer question names the person, not the order: "lista kupujących",
+    # "jakie firmy u mnie kupowały", "zestawienie kontrahentów". "nip"/"firm"
+    # are shared with the invoice vocabulary on purpose — "kupujący z NIP-em"
+    # is both, and two labels only mean both tool sets stay candidates.
+    #
+    # "klient" is deliberately NOT here, for the reason given at the top of this
+    # map: a seller says it just as often ABOUT an order ("co klient odebrał",
+    # "klient czeka na paczkę"), and a second label on those queries would
+    # disable the deterministic layer for the order stage they name. A
+    # klient-phrased buyer question simply matches no label and falls back to
+    # the full tool list, where get_buyers is still there to be picked.
+    "kupujacy":   ("kupuj", "kupowa", "nabywc", "kontrahent", "firm",
+                   "buyer", "customer", "nip"),
     "zwroty":     ("zwrot", "reklamacj", "spor"),
     "monitoring": ("monitor", "powiad", "notyfikacj", "przypomn", "wlacz", "wylacz"),
 }
