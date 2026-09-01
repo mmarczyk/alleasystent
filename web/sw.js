@@ -76,7 +76,7 @@ self.addEventListener('notificationclick', e => {
   e.notification.close();
   // Tapping the notification opens straight into the Notifications panel (app.js
   // reads ?open=notifications on load) — it does NOT re-fire the chat question or
-  // re-poll for new orders/invoices; the notification itself IS the detection.
+  // re-poll for new orders/messages; the notification itself IS the detection.
   // Notification URLs from the backend are root-relative (e.g. "/?open=notifications"),
   // which is correct for an all-in-one deployment but wrong on GitHub Pages, where the
   // app lives under a subpath (e.g. /alleasystent/) — resolving "/x" against the origin

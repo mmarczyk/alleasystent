@@ -829,19 +829,6 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "suggest_invoice_monitoring",
-            "description": (
-                "Present the user with a button to enable automatic VAT invoice monitoring. "
-                "Call this AFTER get_orders_pending_invoice when the user asks about invoices, "
-                "missing invoices, or wants to be notified when new orders require a VAT invoice. "
-                "Do NOT call multiple times in one conversation."
-            ),
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "disable_order_monitoring",
             "description": (
                 "Show a button to disable automatic order monitoring in the browser. "
@@ -977,17 +964,6 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "disable_invoice_monitoring",
-            "description": (
-                "Show a button to disable automatic VAT invoice monitoring in the browser. "
-                "Call when the user asks to turn off, stop, or disable invoice monitoring/notifications."
-            ),
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "suggest_invoice_reminder",
             "description": (
                 "Present the user with a button to enable the automatic invoice REMINDER — a "
@@ -996,10 +972,9 @@ ALLEGRO_TOOLS: list[dict] = [
                 "the reply: issues them right away, reschedules itself if the seller asks to be "
                 "reminded again later (and remembers for how long), or nags again unchanged if the "
                 "seller never answers. "
-                "This is DIFFERENT from suggest_invoice_monitoring (a simple 15-minute new-order "
-                "notifier with no follow-up conversation) — call THIS one when the user wants to be "
-                "actively asked/nagged about issuing pending invoices, not just notified that one "
-                "exists. get_orders_pending_invoice ALREADY appends this automatically, so do NOT "
+                "This is the ONLY automatic invoice notification the assistant has — call it "
+                "whenever the user wants to be notified, asked or nagged about pending invoices. "
+                "get_orders_pending_invoice ALREADY appends this automatically, so do NOT "
                 "call this tool right after it. Only call this when the user brings up invoice "
                 "reminders/nagging on its own, with no get_orders_pending_invoice call in the same "
                 "turn. Do NOT call multiple times in one conversation."
@@ -1013,9 +988,8 @@ ALLEGRO_TOOLS: list[dict] = [
             "name": "disable_invoice_reminder",
             "description": (
                 "Show a button to disable the automatic invoice REMINDER in the browser — the one "
-                "that asks in chat whether to issue pending invoices and adapts to the reply. Not "
-                "the same as disable_invoice_monitoring (the simpler notifier); call THIS one when "
-                "the user asks to stop the reminders/nagging about invoices specifically. "
+                "that asks in chat whether to issue pending invoices and adapts to the reply. "
+                "Call it whenever the user asks to stop any invoice reminders/notifications. "
                 "get_orders_pending_invoice ALREADY offers this button when the reminder is on, so "
                 "only call this tool when the user asks outside of an invoice query."
             ),
@@ -1326,12 +1300,10 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_new_complaints": "chat",
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
-    "suggest_invoice_monitoring": "action",
     "suggest_invoice_reminder": "action",
     "suggest_message_monitoring": "action",
     "suggest_returns_monitoring": "action",
     "disable_order_monitoring": "action",
-    "disable_invoice_monitoring": "action",
     "disable_invoice_reminder": "action",
     "disable_message_monitoring": "action",
     "disable_returns_monitoring": "action",
@@ -1413,8 +1385,6 @@ _TOOL_LABELS: dict[str, str] = {
     # et al. already append their own monitoring suggestion automatically)
     "suggest_order_monitoring":        "monitoring",
     "disable_order_monitoring":        "monitoring",
-    "suggest_invoice_monitoring":      "monitoring",
-    "disable_invoice_monitoring":      "monitoring",
     "suggest_invoice_reminder":        "monitoring",
     "disable_invoice_reminder":        "monitoring",
     "suggest_message_monitoring":      "monitoring",

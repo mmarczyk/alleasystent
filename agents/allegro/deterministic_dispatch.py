@@ -368,7 +368,7 @@ def _match_get_new_complaints(query: str) -> dict | None:
     return {}
 
 
-# ── monitoring: 10 zero-argument UI-action toggles ──────────────────────────
+# ── monitoring: 8 zero-argument UI-action toggles ───────────────────────────
 _ENABLE_RE = re.compile(
     r"w[łl][aą]cz|zacznij|chc[eę]\s+(dostawać|otrzymywać)|w[łl][aą]czy[cć]|powiadamiaj|informuj\s+mnie",
     re.IGNORECASE,
@@ -390,16 +390,20 @@ def _monitoring_matcher(topic_re: re.Pattern, suggest_tool: str, disable_tool: s
 
 
 _match_order_monitoring = _monitoring_matcher(_ORDERS_TOPIC_RE, "suggest_order_monitoring", "disable_order_monitoring")
-_match_invoice_monitoring = _monitoring_matcher(re.compile(r"faktur", re.IGNORECASE), "suggest_invoice_monitoring", "disable_invoice_monitoring")
 _match_message_monitoring = _monitoring_matcher(_MESSAGES_TOPIC_RE, "suggest_message_monitoring", "disable_message_monitoring")
 _match_returns_monitoring = _monitoring_matcher(
     re.compile(r"zwrot|reklamacj", re.IGNORECASE), "suggest_returns_monitoring", "disable_returns_monitoring",
 )
-# Invoice REMINDER (chat nagging) is a distinct feature from invoice
-# MONITORING (silent notifier) — see suggest_invoice_reminder's own
-# description — so it needs its own, more specific trigger before the
-# generic invoice-monitoring matcher above gets a chance to misfire on it.
-_REMINDER_WORD_RE = re.compile(r"przypomn|nagaj|pytaj\s+mnie|dopytuj", re.IGNORECASE)
+# The invoice REMINDER (chat nagging) is now the only invoice automation —
+# the silent "new order needs an invoice" monitor it used to be confused with
+# was removed (see services/invoice_reminder.py and the archive/invoice-
+# monitoring branch). So this matcher answers both the reminder wording
+# ("przypominaj mi o fakturach") and the generic monitoring/notification
+# wording that used to reach the removed toggle ("włącz powiadomienia o
+# fakturach") — there is nothing else left for the latter to mean.
+_REMINDER_WORD_RE = re.compile(
+    r"przypomn|nagaj|pytaj\s+mnie|dopytuj|monitor|powiad|notyfikacj", re.IGNORECASE,
+)
 
 
 def _match_invoice_reminder(query: str) -> tuple[str, dict] | None:
@@ -411,9 +415,8 @@ def _match_invoice_reminder(query: str) -> tuple[str, dict] | None:
 
 
 _MONITORING_MATCHERS: list[Callable[[str], tuple[str, dict] | None]] = [
-    _match_invoice_reminder,  # before the generic invoice-monitoring matcher
+    _match_invoice_reminder,
     _match_order_monitoring,
-    _match_invoice_monitoring,
     _match_message_monitoring,
     _match_returns_monitoring,
 ]

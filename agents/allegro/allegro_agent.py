@@ -390,19 +390,18 @@ class AllegroAgent(BaseAgent):
         "right after get_new_orders, that would show a duplicate button. Only call suggest_order_monitoring "
         "/ disable_order_monitoring when the user brings up monitoring/notifications OUTSIDE of an "
         "order query (e.g. general 'wyłącz monitoring', 'chcę powiadomienia o zamówieniach' with no "
-        "get_new_orders call in this turn), or for INVOICE monitoring (suggest_invoice_monitoring / "
-        "disable_invoice_monitoring — a simple 15-minute new-order notifier), the INVOICE REMINDER "
+        "get_new_orders call in this turn), or for the INVOICE REMINDER "
         "(suggest_invoice_reminder / disable_invoice_reminder — a scheduled 7:00-20:00 check that "
         "actively ASKS in chat whether to issue pending invoices for shipped orders and adapts to "
-        "the reply; use this pair, not the plain monitoring one, when the user wants to be nagged/"
-        "asked rather than just notified), MESSAGE monitoring (suggest_message_monitoring / "
+        "the reply; this is the ONLY invoice automation there is, so use this pair for ANY request "
+        "about invoice notifications/monitoring/reminders), MESSAGE monitoring (suggest_message_monitoring / "
         "disable_message_monitoring), or RETURNS/COMPLAINTS monitoring (suggest_returns_monitoring / "
         "disable_returns_monitoring — a single shared toggle covering BOTH zwroty and reklamacje, "
         "there is no separate tool for each) — call suggest_message_monitoring after get_message_threads "
         "when the user asks about being notified of new buyer messages, and likewise "
         "suggest_returns_monitoring after get_new_returns/get_returns_to_process/get_new_complaints, and "
-        "suggest_invoice_reminder after get_orders_pending_invoice when the user wants to be actively "
-        "asked about pending invoices "
+        "suggest_invoice_reminder after get_orders_pending_invoice when the user wants to be notified or "
+        "actively asked about pending invoices "
         "(though get_new_orders/get_message_threads/get_new_returns/get_returns_to_process/"
         "get_new_complaints/get_orders_pending_invoice ALREADY append their own status block — "
         "don't double-call). "
@@ -1290,34 +1289,15 @@ class AllegroAgent(BaseAgent):
             '🔔 Włącz automatyczne sprawdzanie</button>'
         )
 
-    async def _invoice_monitoring_status_block(self) -> str:
-        """Deterministic (non-LLM) status + action button for automatic invoice
-        checking — same rationale as _monitoring_status_block above."""
-        from services.monitor_state import is_monitor_enabled
-
-        if await is_monitor_enabled("invoice", self._allegro._user_id):
-            return (
-                "🧾 Automatyczne sprawdzanie nowych faktur jest włączone — dam Ci znać, "
-                "gdy pojawi się zamówienie wymagające faktury VAT.\n\n"
-                '<button class="btn-invoice-monitoring" style="filter:grayscale(1)" '
-                'onclick="InvoiceMonitor.disable();this.outerHTML=\'<span>✓ Monitoring faktur wyłączony</span>\'">'
-                '🔕 Wyłącz monitoring faktur</button>'
-            )
-        return (
-            "💡 Mogę co 15 minut sprawdzać, czy pojawiły się nowe zamówienia wymagające faktury VAT, "
-            "i natychmiast Cię powiadamiać — nawet gdy zakładka jest w tle.\n\n"
-            '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">'
-            '🧾 Włącz monitoring faktur</button>'
-        )
-
     async def _invoice_reminder_status_block(self) -> str:
         """Deterministic (non-LLM) status + action button for the automatic
         invoice REMINDER — a scheduled 7:00-20:00 check (every 2h by default,
         adjustable by the seller) for unissued VAT invoices on already-shipped
         orders, which asks in chat whether to issue them and adapts to the
-        reply (see services/invoice_reminder.py). Different from
-        _invoice_monitoring_status_block above, which is a simple client-side
-        15-minute "new order needs an invoice" notifier with no follow-up.
+        reply (see services/invoice_reminder.py). This is the only invoice
+        automation left — the client-side 15-minute "new order needs an
+        invoice" notifier it used to sit next to was removed (kept on the
+        archive/invoice-monitoring branch).
         """
         from services.invoice_reminder import is_monitor_enabled
 
@@ -2907,9 +2887,6 @@ class AllegroAgent(BaseAgent):
         # reply/button contradiction identical to the earlier invoice-issuance bug).
         if tool_name in ("suggest_order_monitoring", "disable_order_monitoring"):
             return await self._monitoring_status_block()
-
-        if tool_name in ("suggest_invoice_monitoring", "disable_invoice_monitoring"):
-            return await self._invoice_monitoring_status_block()
 
         if tool_name in ("suggest_invoice_reminder", "disable_invoice_reminder"):
             return await self._invoice_reminder_status_block()

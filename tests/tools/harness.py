@@ -42,14 +42,13 @@ USER_ID = "demo_seller"
 # Monitor kinds as stored by services/monitor_state.py, keyed by the short name
 # used in the case matrix.
 MONITOR_KINDS = {
-    "invoice": "invoice",
     "message": "message",
     "invoice_reminder": "invoice_reminder",
     "returns": "returns_complaints",
 }
 
 ALL_MONITORS_OFF: dict[str, bool] = {
-    "order": False, "invoice": False, "message": False,
+    "order": False, "message": False,
     "invoice_reminder": False, "returns": False,
 }
 

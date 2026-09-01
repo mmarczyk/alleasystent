@@ -535,15 +535,6 @@ select option { background: var(--bg2); }
 .notif-time { font-size: .75rem; color: var(--muted); opacity: .7; margin-top: .3rem; }
 .notif-empty { text-align: center; padding: 2rem 0; }
 
-.btn-invoice-monitoring {
-  display: inline-flex; align-items: center; gap: .4rem;
-  background: var(--success); color: #fff;
-  border: none; border-radius: var(--radius-sm);
-  padding: .5rem 1rem; font-size: .88rem; font-weight: 600;
-  cursor: pointer; margin-top: .5rem; transition: filter .15s;
-}
-.btn-invoice-monitoring:hover { filter: brightness(1.12); }
-
 .btn-message-monitoring {
   display: inline-flex; align-items: center; gap: .4rem;
   background: var(--accent); color: #fff;

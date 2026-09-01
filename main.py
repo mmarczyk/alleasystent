@@ -718,72 +718,10 @@ async def allegro_returns_monitor_disable(request: Request):
     return {"status": "disabled"}
 
 
-@app.get("/allegro/pending-invoices", tags=["Allegro"])
-async def allegro_pending_invoices(request: Request):
-    """Return paid orders from the current month that require a VAT invoice but haven't received one."""
-    from datetime import date
-    from services.auth_service import get_current_user
-    from services.allegro_service import AllegroService, AllegroAuthError, AllegroAPIError
-
-    user = await get_current_user(request)
-    service = AllegroService.get_instance(user["sub"])
-    if service._tokens is None:
-        await service._load_tokens_from_redis()
-    if service._tokens is None:
-        raise HTTPException(401, "Not authenticated with Allegro")
-    try:
-        today = date.today()
-        orders = await service.get_orders_needing_invoice(month=today.month, year=today.year)
-    except AllegroAuthError:
-        raise HTTPException(401, "Allegro auth error")
-    except AllegroAPIError as exc:
-        raise HTTPException(502, str(exc))
-    return {
-        "orders": [
-            {
-                "order_id": o.order_id,
-                "buyer": o.buyer_login,
-                "total": o.total_price,
-                "status": o.status,
-                "fulfillment_status": o.fulfillment_status,
-                "dispatch_to": o.dispatch_to,
-            }
-            for o in orders
-        ],
-        "count": len(orders),
-    }
-
-
-@app.get("/allegro/invoice-monitor/status", tags=["Allegro"])
-async def allegro_invoice_monitor_status(request: Request):
-    """Whether automatic invoice checking is currently enabled for the current user."""
-    from services.auth_service import get_current_user
-    from services.monitor_state import is_monitor_enabled
-
-    user = await get_current_user(request)
-    return {"enabled": await is_monitor_enabled("invoice", user["sub"])}
-
-
-@app.post("/allegro/invoice-monitor/enable", tags=["Allegro"])
-async def allegro_invoice_monitor_enable(request: Request):
-    """Turn on automatic background invoice checking for the current user."""
-    from services.auth_service import get_current_user
-    from services.monitor_state import set_monitor_enabled
-
-    user = await get_current_user(request)
-    await set_monitor_enabled("invoice", user["sub"], True)
-    return {"status": "enabled"}
-
-
-@app.post("/allegro/invoice-monitor/disable", tags=["Allegro"])
-async def allegro_invoice_monitor_disable(request: Request):
-    """Turn off automatic background invoice checking for the current user."""
-    from services.auth_service import get_current_user
-    from services.monitor_state import set_monitor_enabled
-
-    user = await get_current_user(request)
-    await set_monitor_enabled("invoice", user["sub"], False)
-    return {"status": "disabled"}
+# Automatic invoice CHECKING (the client-side 15-minute "new order needs an
+# invoice" notifier, its /allegro/pending-invoices poll endpoint and the
+# invoice-monitor toggles) was removed — only the invoice REMINDER below
+# remains. The removed code is kept on the archive/invoice-monitoring branch.
 
 
 @app.get("/allegro/invoice-reminder/status", tags=["Allegro"])
@@ -937,7 +875,7 @@ async def push_unsubscribe(request: Request):
 async def push_notify(request: Request):
     """Send a Web Push notification to all devices of the current user.
 
-    Called by the client-side monitors when they detect new orders/invoices.
+    Called by the client-side monitors when they detect new orders/messages.
     The backend fans out the push to every subscribed device for this user,
     so the notification reaches iOS PWA, Android, and other desktop tabs.
 
