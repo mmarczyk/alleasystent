@@ -13,7 +13,8 @@ Obsługuje wielokanałowy dostęp: **interfejs webowy (PWA)** oraz **Facebook Me
 - Baza wiedzy sklepu (RAG) — odpowiedzi na pytania o polityki, FAQ, produkty
 - PWA z historią rozmów, trybem offline i eksportem do pliku
 - Integracja z Facebook Messengerem przez webhook
-- Automatyczne sprawdzanie nowych zamówień, faktur, wiadomości oraz zwrotów i reklamacji — powiadomienia w tle, nawet gdy karta jest zamknięta
+- Automatyczne sprawdzanie nowych zamówień, wiadomości oraz zwrotów i reklamacji — powiadomienia w tle, nawet gdy karta jest zamknięta
+- Przypomnienia o niewystawionych fakturach VAT — asystent sam pyta na czacie (co 2 h, 7:00–20:00) i dostosowuje się do odpowiedzi
 - Powiadomienia push (VAPID — iOS 16.4+, Android, desktop)
 - Obsługa języka polskiego i angielskiego
 

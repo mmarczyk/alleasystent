@@ -284,8 +284,8 @@ class TestMonitoringToggles:
     @pytest.mark.parametrize("query,expected", [
         ("włącz monitoring zamówień", ("suggest_order_monitoring", {})),
         ("wyłącz monitoring zamówień", ("disable_order_monitoring", {})),
-        ("włącz powiadomienia o fakturach", ("suggest_invoice_monitoring", {})),
-        ("wyłącz powiadomienia o fakturach", ("disable_invoice_monitoring", {})),
+        ("włącz powiadomienia o fakturach", ("suggest_invoice_reminder", {})),
+        ("wyłącz powiadomienia o fakturach", ("disable_invoice_reminder", {})),
         ("chcę przypomnienia o niewystawionych fakturach", ("suggest_invoice_reminder", {})),
         ("wyłącz przypomnienia o fakturach", ("disable_invoice_reminder", {})),
         ("powiadamiaj mnie o nowych wiadomościach", ("suggest_message_monitoring", {})),
@@ -296,12 +296,16 @@ class TestMonitoringToggles:
     def test_toggle_resolves(self, query, expected):
         assert _resolve(query) == expected
 
-    def test_reminder_takes_priority_over_generic_invoice_monitoring(self):
-        """suggest_invoice_reminder and suggest_invoice_monitoring are
-        different features (see their tool descriptions) — 'przypomnienia'
-        wording must never resolve to the plain notifier."""
-        result = _resolve("włącz przypomnienia o fakturach")
-        assert result == ("suggest_invoice_reminder", {})
+    def test_all_invoice_monitoring_wording_resolves_to_the_reminder(self):
+        """The plain "new order needs an invoice" notifier was removed, so the
+        reminder is the only invoice automation left — both the reminder
+        wording and the generic monitoring wording must reach it."""
+        for query in (
+            "włącz przypomnienia o fakturach",
+            "włącz monitoring faktur",
+            "chcę powiadomienia o fakturach",
+        ):
+            assert _resolve(query) == ("suggest_invoice_reminder", {}), query
 
 
 class TestMultiTopicAndUnrelatedQueries:

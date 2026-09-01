@@ -1234,94 +1234,10 @@ const OrderMonitor = (() => {
   return { isEnabled, enable, disable, init };
 })();
 
-// ── Invoice monitor ──────────────────────────────
-const InvoiceMonitor = (() => {
-  const ENABLED_KEY  = 'ae_invoice_monitor_enabled';
-  const NOTIFIED_KEY = 'ae_invoice_notified_ids';
-  let _timer = null;
-
-  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
-
-  function _getNotified() {
-    try { return new Set(JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '[]')); }
-    catch { return new Set(); }
-  }
-
-  function _saveNotified(set) {
-    localStorage.setItem(NOTIFIED_KEY, JSON.stringify([...set].slice(-300)));
-  }
-
-  async function enable() {
-    const pushOk = await WebPush.subscribe();
-    localStorage.setItem(ENABLED_KEY, '1');
-    fetch(Settings.api('/allegro/invoice-monitor/enable'), {
-      method: 'POST', credentials: 'include', headers: Auth.headers(),
-    }).catch(() => {});
-    _startPolling(); // first check notifies about ALL currently pending invoices
-    if (pushOk) {
-      UI.toast('✓ Monitoring faktur włączony (co 15 minut)');
-    } else {
-      UI.toast('⚠️ Monitoring włączony, ale powiadomienia push nie działają — sprawdź uprawnienia powiadomień w przeglądarce/telefonie', 10000);
-    }
-    document.querySelectorAll('.btn-invoice-monitoring').forEach(btn => {
-      btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
-    });
-    return true;
-  }
-
-  function disable() {
-    localStorage.removeItem(ENABLED_KEY);
-    if (_timer) { clearInterval(_timer); _timer = null; }
-    fetch(Settings.api('/allegro/invoice-monitor/disable'), {
-      method: 'POST', credentials: 'include', headers: Auth.headers(),
-    }).catch(() => {});
-  }
-
-  async function _check() {
-    try {
-      const res = await fetch(Settings.api('/allegro/pending-invoices'), { credentials: 'include', headers: Auth.headers() });
-      if (!res.ok) return;
-      const data = await res.json();
-      const orders = data.orders || [];
-      if (orders.length === 0) return;
-
-      const notified = _getNotified();
-      const newOnes = orders.filter(o => !notified.has(o.order_id));
-      if (newOnes.length === 0) return;
-
-      newOnes.forEach(o => notified.add(o.order_id));
-      _saveNotified(notified);
-      const count = newOnes.length;
-      const label = count === 1 ? 'zamówienie wymaga' : count < 5 ? 'zamówienia wymagają' : 'zamówień wymaga';
-      const msg = `${count} ${label} wystawienia faktury VAT.`;
-      const prompt = count === 1
-        ? 'Podaj mi szczegóły zamówienia, które wymaga wystawienia faktury VAT.'
-        : `Podaj mi szczegóły ${count} zamówień, które wymagają wystawienia faktury VAT.`;
-      UI.toast(`🧾 ${msg}`, 10000);
-      WebPush.sendNotification('AlleAsystent — Faktura VAT!', msg, true, '/?open=notifications', prompt);
-      Notifications.refresh();
-    } catch (e) {}
-  }
-
-  function _startPolling(skipInitialCheck) {
-    if (_timer) clearInterval(_timer);
-    // Skip the immediate check when the app was just opened by tapping a
-    // notification — that notification IS the detection, so re-polling right
-    // away just finds the same invoice again and fires a redundant duplicate.
-    if (!skipInitialCheck) _check();
-    _timer = setInterval(_check, 15 * 60 * 1000);
-  }
-
-  function init(skipInitialCheck) {
-    if (!isEnabled()) return;
-    if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      WebPush.subscribe().catch(() => {});
-    }
-    _startPolling(skipInitialCheck);
-  }
-
-  return { isEnabled, enable, disable, init };
-})();
+// The client-side invoice monitor used to sit here — a 15-minute
+// /allegro/pending-invoices poll that pushed "an order needs a VAT
+// invoice". It was removed; the invoice REMINDER below is the only
+// invoice automation left (archive/invoice-monitoring keeps the code).
 
 // ── Message monitor ───────────────────────────────
 const MessageMonitor = (() => {
@@ -1469,12 +1385,13 @@ const ReturnsMonitor = (() => {
 })();
 
 // ── Invoice reminder ──────────────────────────────
-// Unlike InvoiceMonitor above (a plain "new order needs an invoice"
-// notifier), this one actively asks in chat whether to issue pending
-// invoices and adapts to the reply. Detection AND the follow-up
-// conversation run entirely server-side (services/invoice_reminder.py, the
-// same Cloud Run Job cadence as OrderMonitor/ReturnsMonitor) — this object
-// only handles the toggle (push subscribe + enable/disable).
+// Rather than silently notifying that an order needs an invoice (what the
+// removed monitor above did), this one actively asks in chat whether to
+// issue pending invoices and adapts to the reply. Detection AND the
+// follow-up conversation run entirely server-side
+// (services/invoice_reminder.py, the same Cloud Run Job cadence as
+// OrderMonitor/ReturnsMonitor) — this object only handles the toggle
+// (push subscribe + enable/disable).
 const InvoiceReminder = (() => {
   const ENABLED_KEY = 'ae_invoice_reminder_enabled';
 
@@ -1689,7 +1606,6 @@ const UI = (() => {
     document.getElementById('settings-overlay').classList.remove('hidden');
     document.getElementById('settings-panel').classList.remove('hidden');
     document.getElementById('set-toggle-orders').checked = OrderMonitor.isEnabled();
-    document.getElementById('set-toggle-invoices').checked = InvoiceMonitor.isEnabled();
     document.getElementById('set-toggle-messages').checked = MessageMonitor.isEnabled();
     document.getElementById('set-toggle-returns').checked = ReturnsMonitor.isEnabled();
     document.getElementById('set-toggle-invoice-reminder').checked = InvoiceReminder.isEnabled();
@@ -1704,10 +1620,6 @@ const UI = (() => {
 
   function toggleOrderMonitoring(on) {
     if (on) OrderMonitor.enable(); else OrderMonitor.disable();
-  }
-
-  function toggleInvoiceMonitoring(on) {
-    if (on) InvoiceMonitor.enable(); else InvoiceMonitor.disable();
   }
 
   function toggleMessageMonitoring(on) {
@@ -1751,7 +1663,7 @@ const UI = (() => {
 
   return {
     toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
-    toggleOrderMonitoring, toggleInvoiceMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
+    toggleOrderMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
     toggleInvoiceReminder, toggleDarkTheme,
   };
 })();
@@ -1802,10 +1714,6 @@ const Chat = (() => {
       inner.innerHTML = inner.innerHTML.replace('[ORDER_MONITORING_BTN]',
         '<button class="btn-monitoring" onclick="OrderMonitor.enable()">🔔 Włącz monitoring zamówień</button>');
     }
-    if (inner.innerHTML.includes('[INVOICE_MONITORING_BTN]')) {
-      inner.innerHTML = inner.innerHTML.replace('[INVOICE_MONITORING_BTN]',
-        '<button class="btn-invoice-monitoring" onclick="InvoiceMonitor.enable()">🧾 Włącz monitoring faktur</button>');
-    }
     if (inner.innerHTML.includes('[MESSAGE_MONITORING_BTN]')) {
       inner.innerHTML = inner.innerHTML.replace('[MESSAGE_MONITORING_BTN]',
         '<button class="btn-message-monitoring" onclick="MessageMonitor.enable()">💬 Włącz monitoring wiadomości</button>');
@@ -1822,13 +1730,6 @@ const Chat = (() => {
       inner.querySelectorAll('.btn-monitoring').forEach(btn => {
         if (btn.getAttribute('onclick')?.includes('OrderMonitor.enable')) {
           btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring zamówień aktywny</span>';
-        }
-      });
-    }
-    if (InvoiceMonitor.isEnabled()) {
-      inner.querySelectorAll('.btn-invoice-monitoring').forEach(btn => {
-        if (btn.getAttribute('onclick')?.includes('InvoiceMonitor.enable')) {
-          btn.outerHTML = '<span class="monitoring-badge">✓ Monitoring faktur aktywny</span>';
         }
       });
     }
@@ -2285,7 +2186,7 @@ async function startAllegroLogin(btn) {
 }
 
 // Exposed for [ALLEGRO_LOGIN_BTN] buttons injected into chat messages (see
-// _applyMonitoringState), same pattern as OrderMonitor/InvoiceMonitor/MessageMonitor.
+// _applyMonitoringState), same pattern as OrderMonitor/MessageMonitor.
 window.AllegroAuth = { start: startAllegroLogin };
 
 // ── Boot ─────────────────────────────────────────
@@ -2420,7 +2321,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   const _startParams = new URLSearchParams(location.search);
   const _cameFromNotification = _startParams.get('open') === 'notifications';
   OrderMonitor.init(_cameFromNotification);
-  InvoiceMonitor.init(_cameFromNotification);
   MessageMonitor.init(_cameFromNotification);
   ReturnsMonitor.init();
 
@@ -2428,7 +2328,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Tapping a system push notification opens straight into the Notifications
   // panel — and skips the monitors' immediate re-check above, since the
   // notification IS the detection; re-polling on arrival would just find the
-  // same order/invoice again and fire a redundant duplicate.
+  // same order/message again and fire a redundant duplicate.
   if (_cameFromNotification) {
     // The tapped notification's own title/body/prompt travel in as launch params
     // (see sw.js) — paint it into the inbox right away instead of leaving the

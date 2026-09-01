@@ -88,6 +88,11 @@ _TOOL_LABELS = {
     "get_new_complaints":              "Reklamacje",
     "suggest_order_monitoring":        "Monitoring zamówień",
     "disable_order_monitoring":        "Monitoring zamówień",
+    "suggest_invoice_reminder":        "Przypomnienia o fakturach",
+    "disable_invoice_reminder":        "Przypomnienia o fakturach",
+    # Invoice MONITORING was removed (see the archive/invoice-monitoring
+    # branch); the two labels stay so historical turns that called it still
+    # read as a name instead of a raw tool id.
     "suggest_invoice_monitoring":      "Monitoring faktur",
     "disable_invoice_monitoring":      "Monitoring faktur",
     "suggest_message_monitoring":      "Monitoring wiadomości",

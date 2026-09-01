@@ -140,7 +140,6 @@ def _fake_jwt() -> str:
 
 _MONITOR_LS_KEYS = {
     "order": "ae_monitor_enabled",
-    "invoice": "ae_invoice_monitor_enabled",
     "message": "ae_message_monitor_enabled",
     "returns": "ae_returns_monitor_enabled",
     "invoice_reminder": "ae_invoice_reminder_enabled",
