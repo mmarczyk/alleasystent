@@ -1,4 +1,4 @@
-name: Deploy AllEasystent Chat UI to GitHub Pages
+name: Deploy AlleAsystent Chat UI to GitHub Pages
 
 on:
   push:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-AllEasystent — AI assistant for e-store owners.
+AlleAsystent — AI assistant for e-store owners.
 
 Entry point: FastAPI application with:
   - Facebook Messenger webhook
@@ -51,7 +51,7 @@ logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICA
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info(
-        "Starting AllEasystent in %s mode on port %d",
+        "Starting AlleAsystent in %s mode on port %d",
         settings.app_env,
         settings.port,
     )
@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    logger.info("AllEasystent shutting down")
+    logger.info("AlleAsystent shutting down")
 
 
 settings = get_settings()
@@ -91,7 +91,7 @@ settings = get_settings()
 _GIT_SHA = os.environ.get("GIT_SHA", "dev")
 
 app = FastAPI(
-    title="AllEasystent",
+    title="AlleAsystent",
     description="AI assistant for e-store owners — Allegro + Facebook Messenger",
     version="0.1.0",
     lifespan=lifespan,
@@ -952,7 +952,7 @@ async def push_notify(request: Request):
     from services.push_service import send_push, add_notification
     user = await get_current_user(request)
     body = await request.json()
-    title = body.get("title", "AllEasystent")
+    title = body.get("title", "AlleAsystent")
     notify_body = body.get("body", "")
     url = body.get("url", "/")
     prompt = body.get("prompt")

@@ -334,7 +334,7 @@ def build_gallery(results: list[dict], out_dir: Path, embed: bool = False) -> Pa
     html = f"""<!doctype html>
 <html lang="pl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AllEasystent — testy narzędzi</title>
+<title>AlleAsystent — testy narzędzi</title>
 <style>
   :root {{ color-scheme: dark; --bg:#0f0f1a; --card:#171728; --line:#2a2a40;
            --text:#e2e8f0; --muted:#94a3b8; --accent:#818cf8; }}
@@ -372,7 +372,7 @@ def build_gallery(results: list[dict], out_dir: Path, embed: bool = False) -> Pa
   pre {{ background:#0b0b14; border:1px solid var(--line); border-radius:8px; padding:1rem;
          overflow-x:auto; font-size:.8rem; white-space:pre-wrap; word-break:break-word; }}
 </style></head><body><div class="wrap">
-<h1>AllEasystent — testy wszystkich narzędzi</h1>
+<h1>AlleAsystent — testy wszystkich narzędzi</h1>
 <p class="lede">Każde narzędzie agenta Allegro uruchomione na syntetycznych danych sklepu
 i wyrenderowane w prawdziwym interfejsie PWA. Wygenerowano {generated}.</p>
 <div class="summary">

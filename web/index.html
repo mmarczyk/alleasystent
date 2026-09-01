@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0f0f1a" />
-  <meta name="description" content="AllEasystent — AI asystent dla właścicieli sklepów na Allegro" />
-  <title>AllEasystent — Asystent AI</title>
+  <meta name="description" content="AlleAsystent — AI asystent dla właścicieli sklepów na Allegro" />
+  <title>AlleAsystent — Asystent AI</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icons/icon-192.svg" />
   <link rel="stylesheet" href="css/app.css" />
@@ -72,7 +72,7 @@
 <div id="login-overlay" style="display:flex; position:fixed; inset:0; z-index:1000; background:#f5f5f5; flex-direction:column; align-items:center; justify-content:center;">
   <div style="text-align:center; max-width:360px; padding:48px 40px; background:#fff; border-radius:16px; box-shadow:0 4px 24px rgba(0,0,0,.1);">
     <div style="font-size:2.5rem; margin-bottom:12px;">🛒</div>
-    <h1 style="margin:0 0 8px; font-size:1.5rem; font-weight:700;">AllEasystent</h1>
+    <h1 style="margin:0 0 8px; font-size:1.5rem; font-weight:700;">AlleAsystent</h1>
     <p style="color:#666; margin:0 0 36px; font-size:.95rem;">Asystent AI dla sprzedawców Allegro</p>
     <div id="login-action">
       <a id="login-btn" href="/allegro/login" style="display:inline-flex; align-items:center; gap:10px; padding:13px 28px; background:#FF5A00; border-radius:8px; text-decoration:none; color:#fff; font-weight:600; font-size:1rem; box-shadow:0 2px 8px rgba(255,90,0,.35);">
@@ -151,7 +151,7 @@
     <button class="btn btn-danger w-full mt-sm" onclick="UI.clearAllHistory()">Usuń całą historię</button>
   </div>
   <div class="settings-footer">
-    <span class="muted" style="font-size:.82rem">AllEasystent — Backend-powered AI</span>
+    <span class="muted" style="font-size:.82rem">AlleAsystent — Backend-powered AI</span>
     <div class="version-info" id="version-info">Frontend: … · Backend: …</div>
   </div>
 </aside>
@@ -176,7 +176,7 @@
     <div class="sidebar-top">
       <div class="logo">
         <span class="logo-icon">🛒</span>
-        <span class="logo-text">AllEasystent</span>
+        <span class="logo-text">AlleAsystent</span>
       </div>
     </div>
     <div class="sidebar-sections">
@@ -216,7 +216,7 @@
       <button class="btn-icon" id="btn-sidebar-toggle" onclick="UI.toggleSidebar()" aria-label="Menu">☰</button>
       <div class="topbar-center">
         <span class="logo-icon">🛒</span>
-        <span id="topbar-title">AllEasystent</span>
+        <span id="topbar-title">AlleAsystent</span>
       </div>
       <button class="btn-icon" style="position:relative" onclick="Notifications.open()" aria-label="Powiadomienia">
         🔔<span class="notif-badge hidden"></span>
@@ -229,7 +229,7 @@
       <!-- WELCOME STATE -->
       <div id="welcome" class="welcome">
         <div class="welcome-icon">🛒</div>
-        <h1>AllEasystent</h1>
+        <h1>AlleAsystent</h1>
         <p class="welcome-sub">Asystent AI dla właścicieli sklepów na Allegro</p>
         <div class="suggestions">
           <button class="suggestion" onclick="Chat.sendSuggestion(this)">Pokaż moje nowe zamówienia</button>
@@ -254,7 +254,7 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
       </div>
-      <p class="input-hint">Enter — wyślij &nbsp;·&nbsp; Shift+Enter — nowa linia &nbsp;·&nbsp; <span id="model-badge">AllEasystent API</span></p>
+      <p class="input-hint">Enter — wyślij &nbsp;·&nbsp; Shift+Enter — nowa linia &nbsp;·&nbsp; <span id="model-badge">AlleAsystent API</span></p>
     </div>
 
   </main>
