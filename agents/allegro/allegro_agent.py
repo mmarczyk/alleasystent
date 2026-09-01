@@ -247,6 +247,17 @@ class AllegroAgent(BaseAgent):
         "'get_orders_by_courier' tool — get_orders_delivery already groups and counts orders by courier; "
         "always use it for any question combining orders with courier/delivery-provider grouping.\n"
         "• Order value / 'wartość zamówień' / 'łączna wartość' → get_new_orders, then sum total_price\n"
+        "• BUYERS/CUSTOMERS rather than orders — 'lista kupujących', 'lista klientów', 'kto u mnie "
+        "kupował', 'ilu miałem klientów', 'moi najlepsi klienci', 'stali klienci', 'jakie firmy u "
+        "mnie kupowały', 'kupujący, dla których wystawiłem faktury VAT' → get_buyers (one row per "
+        "buyer with their order count, total spend and invoice count). Pass buyer_type='company' "
+        "when the question names firms/NIP/B2B and 'person' for private buyers, invoice_status="
+        "'issued' for 'dla których wystawiłem fakturę', 'missing' for buyers still owed one, "
+        "count_only=true for 'ilu/ile'. Resolve the period yourself ('w tym roku' → 1 January of "
+        "the current year through today) and omit both dates only when no period is named — the "
+        "tool then defaults to the current year. NEVER answer a buyer question with get_orders or "
+        "get_sales_summary: neither groups anything by buyer, so the seller would be left counting "
+        "rows themselves.\n"
         "• Status / any detail of ONE SPECIFIC, already-identified order — 'jaki jest status tego "
         "zamówienia', 'co się dzieje z zamówieniem <id>', 'sprawdź zamówienie <id>', a bare order_id "
         "(UUID) pasted by the user, or a follow-up like 'a teraz?'/'sprawdź jeszcze raz' referring "
@@ -1509,6 +1520,226 @@ class AllegroAgent(BaseAgent):
             return None, None, None
         return date_from, date_to, f"{date_from_local} – {date_to_local}"
 
+    # ── Kupujący ──────────────────────────────────────────────────────────────
+    # One row per buyer, not per order (get_buyers). Two caps bound the work:
+    # how many rows the table may hold, and how many per-order invoice lookups
+    # the report may spend (Allegro has no bulk endpoint — it is one GET per
+    # order, see AllegroService.invoices_issued_map).
+    _BUYERS_TABLE_CAP = 200
+    _INVOICE_LOOKUP_CAP = 400
+
+    _BUYER_FILTER_LABELS: dict[tuple[str, str], str] = {
+        ("buyer_type", "company"):        "firmy",
+        ("buyer_type", "person"):         "osoby prywatne",
+        ("invoice_status", "issued"):     "z wystawioną fakturą VAT",
+        ("invoice_status", "missing"):    "z niewystawioną fakturą VAT",
+        ("invoice_status", "requested"):  "z prośbą o fakturę VAT",
+    }
+
+    @classmethod
+    def _period_or_current_year(cls, tool_input: dict) -> tuple[str, str, str]:
+        """UTC bounds + label for a period pair that defaults to the CURRENT
+        CALENDAR YEAR.
+
+        Unlike _optional_period (where "no period" legitimately means "the most
+        recent ones, any date"), a buyer report with no period is a question
+        about this year's customers — an all-time list would be a different,
+        much slower answer nobody asked for. A malformed date degrades to the
+        same default instead of raising: the period label is printed in the
+        reply, so the seller always sees which period they actually got.
+        """
+        today = datetime.now(cls._WARSAW).date()
+        default_from, default_to = f"{today.year}-01-01", today.isoformat()
+        date_from_local = tool_input.get("date_from_local") or default_from
+        date_to_local = tool_input.get("date_to_local") or default_to
+        try:
+            date_from, date_to = cls._local_day_bounds_to_utc(date_from_local, date_to_local)
+        except (ValueError, TypeError):
+            logger.warning(
+                "_period_or_current_year: unparseable period %r – %r, using the current year",
+                date_from_local, date_to_local,
+            )
+            date_from_local, date_to_local = default_from, default_to
+            date_from, date_to = cls._local_day_bounds_to_utc(date_from_local, date_to_local)
+        return date_from, date_to, f"{date_from_local} – {date_to_local}"
+
+    @staticmethod
+    def _buyer_key(order: Any) -> tuple[str, str]:
+        """What makes two orders the same customer: the NIP where there is one
+        (a company can buy from several Allegro accounts, and the NIP is the
+        identity the seller invoices), otherwise the company name, otherwise the
+        Allegro login. A company that ordered once with invoice data and once
+        without therefore splits into two rows — nothing in the second order
+        links it to the first, and inventing that link would merge unrelated
+        buyers."""
+        buyer = order.invoice_buyer
+        if buyer.vat_id:
+            return "nip", re.sub(r"[\s-]", "", buyer.vat_id)
+        if buyer.company_name:
+            return "firma", buyer.company_name.strip().lower()
+        return "login", order.buyer_login
+
+    @classmethod
+    def _aggregate_buyers(
+        cls, orders: list[Any], invoice_flags: dict[str, bool | None]
+    ) -> list[dict[str, Any]]:
+        """Group orders into one entry per buyer, newest order first so the name
+        and NIP shown are the most recent ones that buyer gave."""
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
+        for order in sorted(orders, key=lambda o: (o.paid_at or o.created_at or ""), reverse=True):
+            key = cls._buyer_key(order)
+            group = groups.get(key)
+            if group is None:
+                buyer = order.invoice_buyer
+                group = groups[key] = {
+                    "name": buyer.display_name or order.buyer_login or "—",
+                    "is_company": buyer.is_company,
+                    "vat_id": buyer.vat_id,
+                    "logins": [],
+                    "orders": 0,
+                    "value": 0.0,
+                    "currency": order.currency,
+                    "invoices": 0,
+                    "last_bought": "",
+                }
+            if order.buyer_login and order.buyer_login not in group["logins"]:
+                group["logins"].append(order.buyer_login)
+            group["orders"] += 1
+            group["value"] += order.total_price
+            if invoice_flags.get(order.order_id) is True:
+                group["invoices"] += 1
+            # Kept as the raw UTC ISO string: it is both what sorts correctly
+            # (sort_by='recent', and max() here) and what _format_dt_pl needs to
+            # render the date in Warsaw local time at the end.
+            group["last_bought"] = max(group["last_bought"], order.paid_at or order.created_at or "")
+        return list(groups.values())
+
+    async def _invoice_flags(self, orders: list[Any]) -> tuple[dict[str, bool | None], int]:
+        """(order_id → invoice attached?, how many orders the cap left unchecked).
+
+        Orders whose buyer asked for an invoice go first, so when the cap bites
+        it falls on the orders least likely to carry one.
+        """
+        candidates = sorted(orders, key=lambda o: not o.invoice_required)
+        checked = candidates[: self._INVOICE_LOOKUP_CAP]
+        flags = await self._allegro.invoices_issued_map([o.order_id for o in checked])
+        return flags, len(candidates) - len(checked)
+
+    async def _buyers_report(self, tool_input: dict[str, Any]) -> str:
+        """The finished get_buyers answer: heading, table, trailing summary.
+
+        Company-vs-person and the invoice state are per-ORDER facts (they live in
+        the order's VAT-invoice address block), so both filters run over orders
+        first and only what survives is grouped — a buyer counts as a company
+        here exactly when at least one of their orders in the period carried
+        company invoice data.
+        """
+        date_from, date_to, period_label = self._period_or_current_year(tool_input)
+        buyer_type = tool_input.get("buyer_type") or "any"
+        invoice_status = tool_input.get("invoice_status") or "any"
+        sort_by = tool_input.get("sort_by") or "value"
+        limit = max(1, min(int(tool_input.get("limit") or 100), self._BUYERS_TABLE_CAP))
+
+        orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
+        if buyer_type == "company":
+            orders = [o for o in orders if o.invoice_buyer.is_company]
+        elif buyer_type == "person":
+            orders = [o for o in orders if not o.invoice_buyer.is_company]
+        if invoice_status in ("requested", "missing"):
+            orders = [o for o in orders if o.invoice_required]
+
+        # No invoice filter ⇒ no lookups at all: they cost one API call per order,
+        # and a question that never mentioned invoices shouldn't pay for hundreds.
+        flags: dict[str, bool | None] = {}
+        unchecked = 0
+        if invoice_status != "any" and orders:
+            flags, unchecked = await self._invoice_flags(orders)
+        if invoice_status == "issued":
+            orders = [o for o in orders if flags.get(o.order_id) is True]
+        elif invoice_status == "missing":
+            orders = [o for o in orders if flags.get(o.order_id) is False]
+
+        buyers = self._aggregate_buyers(orders, flags)
+        if sort_by == "recent":
+            buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)
+        elif sort_by == "orders":
+            buyers.sort(key=lambda g: (g["orders"], g["value"]), reverse=True)
+        else:
+            buyers.sort(key=lambda g: (g["value"], g["orders"]), reverse=True)
+
+        filters = [
+            label for (arg, value), label in self._BUYER_FILTER_LABELS.items()
+            if {"buyer_type": buyer_type, "invoice_status": invoice_status}[arg] == value
+        ]
+        filter_note = f" ({', '.join(filters)})" if filters else ""
+        logger.info(
+            "get_buyers: %d orders → %d buyers (%s, typ=%s, faktury=%s)",
+            len(orders), len(buyers), period_label, buyer_type, invoice_status,
+        )
+
+        if tool_input.get("count_only"):
+            return self._count_sentence(
+                len(buyers), "Miałeś", ("kupującego", "kupujących", "kupujących"),
+                none=f"Brak kupujących{filter_note} w okresie {period_label}.",
+                scope=f"{filter_note} w okresie {period_label}",
+            )
+        if not buyers:
+            return f"Brak kupujących{filter_note} w okresie {period_label}."
+
+        shown = buyers[:limit]
+        # The invoice column earns its place only where it can vary: with
+        # invoice_status='missing' every row is 0 by construction, and with 'any'
+        # no lookup ran at all.
+        with_invoices = invoice_status in ("issued", "requested")
+        headers = ["Kupujący", "Typ", "NIP", "Login Allegro", "Zamówienia", "Wartość"]
+        align = "llllrr"
+        if with_invoices:
+            headers.append("Faktury VAT")
+            align += "r"
+        headers.append("Ostatni zakup")
+        align += "l"
+
+        rows = []
+        for group in shown:
+            row: list[Any] = [
+                group["name"],
+                "Firma" if group["is_company"] else "Osoba prywatna",
+                group["vat_id"],
+                ", ".join(f"`{login}`" for login in group["logins"]),
+                group["orders"],
+                self._format_price(group["value"], group["currency"]),
+            ]
+            if with_invoices:
+                row.append(group["invoices"])
+            row.append(self._format_dt_pl(group["last_bought"])[:10])
+            rows.append(row)
+
+        total_orders = sum(g["orders"] for g in buyers)
+        total_value = sum(g["value"] for g in buyers)
+        # Kept short on purpose: this sentence IS the chat bubble (the table goes
+        # to the document viewer), and the preview cuts off at 220 characters.
+        # Phrased as a noun phrase, not "kupowało u Ciebie N…": the Polish verb
+        # would have to agree with the count ("kupował" for 1, "kupowało" for 2+),
+        # and a summary line that reads as broken grammar half the time is worse
+        # than one with no verb at all.
+        summary = (
+            f"**{len(buyers)}** "
+            f"{self._plural_pl(len(buyers), 'kupujący', 'kupujących', 'kupujących')}"
+            f"{filter_note} w okresie {period_label} — łącznie **{total_orders}** "
+            f"{self._plural_pl(total_orders, 'zamówienie', 'zamówienia', 'zamówień')} "
+            f"na **{self._format_price(total_value)}**."
+        )
+        if len(shown) < len(buyers):
+            summary += f" W tabeli pokazano pierwszych {len(shown)}."
+        unknown = sum(1 for value in flags.values() if value is None)
+        if unchecked or unknown:
+            summary += (
+                f" Statusu faktury nie udało się sprawdzić dla {unchecked + unknown} "
+                f"{self._plural_pl(unchecked + unknown, 'zamówienia', 'zamówień', 'zamówień')} "
+                "— mogły nie trafić do zestawienia."
+            )
+        return "\n".join(["# Kupujący", "", *self._md_table(headers, rows, align=align), "", summary])
+
     @classmethod
     def _sorted_by_date_desc(cls, items: list[dict], date_of) -> list[dict]:
         """Newest first — /order/customer-returns and /sale/issues don't promise
@@ -2611,6 +2842,9 @@ class AllegroAgent(BaseAgent):
                 "",
                 summary,
             ])
+
+        if tool_name == "get_buyers":
+            return await self._buyers_report(tool_input)
 
         if tool_name == "get_orders_pending_invoice":
             orders = await self._allegro.get_orders_needing_invoice(

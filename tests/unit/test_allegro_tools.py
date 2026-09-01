@@ -112,6 +112,13 @@ class TestMatchedLabels:
         found = matched_labels("wystaw fakturę dla ostatniego zamówienia")
         assert {"zamowienia", "faktury"} <= found
 
+    def test_buyer_words_that_also_describe_orders_stay_out_of_the_label(self):
+        """'klient' is a buyer word a seller uses just as often ABOUT an order
+        ('co klient odebrał'). Labeling it would put two topics on those queries
+        and switch off the deterministic order dispatch — see _LABEL_STEMS."""
+        from agents.allegro.allegro_tools import matched_labels
+        assert matched_labels("co klient odebrał") == {"zamowienia"}
+
     def test_english_query_matches(self):
         from agents.allegro.allegro_tools import matched_labels
         assert "zamowienia" in matched_labels("show me my new orders")
@@ -211,6 +218,9 @@ class TestLabelPhraseCoverage:
         ("moje konto allegro", "get_account_info"),
         ("jakie opłaty miałem w tym miesiącu", "get_billing_summary"),
         ("ile zarobiłem w tym tygodniu", "get_sales_summary"),
+        ("pokaż listę kupujących z tego roku", "get_buyers"),
+        ("jakie firmy u mnie kupowały", "get_buyers"),
+        ("ilu miałem kupujących w tym roku", "get_buyers"),
         ("jakie zamówienia czekają na fakturę", "get_orders_pending_invoice"),
         ("dane do faktury dla tego zamówienia", "get_order_invoice_data"),
         ("wystaw brakujące faktury za ten miesiąc", "preview_pending_invoices"),

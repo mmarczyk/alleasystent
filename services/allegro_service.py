@@ -13,9 +13,48 @@ from typing import Any
 import httpx
 
 from config.settings import get_settings
-from models.allegro import AllegroOrder, AllegroOrderLine, AllegroTokens
+from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine, AllegroTokens
 
 logger = logging.getLogger(__name__)
+
+# How many per-order invoice lookups (GET .../invoices) may be in flight at once.
+# Allegro rate-limits per second, and the seller is waiting on the answer — 8 is
+# fast enough for a few hundred orders without hammering the API.
+_INVOICE_LOOKUP_CONCURRENCY = 8
+
+
+def parse_invoice_buyer(checkout_form: dict[str, Any]) -> AllegroInvoiceBuyer:
+    """Read the VAT-invoice address block off a checkout form.
+
+    Shared by _parse_order (list responses) and get_order_invoice_data (single
+    order) so both read the same fields the same way — the company/private-person
+    distinction the invoicing flow and get_buyers both rest on must not depend on
+    which endpoint the order happened to arrive from.
+
+    Allegro's tax ID field has moved twice: legacy "taxId" is deprecated in favor
+    of an "ids" array (e.g. [{"type": "PL_NIP", "value": "..."}]) — "vatId" was
+    never a real field on either shape. Prefer the current PL_NIP entry, fall
+    back to the deprecated field for older responses.
+    """
+    invoice = checkout_form.get("invoice") or {}
+    address = invoice.get("address") or {}
+    company = address.get("company") or {}
+    natural = address.get("naturalPerson") or {}
+    tax_ids = company.get("ids") or []
+    vat_id = next((i.get("value", "") for i in tax_ids if i.get("type") == "PL_NIP"), "")
+    vat_id = vat_id or company.get("taxId", "")
+    return AllegroInvoiceBuyer(
+        required=bool(invoice.get("required")),
+        dont_want=bool(invoice.get("dontWant")),
+        company_name=company.get("name", "") or "",
+        vat_id=vat_id or "",
+        first_name=natural.get("firstName", "") or "",
+        last_name=natural.get("lastName", "") or "",
+        street=address.get("street", "") or "",
+        city=address.get("city", "") or "",
+        zip_code=address.get("zipCode", "") or "",
+        country_code=address.get("countryCode", "") or "",
+    )
 
 
 class _TTLCache:
@@ -609,8 +648,8 @@ class AllegroService:
         ]
         summary = data.get("summary") or {}
         total_amount = summary.get("totalToPay") or {}
-        invoice = data.get("invoice") or {}
-        invoice_required = bool(invoice.get("required")) and not bool(invoice.get("dontWant"))
+        invoice_buyer = parse_invoice_buyer(data)
+        invoice_required = invoice_buyer.required and not invoice_buyer.dont_want
         # delivery.time.dispatch = the window the seller has to hand the parcel
         # over to the carrier; `.to` is the deadline the store owner is held to.
         # Every level can legitimately be absent or null (older orders), so each
@@ -634,33 +673,29 @@ class AllegroService:
             delivery=delivery,
             line_items=line_items,
             invoice_required=invoice_required,
+            invoice_buyer=invoice_buyer,
         )
 
     async def get_order_invoice_data(self, order_id: str) -> dict[str, Any]:
-        """Return the full invoice address block from an order's checkout form."""
+        """Return the full invoice address block from an order's checkout form.
+
+        The dict shape (note the camelCase "dontWant") is what the invoicing flow
+        and services/infakt_service.build_invoice_payload have always consumed;
+        the parsing itself lives in parse_invoice_buyer, shared with _parse_order.
+        """
         data = await self._get(f"/order/checkout-forms/{order_id}")
-        invoice = data.get("invoice") or {}
-        address = invoice.get("address") or {}
-        company = address.get("company") or {}
-        natural = address.get("naturalPerson") or {}
-        # Allegro's tax ID field has moved twice: legacy "taxId" is deprecated
-        # in favor of an "ids" array (e.g. [{"type": "PL_NIP", "value": "..."}])
-        # — "vatId" was never a real field on either shape. Prefer the current
-        # PL_NIP entry, fall back to the deprecated field for older responses.
-        tax_ids = company.get("ids") or []
-        vat_id = next((i.get("value", "") for i in tax_ids if i.get("type") == "PL_NIP"), "")
-        vat_id = vat_id or company.get("taxId", "")
+        buyer = parse_invoice_buyer(data)
         return {
-            "required": bool(invoice.get("required")),
-            "dontWant": bool(invoice.get("dontWant")),
-            "company_name": company.get("name", ""),
-            "vat_id": vat_id,
-            "first_name": natural.get("firstName", ""),
-            "last_name": natural.get("lastName", ""),
-            "street": address.get("street", ""),
-            "city": address.get("city", ""),
-            "zip_code": address.get("zipCode", ""),
-            "country_code": address.get("countryCode", ""),
+            "required": buyer.required,
+            "dontWant": buyer.dont_want,
+            "company_name": buyer.company_name,
+            "vat_id": buyer.vat_id,
+            "first_name": buyer.first_name,
+            "last_name": buyer.last_name,
+            "street": buyer.street,
+            "city": buyer.city,
+            "zip_code": buyer.zip_code,
+            "country_code": buyer.country_code,
         }
 
     async def get_order_invoices(self, order_id: str) -> list[dict[str, Any]]:
@@ -692,6 +727,29 @@ class AllegroService:
             pdf_bytes,
             "application/pdf",
         )
+
+    async def invoices_issued_map(self, order_ids: list[str]) -> dict[str, bool | None]:
+        """order_id → True when a VAT invoice file is already attached to the
+        order in Allegro, False when none is, None when the lookup failed.
+
+        Allegro has no bulk endpoint for this — it is one GET per order — so the
+        calls run at bounded concurrency instead of firing the whole list at the
+        API at once (a year-long buyer report can ask about hundreds of orders).
+        A single failed lookup degrades to None rather than sinking the whole
+        report; the caller reports how many it could not check instead of
+        quietly counting them as "no invoice".
+        """
+        semaphore = asyncio.Semaphore(_INVOICE_LOOKUP_CONCURRENCY)
+
+        async def check(order_id: str) -> tuple[str, bool | None]:
+            async with semaphore:
+                try:
+                    return order_id, bool(await self.get_order_invoices(order_id))
+                except Exception as exc:  # noqa: BLE001 — one order must not sink the report
+                    logger.warning("invoices_issued_map: lookup failed for %s: %s", order_id, exc)
+                    return order_id, None
+
+        return dict(await asyncio.gather(*[check(oid) for oid in order_ids]))
 
     async def get_orders_needing_invoice(
         self,

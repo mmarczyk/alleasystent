@@ -181,6 +181,26 @@ CASES: list[Case] = [
          ("Podsumowanie sprzedaży", "Top produkty", "Przychód po opłatach Allegro"),
          note="Przychód, opłaty i zestawienie per zamówienie (format dashboard)."),
 
+    # ── Kupujący ─────────────────────────────────────────────────────────────
+    Case("get_buyers", "get_buyers", {},
+         "Pokaż listę kupujących z tego roku",
+         ("# Kupujący", "| Kupujący | Typ | NIP |", "Firma", "Osoba prywatna", "kupujących w okresie"),
+         note="Jeden wiersz na kupującego (domyślnie bieżący rok), najwięksi na górze."),
+    Case("get_buyers__companies_invoiced", "get_buyers",
+         {"buyer_type": "company", "invoice_status": "issued"},
+         "Lista kupujących z tego roku, dla których wystawiałem faktury VAT — tylko firmy",
+         ("Biuro Serwis Paweł B.", "5252445566", "Faktury VAT",
+          "(firmy, z wystawioną fakturą VAT)"),
+         note="Firmy z realnie wystawioną fakturą — kolumna z liczbą faktur włączona."),
+    Case("get_buyers__count", "get_buyers", {"buyer_type": "company", "count_only": True},
+         "Ilu miałem w tym roku klientów-firm?",
+         ("Miałeś **2** kupujących (firmy)",),
+         note="count_only — samo zdanie z liczbą, bez tabeli."),
+    Case("get_buyers__empty", "get_buyers", {"buyer_type": "company"},
+         "Jakie firmy u mnie kupowały w tym roku?",
+         ("Brak kupujących (firmy)",), empty=True,
+         note="Pusty sklep — stan zerowy z nazwą filtra."),
+
     # ── Faktury ──────────────────────────────────────────────────────────────
     Case("get_orders_pending_invoice", "get_orders_pending_invoice", {},
          "Do których zamówień muszę wystawić fakturę?",

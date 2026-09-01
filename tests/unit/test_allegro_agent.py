@@ -771,3 +771,190 @@ class TestOrdersDueToday:
         await agent._dispatch("get_orders_due_today", {"limit": 5})
 
         assert agent._allegro.get_orders.call_args.kwargs["limit"] == 100
+
+
+class TestBuyersReport:
+    """get_buyers is the buyer view of a period: one row per CUSTOMER, grouped
+    by NIP → company name → Allegro login, with the company/private-person
+    distinction read off the order's VAT-invoice address (the only place
+    Allegro states it) — see AllegroAgent._buyers_report."""
+
+    @staticmethod
+    def _order(order_id, login, price, *, company="", nip="", first="", last="",
+               invoice_required=False, paid_at="2026-03-04T10:00:00Z"):
+        from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine
+
+        return AllegroOrder(
+            order_id=order_id,
+            buyer_login=login,
+            buyer_email=f"{login}@example.com",
+            status="READY_FOR_PROCESSING",
+            fulfillment_status="SENT",
+            total_price=price,
+            currency="PLN",
+            created_at=paid_at,
+            paid_at=paid_at,
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=1, price=price)],
+            invoice_required=invoice_required,
+            invoice_buyer=AllegroInvoiceBuyer(
+                required=invoice_required,
+                company_name=company,
+                vat_id=nip,
+                first_name=first,
+                last_name=last,
+            ),
+        )
+
+    def _agent_with(self, orders, issued=()):
+        agent = _make_agent()
+        agent._allegro.get_all_paid_orders_in_period = AsyncMock(return_value=orders)
+        agent._allegro.invoices_issued_map = AsyncMock(
+            side_effect=lambda ids: {oid: oid in issued for oid in ids}
+        )
+        return agent
+
+    def _mixed_orders(self):
+        return [
+            self._order("c1", "anna", 400.0, company="KAWA I SPOLKA", nip="779-244-55-88",
+                        invoice_required=True, paid_at="2026-02-01T10:00:00Z"),
+            # Same company, a different Allegro account and a re-typed NIP —
+            # grouped by the digits, so this is one buyer with two orders, shown
+            # under the name and NIP from the more recent of them.
+            self._order("c2", "anna.firma", 600.0, company="Kawa i Spółka", nip="7792445588",
+                        invoice_required=True, paid_at="2026-05-01T10:00:00Z"),
+            self._order("p1", "marek", 899.0, first="Marek", last="Zieliński",
+                        invoice_required=True, paid_at="2026-03-01T10:00:00Z"),
+            self._order("p2", "kasia", 137.7, paid_at="2026-04-01T10:00:00Z"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_groups_orders_by_buyer_highest_spend_first(self):
+        agent = self._agent_with(self._mixed_orders())
+
+        result = await agent._dispatch("get_buyers", {})
+        rows = [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+
+        assert rows == [
+            "| Kawa i Spółka | Firma | 7792445588 | `anna.firma`, `anna` | 2 | 1000,00 PLN | 01.05.2026 |",
+            "| Marek Zieliński | Osoba prywatna | — | `marek` | 1 | 899,00 PLN | 01.03.2026 |",
+            "| kasia | Osoba prywatna | — | `kasia` | 1 | 137,70 PLN | 01.04.2026 |",
+        ]
+        assert result.splitlines()[0] == "# Kupujący"
+        # The summary is LAST — that is the half the chat bubble shows.
+        assert result.splitlines()[-1].startswith("**3** kupujących w okresie")
+
+    @pytest.mark.asyncio
+    async def test_company_filter_keeps_only_buyers_with_invoice_company_data(self):
+        agent = self._agent_with(self._mixed_orders())
+
+        result = await agent._dispatch("get_buyers", {"buyer_type": "company"})
+
+        assert "Kawa i Spółka" in result
+        assert "Marek Zieliński" not in result and "`kasia`" not in result
+        assert result.splitlines()[-1].startswith("**1** kupujący (firmy) w okresie")
+
+    @pytest.mark.asyncio
+    async def test_person_filter_is_everyone_without_company_data(self):
+        agent = self._agent_with(self._mixed_orders())
+
+        result = await agent._dispatch("get_buyers", {"buyer_type": "person"})
+
+        assert "Kawa i Spółka" not in result
+        assert "Marek Zieliński" in result and "`kasia`" in result
+
+    @pytest.mark.asyncio
+    async def test_issued_filter_keeps_only_orders_with_an_invoice_attached(self):
+        agent = self._agent_with(self._mixed_orders(), issued={"c2"})
+
+        result = await agent._dispatch(
+            "get_buyers", {"buyer_type": "company", "invoice_status": "issued"}
+        )
+
+        # Only the invoiced order counts toward the row — the company's other
+        # order in the period has no invoice, so neither its value nor its
+        # count may leak into an "invoices I issued" report.
+        assert "| Kawa i Spółka | Firma | 7792445588 | `anna.firma` | 1 | 600,00 PLN | 1 | 01.05.2026 |" in result
+        assert "Faktury VAT" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_filter_keeps_only_requested_but_not_issued(self):
+        agent = self._agent_with(self._mixed_orders(), issued={"c1", "c2"})
+
+        result = await agent._dispatch("get_buyers", {"invoice_status": "missing"})
+
+        assert "Marek Zieliński" in result
+        assert "Kawa i Spółka" not in result
+        # kasia never asked for an invoice, so she is not owed one.
+        assert "`kasia`" not in result
+
+    @pytest.mark.asyncio
+    async def test_no_invoice_filter_spends_no_invoice_lookups(self):
+        """One API call per order — a question that never mentioned invoices
+        must not pay for them."""
+        agent = self._agent_with(self._mixed_orders())
+
+        await agent._dispatch("get_buyers", {})
+
+        agent._allegro.invoices_issued_map.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_period_defaults_to_the_current_year(self):
+        from datetime import date
+
+        agent = self._agent_with(self._mixed_orders())
+
+        result = await agent._dispatch("get_buyers", {})
+
+        date_from, date_to = agent._allegro.get_all_paid_orders_in_period.call_args.args
+        year = date.today().year
+        assert date_from.startswith(str(year - 1)) or date_from.startswith(str(year))
+        assert f"{year}-01-01 – {date.today().isoformat()}" in result
+        assert date_to >= date_from
+
+    @pytest.mark.asyncio
+    async def test_count_only_answers_in_one_sentence_without_a_table(self):
+        agent = self._agent_with(self._mixed_orders())
+
+        result = await agent._dispatch("get_buyers", {"count_only": True})
+
+        assert result.startswith("Miałeś **3** kupujących w okresie")
+        assert "|" not in result
+
+    @pytest.mark.asyncio
+    async def test_empty_period_names_the_filter_that_was_applied(self):
+        agent = self._agent_with([])
+
+        result = await agent._dispatch("get_buyers", {"buyer_type": "company"})
+
+        assert result.startswith("Brak kupujących (firmy) w okresie")
+
+    @pytest.mark.asyncio
+    async def test_sort_by_orders_and_recent(self):
+        orders = self._mixed_orders() + [
+            self._order("p3", "kasia", 20.0, paid_at="2026-06-01T10:00:00Z"),
+            self._order("p4", "kasia", 20.0, paid_at="2026-07-01T10:00:00Z"),
+        ]
+        agent = self._agent_with(orders)
+
+        by_orders = await agent._dispatch("get_buyers", {"sort_by": "orders"})
+        by_recent = await agent._dispatch("get_buyers", {"sort_by": "recent"})
+
+        def first_row(result):
+            return [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1]
+
+        assert first_row(by_orders).startswith("| kasia |")   # 3 orders, lowest value
+        assert first_row(by_recent).startswith("| kasia |")   # bought most recently
+        assert first_row(await agent._dispatch("get_buyers", {})).startswith("| Kawa i Spółka |")
+
+    @pytest.mark.asyncio
+    async def test_failed_invoice_lookup_is_reported_not_counted_as_missing(self):
+        agent = self._agent_with(self._mixed_orders())
+        agent._allegro.invoices_issued_map = AsyncMock(
+            side_effect=lambda ids: {oid: (None if oid == "c1" else oid == "c2") for oid in ids}
+        )
+
+        result = await agent._dispatch(
+            "get_buyers", {"buyer_type": "company", "invoice_status": "issued"}
+        )
+
+        assert "Statusu faktury nie udało się sprawdzić dla 1 zamówienia" in result

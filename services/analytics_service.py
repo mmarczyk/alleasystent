@@ -82,6 +82,7 @@ _TOOL_LABELS = {
     "get_account_info":                "Konto",
     "get_billing_summary":             "Rozliczenia",
     "get_sales_summary":               "Sprzedaż i zysk",
+    "get_buyers":                      "Kupujący",
     "get_new_returns":                 "Zwroty",
     "get_returns_to_process":          "Zwroty do obsłużenia",
     "get_new_complaints":              "Reklamacje",
