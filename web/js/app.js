@@ -205,9 +205,35 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// Links in a reply (faktura w inFakt, strona zamówienia w Allegro) point
+// somewhere else entirely and must leave the app. Added to the home screen the
+// PWA runs in a standalone window with no browser chrome, so a plain <a href>
+// navigates away *inside* it: the seller lands on inFakt with no address bar
+// and no back button, and the only way back to the chat is to kill and reopen
+// the app. target="_blank" hands the URL to Safari instead, and in an ordinary
+// browser tab does the expected thing — opens a new one.
+//
+// Only absolute http(s) links that leave this origin: "javascript:void(0)"
+// (the doc-viewer trigger), in-app anchors, mailto:/tel: and our own URLs all
+// still belong inside the app.
+function _openLinksExternally(html) {
+  if (!html.includes('<a ')) return html;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  tpl.content.querySelectorAll('a[href]').forEach(a => {
+    const href = a.getAttribute('href') || '';
+    if (!/^https?:\/\//i.test(href)) return;
+    if (href.startsWith(location.origin)) return;
+    a.setAttribute('target', '_blank');
+    // Without noopener the opened page gets a handle on the app's window.
+    a.setAttribute('rel', 'noopener noreferrer');
+  });
+  return tpl.innerHTML;
+}
+
 function renderMarkdown(text) {
   if (typeof marked === 'undefined') return escHtml(text).replace(/\n/g, '<br>');
-  return marked.parse(text);
+  return _openLinksExternally(marked.parse(text));
 }
 
 // ── Document Viewer ──────────────────────────────
