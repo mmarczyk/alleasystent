@@ -85,10 +85,10 @@ class TestMarker:
 
 class TestDiffAndRecord:
     async def test_first_pass_records_baseline_without_reporting(self):
-        from services.message_monitor import _diff_and_record
+        from services.message_monitor import _diff_and_record, _BASELINE_MEMBER
         r = FakeRedis()
         assert await _diff_and_record(r, "seen", ["t1@a", "t2@b"]) == []
-        assert r.sets["seen"] == {"t1@a", "t2@b"}
+        assert r.sets["seen"] == {_BASELINE_MEMBER, "t1@a", "t2@b"}
 
     async def test_only_unseen_markers_are_new(self):
         from services.message_monitor import _diff_and_record
@@ -96,18 +96,35 @@ class TestDiffAndRecord:
         assert await _diff_and_record(r, "seen", ["t1@a", "t2@b"]) == ["t2@b"]
 
     async def test_seen_set_is_replaced_not_accumulated(self):
-        from services.message_monitor import _diff_and_record
+        from services.message_monitor import _diff_and_record, _BASELINE_MEMBER
         r = FakeRedis({"seen": {"old@x"}})
         await _diff_and_record(r, "seen", ["t1@a"])
-        assert r.sets["seen"] == {"t1@a"}
+        assert r.sets["seen"] == {_BASELINE_MEMBER, "t1@a"}
 
-    async def test_no_unread_leaves_state_untouched(self):
-        """All threads read: nothing new, and the baseline must survive so a
-        later message in a previously-seen thread still counts as new."""
-        from services.message_monitor import _diff_and_record
+    async def test_no_unread_keeps_recorded_markers(self):
+        """All threads read: nothing new, and the recorded markers must survive
+        so a later message in a previously-seen thread still counts as new."""
+        from services.message_monitor import _diff_and_record, _BASELINE_MEMBER
         r = FakeRedis({"seen": {"t1@a"}})
         assert await _diff_and_record(r, "seen", []) == []
-        assert r.sets["seen"] == {"t1@a"}
+        assert r.sets["seen"] == {_BASELINE_MEMBER, "t1@a"}
+
+    async def test_empty_first_pass_still_creates_the_key(self):
+        """The baseline must be established by the first pass for a user, not by
+        the first pass that happens to find something — otherwise the key stays
+        missing through every quiet pass and the next real message is swallowed."""
+        from services.message_monitor import _diff_and_record
+        r = FakeRedis()
+        assert await _diff_and_record(r, "seen", []) == []
+        assert await r.exists("seen") == 1
+
+    async def test_empty_pass_refreshes_the_ttl(self):
+        """Without this a user quiet for the TTL loses the key, and their next
+        message is swallowed as a fresh baseline all over again."""
+        from services.message_monitor import _diff_and_record, _SEEN_TTL
+        r = FakeRedis({"seen": {"t1@a"}})
+        await _diff_and_record(r, "seen", [])
+        assert r.expires["seen"] == _SEEN_TTL
 
     async def test_ttl_is_set(self):
         from services.message_monitor import _diff_and_record, _SEEN_TTL
@@ -318,3 +335,51 @@ class TestSingleSourceOfTruth:
             assert "hasUnreadMessages" not in src, module.__name__
             assert "lastMessageCreatedAt" not in src, module.__name__
             assert "is_thread_unread" in src, module.__name__
+
+
+class TestFirstMessageIsNotSwallowed:
+    """Replay of the reported failure: a buyer wrote at 08:34, the pass fetched
+    the thread, and nothing arrived. The key had never been created, because
+    every earlier pass found nothing unread and returned without writing, so
+    08:34 was treated as the baseline instead of as news."""
+
+    @staticmethod
+    def _threads(unread_at=None):
+        if unread_at is None:
+            return [{"id": "T", "read": True, "lastMessageDateTime": "2026-09-01T06:00:00Z"}]
+        return [{"id": "T", "read": False, "lastMessageDateTime": unread_at}]
+
+    async def _pass(self, r, threads):
+        from services.message_monitor import _diff_and_record, _marker
+        from services.allegro_service import is_thread_unread
+
+        markers = [_marker(t) for t in threads if is_thread_unread(t) and t.get("id")]
+        return await _diff_and_record(r, "allegro:monitor:messages:seen:user-1", markers)
+
+    async def test_message_after_quiet_passes_is_reported(self):
+        r = FakeRedis()
+        assert await self._pass(r, self._threads()) == []                      # 08:32 quiet
+        new = await self._pass(r, self._threads("2026-09-01T08:34:00Z"))       # 08:34 arrives
+        assert new == ["T@2026-09-01T08:34:00Z"], "the 08:34 message must be reported"
+
+    async def test_it_is_reported_once_not_on_every_later_pass(self):
+        r = FakeRedis()
+        await self._pass(r, self._threads())
+        await self._pass(r, self._threads("2026-09-01T08:34:00Z"))
+        assert await self._pass(r, self._threads("2026-09-01T08:34:00Z")) == []  # 08:36
+        assert await self._pass(r, self._threads()) == []                        # 08:43 replied
+
+    async def test_a_later_message_in_the_same_thread_is_reported_again(self):
+        r = FakeRedis()
+        await self._pass(r, self._threads())
+        await self._pass(r, self._threads("2026-09-01T08:34:00Z"))
+        await self._pass(r, self._threads())
+        assert await self._pass(r, self._threads("2026-09-01T10:00:00Z")) == [
+            "T@2026-09-01T10:00:00Z"
+        ]
+
+    async def test_very_first_pass_of_all_still_baselines(self):
+        """A user whose inbox already has unread threads when monitoring starts
+        must not get a push for each of them."""
+        r = FakeRedis()
+        assert await self._pass(r, self._threads("2026-08-20T09:00:00Z")) == []
