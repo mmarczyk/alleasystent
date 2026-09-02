@@ -11,12 +11,19 @@ name: Deploy AlleAsystent Background Jobs to Cloud Run
 on:
   push:
     branches: [main]
+    # Whole directories rather than the individual modules the entrypoint
+    # happens to import today. That list rotted three times in a row: new
+    # monitors (message_monitor, return_complaint_monitor, invoice_reminder)
+    # and their helpers (monitor_state, infakt_service, agents/base_agent via
+    # the invoice reminder) were never added, so changing one merged to main
+    # and silently left the old code running in Cloud Run — a stale monitor
+    # looks exactly like a working one that has nothing to report. An
+    # occasional redundant ~2-minute build is the cheaper failure.
     paths:
       - 'jobs/**'
-      - 'services/order_monitor.py'
-      - 'services/allegro_service.py'
-      - 'services/push_service.py'
-      - 'config/settings.py'
+      - 'services/**'
+      - 'agents/**'
+      - 'config/**'
       - 'models/**'
       - 'requirements-jobs.txt'
       - 'Dockerfile.jobs'
