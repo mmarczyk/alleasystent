@@ -162,6 +162,35 @@ class TestToolChaining:
         assert agent._execute_tool.await_count == 1
 
 
+class TestCompoundRequests:
+    """A single message asking for two INDEPENDENT things (see COMPOUND
+    REQUESTS in the system prompt) should get both tools called in the same
+    round, not just one silently answered while the other is dropped."""
+
+    @pytest.mark.asyncio
+    async def test_two_independent_tools_bundled_in_one_round_both_run(self):
+        agent = _agent({
+            "get_sales_summary": "## Sprzedaż dzisiaj\n- Przychód: 500 zł",
+            "preview_pending_invoices": "**Podgląd danych faktur — nic nie wysłano.**",
+        })
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[
+                _tool_call("c1", "get_sales_summary", {}),
+                _tool_call("c2", "preview_pending_invoices", {}),
+            ]),
+            _resp(),  # no more tools needed
+            _resp("Oto podsumowanie sprzedaży i podgląd zaległych faktur."),
+        ])
+
+        response = await agent.run("Podsumuj mi sprzedaż z dzisiaj i wystaw te zaległe faktury.")
+
+        assert response.metadata["tools"] == ["get_sales_summary", "preview_pending_invoices"]
+        assert [c.args[0] for c in agent._execute_tool.await_args_list] == [
+            "get_sales_summary", "preview_pending_invoices",
+        ]
+        assert response.text == "Oto podsumowanie sprzedaży i podgląd zaległych faktur."
+
+
 class TestEmptyReplyGuards:
     """Nothing the agent returns may be blank — the orchestrator turns that into
     'Przepraszam, nie udało się wygenerować odpowiedzi' for the user."""
