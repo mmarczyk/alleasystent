@@ -2596,16 +2596,20 @@ class AllegroAgent(BaseAgent):
                     product_revenue[li.offer_name] = product_revenue.get(li.offer_name, 0) + li.price * li.quantity
             top = sorted(product_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
 
-            sections: list[str] = []
-            # Month-by-month first: for any period longer than a single month
-            # ("sprzedaż z tego roku", "ostatni kwartał") this is the shape of
-            # the answer the seller asked for, and the totals above are just
-            # its sum.
-            sections += self._monthly_sales_section(
+            # Four blocks, assembled at the end in reading order: what came in
+            # (totals, then month by month), what Allegro took out, what sold,
+            # and only then the long per-order listing. Building them separately
+            # is what lets the costs — the figure the seller actually looks
+            # for — sit above the product table while the per-order table it is
+            # computed from stays at the bottom of the document.
+            month_sections: list[str] = self._monthly_sales_section(
                 orders, tool_input["date_from_local"], tool_input["date_to_local"]
             )
+            product_sections: list[str] = []
+            cost_sections: list[str] = []
+            order_sections: list[str] = []
             if top:
-                sections += [
+                product_sections += [
                     "",
                     "## Top produkty wg przychodu",
                     "",
@@ -2666,26 +2670,26 @@ class AllegroAgent(BaseAgent):
                 unattributed_fees = total_fees - sum(v["fees"] for v in by_order.values())
                 unattributed_refunds = total_refunds - sum(v["refunds"] for v in by_order.values())
 
-                sections += ["", f"## Koszty Allegro ({period_label})", ""]
-                sections.append(f"- Łączne opłaty: **{self._format_price(total_fees)}**")
-                sections += [
+                cost_sections += ["", f"## Koszty Allegro ({period_label})", ""]
+                cost_sections.append(f"- Łączne opłaty: **{self._format_price(total_fees)}**")
+                cost_sections += [
                     f"  - {desc}: {self._format_price(amt)}"
                     for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
                 ]
                 if total_refunds > 0:
-                    sections.append(f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**")
-                    sections += [
+                    cost_sections.append(f"- Zwroty/rabaty: **+{self._format_price(total_refunds)}**")
+                    cost_sections += [
                         f"  - {desc}: +{self._format_price(amt)}"
                         for desc, amt in sorted(refund_by_type.items(), key=lambda x: x[1], reverse=True)
                     ]
                 if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
-                    sections.append(
+                    cost_sections.append(
                         "- w tym nieprzypisane do żadnego zamówienia (abonament, inne): "
                         f"opłaty **{self._format_price(unattributed_fees)}**"
                         + (f", zwroty/rabaty **+{self._format_price(unattributed_refunds)}**"
                            if unattributed_refunds > 0.01 else "")
                     )
-                sections += [
+                cost_sections += [
                     "",
                     f"**Przychód po opłatach Allegro (przychód − opłaty + zwroty): "
                     f"{self._format_price(revenue_after_fees)}**",
@@ -2711,7 +2715,7 @@ class AllegroAgent(BaseAgent):
                         items_short or "—",
                     ])
                 if order_rows:
-                    sections += [
+                    order_sections += [
                         "",
                         "## Zestawienie per zamówienie",
                         "",
@@ -2725,7 +2729,7 @@ class AllegroAgent(BaseAgent):
                         ),
                     ]
                     if abs(unattributed_fees) > 0.01 or abs(unattributed_refunds) > 0.01:
-                        sections += [
+                        order_sections += [
                             "",
                             "Suma z tabeli nie zejdzie się z „Przychodem po opłatach Allegro” — "
                             "różnicę stanowią opłaty/zwroty nieprzypisane do żadnego zamówienia "
@@ -2735,7 +2739,7 @@ class AllegroAgent(BaseAgent):
                             + ").",
                         ]
             elif billing_error:
-                sections += [
+                cost_sections += [
                     "",
                     "## Koszty Allegro",
                     "",
@@ -2749,7 +2753,10 @@ class AllegroAgent(BaseAgent):
                 f"Zamówień: **{order_count}**, łączny przychód: "
                 f"**{self._format_price(total_revenue)}**, średnia wartość zamówienia: "
                 f"**{self._format_price(avg_value)}**.",
-                *sections,
+                *month_sections,
+                *cost_sections,
+                *product_sections,
+                *order_sections,
             ])
 
         if tool_name == "get_offer_details":
