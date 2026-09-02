@@ -931,6 +931,38 @@ async def allegro_message_monitor_disable(request: Request):
     return {"status": "disabled"}
 
 
+@app.get("/allegro/message-reminder/status", tags=["Allegro"])
+async def allegro_message_reminder_status(request: Request):
+    """Whether the automatic unread-message reminder is enabled for the current user."""
+    from services.auth_service import get_current_user
+    from services.message_reminder import is_monitor_enabled
+
+    user = await get_current_user(request)
+    return {"enabled": await is_monitor_enabled(user["sub"])}
+
+
+@app.post("/allegro/message-reminder/enable", tags=["Allegro"])
+async def allegro_message_reminder_enable(request: Request):
+    """Turn on the automatic unread-message reminder for the current user."""
+    from services.auth_service import get_current_user
+    from services.message_reminder import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled(user["sub"], True)
+    return {"status": "enabled"}
+
+
+@app.post("/allegro/message-reminder/disable", tags=["Allegro"])
+async def allegro_message_reminder_disable(request: Request):
+    """Turn off the automatic unread-message reminder for the current user."""
+    from services.auth_service import get_current_user
+    from services.message_reminder import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled(user["sub"], False)
+    return {"status": "disabled"}
+
+
 @app.get("/allegro/unread-messages", tags=["Allegro"])
 async def allegro_unread_messages(request: Request):
     """Return buyer message threads that currently have unread messages."""

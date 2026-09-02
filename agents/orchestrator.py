@@ -282,6 +282,35 @@ class Orchestrator:
                 perf.log(source="invoice_reminder", channel=message.channel)
                 return response
 
+        # Same handshake for an open UNREAD-MESSAGE reminder
+        # (services/message_reminder.py), checked after the invoice one and
+        # never before it. Both can be pending at once, and in the cross-thread
+        # case (no assistant turn to attribute the reply to) each is willing to
+        # claim a bare "tak" — so whichever runs first wins it. Leaving invoice
+        # first keeps that tie-break exactly where it already was, rather than
+        # silently rerouting consent that today issues invoices. The cost of
+        # this one losing a tie is a list the seller didn't ask for; the cost
+        # of the other one losing it would be unissued invoices they did.
+        if user_id:
+            with perf.stage("message_reminder_check"):
+                try:
+                    from services.message_reminder import handle_reply as _handle_message_reminder_reply
+                    msg_reminder_text = await _handle_message_reminder_reply(
+                        user_id, message.text, _last_assistant_text(session),
+                    )
+                except Exception as exc:
+                    logger.warning("Message reminder reply handling failed: %s", exc)
+                    msg_reminder_text = None
+            if msg_reminder_text is not None:
+                response = AgentResponse(text=msg_reminder_text, agent_type="message_reminder")
+                session.add_message(MessageRole.USER, message.text)
+                session.add_message(
+                    MessageRole.ASSISTANT, response.text, {"agent": response.agent_type},
+                )
+                await self._session_store.save_session(session)
+                perf.log(source="message_reminder", channel=message.channel)
+                return response
+
         # Classify the data source
         try:
             with perf.stage("classify"):
