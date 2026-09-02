@@ -110,6 +110,28 @@ async def test_order_listings_answer_in_one_shape():
             assert field in result["output"], f"{case_id} is missing {field}"
 
 
+async def test_payment_period_filter_keeps_the_buyer_login():
+    """A payment-time filter is applied client-side, so the fetch behind it used
+    to be rebuilt from scratch — status forced to READY_FOR_PROCESSING, a fixed
+    "last 7 days" window, and every other filter dropped. A question about one
+    account ("czy w tym roku kupował ode mnie ktoś z konta np1988") therefore
+    came back as the whole store's week with the login silently ignored."""
+    from tests.tools.harness import tool_harness
+
+    async with tool_harness() as h:
+        out = await h.run("get_orders", {
+            "buyer_login": "anna.kowalska88",
+            "paid_after_local": "2026-01-01 00:00",
+            "count_only": True,
+        })
+        order_calls = [q for m, p, q in h.allegro_api.calls if p == "/order/checkout-forms"]
+
+    assert "od kupującego **anna.kowalska88**" in out
+    assert order_calls and all(q.get("buyer.login") == ["anna.kowalska88"] for q in order_calls), order_calls
+    # The window is derived from the requested period, not from "now minus a week".
+    assert all(q["lineItems.boughtAt.gte"][0] < "2026-01-01" for q in order_calls), order_calls
+
+
 async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
     """A task that is already done must cost exactly one status call and no
     up-front poll_interval wait."""

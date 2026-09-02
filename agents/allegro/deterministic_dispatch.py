@@ -28,6 +28,8 @@ from __future__ import annotations
 import re
 from typing import Callable
 
+from agents.allegro.allegro_tools import named_buyer_login
+
 # ── Shared building blocks ──────────────────────────────────────────────────
 _COUNT_QUESTION_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
 # Any wording that scopes the question to a time window. This layer resolves
@@ -460,6 +462,14 @@ def resolve_deterministic(query: str, labels: set[str]) -> tuple[str, dict] | No
     requiring monitoring to be the ONLY label found would make this branch
     dead code — it's checked first instead, whatever else matched.
     """
+    # A named buyer account ("z konta np1988", "od użytkownika kasia.w") is a
+    # filter NO matcher here extracts — every one of them resolves arguments
+    # from stage/period wording alone. Serving one anyway would answer a
+    # question about ONE buyer with the whole store's listing, so this is a
+    # bail exactly like the period one: hand it to the LLM, which can pass
+    # buyer_login to get_orders.
+    if named_buyer_login(query):
+        return None
     if "monitoring" in labels:
         return _match_monitoring(query)
     if len(labels) != 1:

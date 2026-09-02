@@ -284,6 +284,79 @@ class TestAskClarifyingQuestion:
         assert agent._execute_tool.await_count == 0
 
 
+class TestNamedBuyerAccountGuard:
+    """buyer_login is the only filter that narrows an answer to ONE buyer
+    account. A question naming one ("czy w tym roku kupował ode mnie ktoś z
+    konta np1988") answered by a period-wide tool comes back as the whole
+    store's year with the login silently dropped — so when the model reaches
+    for one of those anyway, run() asks instead of serving it."""
+
+    @pytest.mark.asyncio
+    async def test_period_wide_tool_for_a_named_account_asks_instead(self):
+        agent = _agent({"get_buyers": "# Kupujący\n| Kupujący | ... |"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {"date_from_local": "2026-01-01"})]),
+        ])
+
+        response = await agent.run("Czy w tym roku kupował ode mnie ktoś z konta np1988")
+
+        assert "np1988" in response.text
+        assert response.text.endswith("?")
+        assert response.metadata["output_format"] == "chat"
+        assert agent._execute_tool.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_the_tool_that_can_filter_by_the_login_runs_normally(self):
+        agent = _agent({"get_orders": "Brak zamówień od kupującego **np1988**."})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {
+                "buyer_login": "np1988",
+                "paid_after_local": "2026-01-01 00:00",
+                "count_only": True,
+            })]),
+            _resp(),  # nothing more to call — the listing is the answer
+        ])
+
+        response = await agent.run("Czy w tym roku kupował ode mnie ktoś z konta np1988")
+
+        assert response.text == "Brak zamówień od kupującego **np1988**."
+        assert agent._execute_tool.await_args_list[0].args[0] == "get_orders"
+
+    @pytest.mark.asyncio
+    async def test_a_buyer_list_question_with_no_login_is_untouched(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),  # nothing more to call — the report is the answer
+        ])
+
+        response = await agent.run("pokaż listę kupujących z tego roku")
+
+        assert response.text == "# Kupujący"
+        assert agent._execute_tool.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_bundled_call_that_does_filter_by_it_is_allowed_through(self):
+        """The guard is about the login having nowhere to go — not about
+        get_buyers itself, which may legitimately run alongside the listing."""
+        agent = _agent({"get_buyers": "# Kupujący", "get_orders": "Brak zamówień."})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[
+                _tool_call("c1", "get_buyers", {}),
+                _tool_call("c2", "get_orders", {"buyer_login": "np1988"}),
+            ]),
+            _resp(),
+            _resp("Zestawienie i zamówienia konta np1988."),
+        ])
+
+        response = await agent.run(
+            "pokaż listę kupujących z tego roku i zamówienia z konta np1988"
+        )
+
+        assert response.text == "Zestawienie i zamówienia konta np1988."
+        assert [c.args[0] for c in agent._execute_tool.await_args_list] == ["get_buyers", "get_orders"]
+
+
 class TestFormatInstruction:
     """Every tool's dispatch renders the finished view (table, document,
     dashboard, bullet list) in Python — see _RENDERED_VIEW_TOOLS. So when the

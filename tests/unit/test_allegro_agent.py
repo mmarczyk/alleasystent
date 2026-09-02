@@ -541,6 +541,71 @@ class TestRenderedViews:
         assert result.startswith("Nie masz nowych zamówień.")
 
 
+class TestBuyerLoginScopedListing:
+    """A listing narrowed to ONE buyer account answers a question ABOUT that
+    account ("czy w tym roku kupował ode mnie ktoś z konta np1988"), and its
+    count/empty sentence is the whole answer — it reaches the seller unchanged
+    (see _PASSTHROUGH_TOOLS). So it has to name the filter it ran with, or
+    "Brak zamówień spełniających podane kryteria." reads as "you had no orders
+    at all"."""
+
+    @pytest.mark.asyncio
+    async def test_count_only_names_the_buyer_and_the_period(self):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[object(), object()])
+
+        result = await agent._dispatch("get_orders", {
+            "buyer_login": "np1988",
+            "paid_after_local": "2026-01-01 00:00",
+            "paid_before_local": "2026-09-02 23:59",
+            "count_only": True,
+        })
+
+        assert result == (
+            "Masz łącznie **2** zamówienia od kupującego **np1988** "
+            "w okresie 2026-01-01 – 2026-09-02."
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_orders_for_that_buyer_says_so_explicitly(self):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[])
+
+        for args in ({"buyer_login": "np1988"}, {"buyer_login": "np1988", "count_only": True}):
+            result = await agent._dispatch("get_orders", args)
+            assert result == "Brak zamówień od kupującego **np1988**.", args
+
+    @pytest.mark.asyncio
+    async def test_stage_filter_and_buyer_filter_are_both_named(self):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[])
+
+        result = await agent._dispatch("get_orders", {
+            "buyer_login": "np1988", "fulfillment_status": "SENT",
+        })
+
+        assert result == "Brak zamówień w statusie wysłane od kupującego **np1988**."
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_listing_keeps_the_preset_wording(self):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[])
+
+        assert await agent._dispatch("get_orders", {}) == (
+            "Brak zamówień spełniających podane kryteria."
+        )
+
+    def test_scope_note_ignores_a_time_only_filter(self):
+        """'HH:MM' means today and carries no date to put in the sentence."""
+        agent = _make_agent()
+
+        assert agent._filter_scope_note({"bought_after_local": "12:00"}) == ""
+        assert agent._filter_scope_note({}) == ""
+        assert agent._filter_scope_note({"paid_after_local": "2026-08-01 00:00"}) == (
+            " w okresie od 2026-08-01"
+        )
+
+
 class TestGetOrderDetailsDispatch:
     """_dispatch's get_order_details branch now builds the final, ready-to-
     display plain-text bullet list directly in Python instead of handing

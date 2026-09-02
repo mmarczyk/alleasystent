@@ -124,6 +124,61 @@ class TestMatchedLabels:
         assert "zamowienia" in matched_labels("show me my new orders")
 
 
+class TestNamedBuyerLogin:
+    """"z konta np1988" names SOMEONE ELSE'S account — the buyer's login, which
+    only the order listing can filter by. Before this, "czy w tym roku kupował
+    ode mnie ktoś z konta np1988" matched {konto, kupujacy}: get_orders was not
+    even among the schemas the model saw, and get_buyers answered with the whole
+    year's customer list."""
+
+    @pytest.mark.parametrize("query,login", [
+        ("Czy w tym roku kupował ode mnie ktoś z konta np1988", "np1988"),
+        ("czy z konta 'np1988' coś kupiono?", "np1988"),
+        ("co kupił użytkownik anna.kowalska88", "anna.kowalska88"),
+        ("zamówienia od kupującego marek_zielinski", "marek_zielinski"),
+        ("login: kasia.w — jakie ma zamówienia", "kasia.w"),
+        ("pokaż zamówienia z konta o nazwie sklep-abc", "sklep-abc"),
+    ])
+    def test_finds_the_login(self, query, login):
+        from agents.allegro.allegro_tools import named_buyer_login
+        assert named_buyer_login(query) == login
+
+    @pytest.mark.parametrize("query", [
+        "moje konto allegro",
+        "moje konto allegro jest zawieszone",
+        "jakie mam dane konta",
+        "ile zamówień z konta firmowego",
+        "pokaż listę kupujących z tego roku",
+        "ile mam nowych zamówień",
+    ])
+    def test_does_not_invent_one(self, query):
+        """A name that doesn't LOOK like a login (no digit, no ._- separator) is
+        left alone — a miss just keeps the old behaviour, a false positive would
+        put a made-up login into a tool call."""
+        from agents.allegro.allegro_tools import named_buyer_login
+        assert named_buyer_login(query) is None
+
+    def test_a_named_account_makes_it_an_order_question(self):
+        from agents.allegro.allegro_tools import matched_labels
+        labels = matched_labels("Czy w tym roku kupował ode mnie ktoś z konta np1988")
+        # Added, not substituted: get_buyers stays a candidate too.
+        assert "zamowienia" in labels
+        assert "kupujacy" in labels
+
+    def test_the_tool_that_can_filter_by_it_is_offered(self):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        names = {
+            t["function"]["name"]
+            for t in select_tools_for_context("Czy w tym roku kupował ode mnie ktoś z konta np1988")
+        }
+        assert "get_orders" in names
+        assert "buyer_login" in next(
+            t["function"]["parameters"]["properties"]
+            for t in select_tools_for_context("czy kupował ode mnie ktoś z konta np1988")
+            if t["function"]["name"] == "get_orders"
+        )
+
+
 class TestOrderListingConsistency:
     """The three order tools are three intent presets over ONE implementation
     (AllegroAgent._ORDERS_PRESETS) — these pin the parts of that contract that

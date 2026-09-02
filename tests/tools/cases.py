@@ -72,6 +72,21 @@ CASES: list[Case] = [
          "Ile mam w sumie zamówień?",
          ("Masz łącznie", "zamówień."),
          note="count_only — sama liczba, bez listy."),
+    Case("get_orders__buyer_login", "get_orders",
+         {"buyer_login": "anna.kowalska88", "bought_after_local": f"{_YEAR_START} 00:00",
+          "count_only": True},
+         "Czy w tym roku kupował ode mnie ktoś z konta anna.kowalska88?",
+         ("od kupującego **anna.kowalska88**", f"w okresie od {_YEAR_START}"),
+         note="Pytanie o JEDNO konto kupującego. get_buyers nie ma filtra po loginie, "
+              "więc odpowiedziałby listą wszystkich klientów okresu — tu odpowiada "
+              "listowanie zamówień z buyer_login, a zdanie z liczbą nazywa kupującego "
+              "i okres, po których filtrowało."),
+    Case("get_orders__buyer_login_none", "get_orders",
+         {"buyer_login": "np1988", "bought_after_local": f"{_YEAR_START} 00:00"},
+         "Czy w tym roku kupował ode mnie ktoś z konta np1988?",
+         ("Brak zamówień od kupującego **np1988**",),
+         note="Konto, które nic nie kupiło — jednoznaczne „nie”, a nie „brak zamówień "
+              "spełniających kryteria”, które czyta się jak brak zamówień w ogóle."),
     Case("get_order_details", "get_order_details", {"order_id": ds.ORD_1},
          f"Szczegóły zamówienia {ds.ORD_1}",
          ("- Zamówienie:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),

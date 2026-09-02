@@ -20,6 +20,7 @@ from agents.allegro.allegro_tools import (
     ALLEGRO_TOOLS,
     TOOL_OUTPUT_FORMAT,
     matched_labels,
+    named_buyer_login,
     resolve_output_format,
     tools_for_labels,
 )
@@ -49,6 +50,27 @@ _MESSAGE_LIST_OVERRIDE_RE = re.compile(
 )
 _MESSAGE_QUESTION_WORD_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
 _MESSAGE_TOPIC_WORD_RE = re.compile(r"wiadomo", re.IGNORECASE)
+
+# ── "…z konta np1988": one named buyer vs the whole period ──────────────────
+# buyer_login is the only filter in the tool list that narrows an answer to ONE
+# buyer account, and these are the tools that answer for a whole PERIOD with no
+# such filter — so a question naming an account routed to one of them comes back
+# as the entire store's month/year, the login silently dropped. That is what
+# "czy w tym roku kupował ode mnie ktoś z konta np1988" did: it was served
+# get_buyers' full customer list for the year. The prompt and the schemas route
+# it to get_orders(buyer_login=...) now; the guard in run() is the last line of
+# defence when the model picks one of these anyway — it asks instead of
+# answering, because the two readings ("did THIS account buy from me" vs "show
+# me everyone") are one short question apart and guessing is what produced the
+# bug.
+_PERIOD_WIDE_TOOLS = frozenset({"get_buyers", "get_sales_summary", "get_billing_summary"})
+_BUYER_LOGIN_TOOLS = frozenset(
+    t["function"]["name"] for t in ALLEGRO_TOOLS
+    if "buyer_login" in t["function"]["parameters"].get("properties", {})
+)
+# The calendar-date half of a "YYYY-MM-DD HH:MM" local filter (see
+# AllegroAgent._filter_scope_note).
+_LOCAL_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 
 
 def _wants_message_count_only(query: str) -> bool:
@@ -189,6 +211,15 @@ class AllegroAgent(BaseAgent):
         "ambiguous. Do not overuse it: if the value is already in this conversation (given earlier "
         "by the user or by you), or the MANDATORY TOOL CALLS rules below already resolve which tool "
         "and arguments to use, call that tool directly — do not ask for information you already have.\n"
+        "BEFORE YOU CALL — CHECK THE TOOL CAN ACTUALLY FILTER: every concrete thing the "
+        "question names (a buyer login/account, one order, a product, a period, a courier) has "
+        "to correspond to a PARAMETER of the tool you are about to call. A tool with no such "
+        "parameter does not fail — it silently drops the filter and returns the unfiltered "
+        "list, which reads like a real answer to a question nobody asked (get_buyers for 'czy "
+        "kupował ode mnie ktoś z konta np1988' gave the whole year's customer list; get_orders "
+        "for a pasted order_id gave 50 unrelated orders). If the right tool for that filter is "
+        "in your list, call THAT one; if none of the available tools takes it, call "
+        "ask_clarifying_question — never answer a 'czy X…' question with 'here is everything'.\n"
         "MANDATORY TOOL CALLS — these question types MUST trigger a tool, never be answered from memory:\n"
         "• Order LIST for a period, no cost/profit/earnings wording — 'lista zamówień', 'pokaż "
         "wszystkie zamówienia z tego miesiąca', 'zamówienia z ostatniego tygodnia' → get_orders "
@@ -271,6 +302,21 @@ class AllegroAgent(BaseAgent):
         "tool then defaults to the current year. NEVER answer a buyer question with get_orders or "
         "get_sales_summary: neither groups anything by buyer, so the seller would be left counting "
         "rows themselves.\n"
+        "• ONE NAMED BUYER ACCOUNT rather than the buyer population — 'czy w tym roku kupował "
+        "ode mnie ktoś z konta np1988', 'co kupił użytkownik anna.kowalska88', 'ile zamówień "
+        "złożył kasia.w', 'pokaż zamówienia z konta X' → get_orders with buyer_login=<exactly "
+        "the login the user typed> plus the period the question names as "
+        "bought_after_local/bought_before_local ('w tym roku' → bought_after_local="
+        "'<current year>-01-01 00:00'; use paid_after/before_local instead only when the "
+        "question is about PAYMENT — 'opłacone', 'zapłacone'), and count_only=true when the "
+        "question is a yes/no 'czy' or a 'ile'. "
+        "NEVER answer this with get_buyers: it has NO buyer_login parameter, so the login is "
+        "silently dropped and the seller gets the whole period's customer list instead of an "
+        "answer about the one account they asked about (a real bug seen in production). "
+        "buyer_login is the Allegro LOGIN — if the user named a PERSON or COMPANY instead "
+        "('czy kupował ode mnie Jan Kowalski'), no tool can filter by that: call "
+        "ask_clarifying_question for the login, or use get_buyers only if they really wanted "
+        "the whole list.\n"
         "• Status / any detail of ONE SPECIFIC, already-identified order — 'jaki jest status tego "
         "zamówienia', 'co się dzieje z zamówieniem <id>', 'sprawdź zamówienie <id>', a bare order_id "
         "(UUID) pasted by the user, or a follow-up like 'a teraz?'/'sprawdź jeszcze raz' referring "
@@ -701,6 +747,31 @@ class AllegroAgent(BaseAgent):
                     perf.log(result="ask_clarifying_question")
                     return AgentResponse(text=question, agent_type=self.agent_name, metadata={"output_format": "chat"})
 
+                # The query names ONE buyer account but the model reached for a
+                # period-wide tool that cannot filter by it (see
+                # _PERIOD_WIDE_TOOLS) — serving that would answer about the whole
+                # store and read like an answer about the account. Ask instead.
+                called_now = {tc.function.name for tc in msg.tool_calls}
+                login = named_buyer_login(query)
+                if (
+                    login
+                    and called_now & _PERIOD_WIDE_TOOLS
+                    and not called_now & _BUYER_LOGIN_TOOLS
+                ):
+                    question = (
+                        f"Czy chodzi o zamówienia z konta **{login}** (co i kiedy kupił ten "
+                        f"użytkownik), czy o zestawienie wszystkich kupujących w tym okresie?"
+                    )
+                    logger.info(
+                        "[allegro] buyer-login guard: %s cannot filter by %r — asking | query=%.80r",
+                        sorted(called_now), login, query,
+                    )
+                    perf.log(result="ask_clarifying_question")
+                    return AgentResponse(
+                        text=question, agent_type=self.agent_name,
+                        metadata={"output_format": "chat"},
+                    )
+
                 messages.append({
                     "role": "assistant",
                     "content": msg.content,
@@ -1038,6 +1109,44 @@ class AllegroAgent(BaseAgent):
         if not count:
             return none
         return f"{lead} **{count}** {cls._plural_pl(count, *forms)}{scope}."
+
+    @staticmethod
+    def _local_date(tool_input: dict[str, Any], *keys: str) -> str:
+        """The calendar date of the first of `keys` that carries one — the
+        listing takes the same period as either a purchase-time or a
+        payment-time filter, and the sentence only needs the day."""
+        for key in keys:
+            match = _LOCAL_DATE_RE.match(str(tool_input.get(key) or "").strip())
+            if match:
+                return match.group(1)
+        return ""
+
+    @classmethod
+    def _filter_scope_note(cls, tool_input: dict[str, Any]) -> str:
+        """The buyer/period filters an order listing actually ran with, as a
+        phrase to put inside its count/empty sentence: " od kupującego
+        **np1988** w okresie 2026-01-01 – 2026-09-02".
+
+        Those two sentences ARE the whole answer to a filtered question and
+        reach the seller unchanged (see _PASSTHROUGH_TOOLS), so they have to
+        name what was filtered on. Without this, "czy w tym roku kupował ode
+        mnie ktoś z konta np1988" is answered with "Brak zamówień
+        spełniających podane kryteria." — true of the filter, but
+        indistinguishable from "you had no orders at all".
+        """
+        parts: list[str] = []
+        login = str(tool_input.get("buyer_login") or "").strip()
+        if login:
+            parts.append(f"od kupującego **{login}**")
+        date_from = cls._local_date(tool_input, "bought_after_local", "paid_after_local")
+        date_to = cls._local_date(tool_input, "bought_before_local", "paid_before_local")
+        if date_from and date_to:
+            parts.append(f"w okresie {date_from} – {date_to}")
+        elif date_from:
+            parts.append(f"w okresie od {date_from}")
+        elif date_to:
+            parts.append(f"w okresie do {date_to}")
+        return (" " + " ".join(parts)) if parts else ""
 
     @staticmethod
     def _cell(value: Any) -> str:
@@ -2226,16 +2335,26 @@ class AllegroAgent(BaseAgent):
         # WYSŁANE/ODEBRANE — and then the preset's wording names the wrong one
         # ("Brak zamówień gotowych do wysłania" for a question about parcels
         # already sent). Fall back to the stage's own name in that case.
+        stage_note = ""
         if fulfillment_status and fulfillment_status != preset.get("fulfillment_status"):
             stage_pl = self._fulfillment_pl(fulfillment_status)
             empty_msg = count_none = f"Brak zamówień w statusie: {stage_pl}."
             count_lead = f"W statusie {stage_pl.lower()} masz"
             count_forms = ("zamówienie", "zamówienia", "zamówień")
+            stage_note = f" w statusie {stage_pl.lower()}"
         else:
             empty_msg, count_none = preset["empty"], preset["count_none"]
             count_lead, count_forms = preset["count_lead"], preset["count_forms"]
+        # A listing narrowed to one buyer and/or a period is answering a
+        # question ABOUT that filter, so both the count and the empty sentence
+        # have to repeat it — see _filter_scope_note.
+        scope = self._filter_scope_note(tool_input)
+        if scope:
+            empty_msg = count_none = f"Brak zamówień{stage_note}{scope}."
         if tool_input.get("count_only"):
-            return self._count_sentence(len(orders), count_lead, count_forms, count_none) + suffix
+            return self._count_sentence(
+                len(orders), count_lead, count_forms, count_none, scope=scope
+            ) + suffix
         if not orders:
             return empty_msg + suffix
 

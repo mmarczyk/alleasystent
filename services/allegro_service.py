@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 # fast enough for a few hundred orders without hammering the API.
 _INVOICE_LOOKUP_CONCURRENCY = 8
 
+# A payment-time filter is applied client-side (Allegro has no such parameter),
+# so the fetch it narrows is bounded by the order PLACEMENT time instead. An
+# order is placed before it is paid, so that window starts this many days
+# before the requested payment period — long enough to cover slow payers
+# (Allegro cancels an unpaid order well within it), short enough to keep the
+# fetch small.
+_PAID_WINDOW_BACKDATE_DAYS = 30
+
 
 def parse_invoice_buyer(checkout_form: dict[str, Any]) -> AllegroInvoiceBuyer:
     """Read the VAT-invoice address block off a checkout form.
@@ -521,18 +529,41 @@ class AllegroService:
         # details (get_order) are cached because they don't change once placed.
 
         # When filtering by payment time the Allegro API has no direct parameter —
-        # fetch READY_FOR_PROCESSING orders with a broad boughtAt window (last 7 days)
-        # and filter client-side by paid_at.
+        # fetch with a boughtAt window and filter client-side by paid_at.
+        #
+        # Every OTHER filter the caller passed is forwarded to that fetch. It
+        # used to be dropped (buyer_login, fulfillment_status, line_items_sent
+        # and the boughtAt bounds all vanished, and the status was forced to
+        # READY_FOR_PROCESSING), so "czy w tym roku kupował ode mnie ktoś z
+        # konta np1988" — a buyer_login + payment-period call — came back as
+        # the whole store's last week, the login silently ignored.
+        #
+        # The window start is derived from paid_at_gte instead of a fixed
+        # "last 7 days", which made any period longer than a week unanswerable.
+        # It is backdated by _PAID_WINDOW_BACKDATE_DAYS because an order is
+        # placed BEFORE it is paid: an order bought on 30 December and paid on
+        # 2 January belongs to a "paid this year" question.
         if paid_at_gte or paid_at_lte:
             from datetime import datetime, timedelta
             from zoneinfo import ZoneInfo
+            if paid_at_gte:
+                try:
+                    window_from = datetime.fromisoformat(paid_at_gte.replace("Z", "+00:00"))
+                except ValueError:
+                    window_from = datetime.now(ZoneInfo("UTC"))
+            else:
+                window_from = datetime.now(ZoneInfo("UTC"))
             start_window = (
-                datetime.now(ZoneInfo("UTC")) - timedelta(days=7)
+                window_from - timedelta(days=_PAID_WINDOW_BACKDATE_DAYS)
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
             raw = await self.get_orders(
-                status="READY_FOR_PROCESSING",
-                bought_at_gte=start_window,
-                limit=200,
+                status=status or "READY_FOR_PROCESSING",
+                buyer_login=buyer_login,
+                fulfillment_status=fulfillment_status,
+                line_items_sent=line_items_sent,
+                bought_at_gte=bought_at_gte or start_window,
+                bought_at_lte=bought_at_lte,
+                limit=max(limit, 200),
             )
             result = raw
             if paid_at_gte:
