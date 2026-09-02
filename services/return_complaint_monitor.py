@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 _SEEN_RETURNS_KEY = "allegro:monitor:returns:seen:{user_id}"
 _SEEN_ISSUES_KEY = "allegro:monitor:issues:seen:{user_id}"
 _SEEN_TTL = 86400 * 30  # 30 days
+# Kept in each seen-set purely so the key exists from the very first pass,
+# including passes that find nothing. A NUL byte can't occur in an Allegro ID.
+_BASELINE_MEMBER = "\x00baselined"
 _FETCH_LIMIT = 50
 _MONITOR_KIND = "returns_complaints"
 
@@ -117,25 +120,32 @@ async def _poll_issues(r, allegro, user_id: str) -> list[str]:
 
 async def _diff_and_record(r, seen_key: str, current_ids: list[str]) -> list[str]:
     """Compare the current fetch against last pass's seen-ID set and return
-    which IDs are new. First-ever pass (no stored key) records a baseline
-    without reporting anything new, same as order_monitor's event baseline.
+    which IDs are new.
 
-    The seen-set is fully replaced with `current_ids` on every pass (rather
-    than accumulated) so it stays bounded to `_FETCH_LIMIT` entries instead
-    of growing forever — the trade-off is that a return/issue which scrolls
-    out of the API's recent-N window and later reappears would be reported
-    again, an acceptable edge case for a low-volume category like this.
+    The first pass FOR A USER records a baseline without reporting anything,
+    same as order_monitor's event baseline. "First pass" is decided by the key's
+    existence, which is why every pass writes the key — including one that finds
+    nothing. An earlier version returned early on an empty pass without writing,
+    so the key only appeared on the first pass that found something and the
+    user's first-ever return or complaint was swallowed as the baseline; see the
+    same fix in services/message_monitor.py, where it cost a real notification.
+
+    The seen-set is replaced whenever there is something to record (rather than
+    accumulated) so it stays bounded to `_FETCH_LIMIT` entries instead of
+    growing forever — the trade-off is that a return/issue which scrolls out of
+    the API's recent-N window and later reappears would be reported again, an
+    acceptable edge case for a low-volume category like this.
     """
-    if not current_ids:
-        return []
-
     known = await r.exists(seen_key)
     seen_ids = set(await r.smembers(seen_key)) if known else set()
     new_ids = [cid for cid in current_ids if cid not in seen_ids] if known else []
 
     pipe = r.pipeline()
-    pipe.delete(seen_key)
-    pipe.sadd(seen_key, *current_ids)
+    if current_ids:
+        pipe.delete(seen_key)
+        pipe.sadd(seen_key, _BASELINE_MEMBER, *current_ids)
+    else:
+        pipe.sadd(seen_key, _BASELINE_MEMBER)
     pipe.expire(seen_key, _SEEN_TTL)
     await pipe.execute()
 

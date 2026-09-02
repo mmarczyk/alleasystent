@@ -24,6 +24,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 _SEEN_KEY = "allegro:monitor:messages:seen:{user_id}"
+# Kept in the seen-set alongside the real markers purely so the key exists from
+# the very first pass, including passes that find nothing unread. A NUL byte
+# can't occur in a real "<thread id>@<timestamp>" marker, so it never masks one.
+_BASELINE_MEMBER = "\x00baselined"
 _SEEN_TTL = 86400 * 30  # 30 days
 _FETCH_LIMIT = 20  # Allegro's /messaging/threads caps `limit` at 20
 _MONITOR_KIND = "message"
@@ -121,26 +125,36 @@ def _marker(thread: dict) -> str:
 
 async def _diff_and_record(r, seen_key: str, current_markers: list[str]) -> list[str]:
     """Compare this pass's markers against last pass's and return which are new.
-    First-ever pass (no stored key) records a baseline without reporting
-    anything, same as the order monitor's event baseline — so switching a user
-    over to server-side detection doesn't announce every already-unread thread.
 
-    The seen-set is fully replaced on every pass (rather than accumulated) so
-    it stays bounded to `_FETCH_LIMIT` entries, matching the returns/complaints
-    monitor; a thread that scrolls out of the fetched window and later comes
-    back with the same last message would be reported again, which is an
-    acceptable edge case at this volume.
+    The first pass FOR A USER records a baseline without reporting anything, so
+    switching someone over to server-side detection doesn't announce every
+    already-unread thread. "First pass" is decided by the key's existence, which
+    is why every pass writes the key — including one that finds nothing unread.
+
+    An earlier version returned early on an empty pass without writing anything.
+    The key then only appeared on the first pass that found something, so the
+    first unread message a user ever received was swallowed as the baseline: the
+    pass fetched it, saw it, and recorded it as already known. The empty pass
+    also never refreshed the TTL, so the same silent-swallow returned every time
+    a user went 30 days without an unread thread.
+
+    The seen-set is replaced whenever there is something to record (rather than
+    accumulated) so it stays bounded to `_FETCH_LIMIT` entries; a thread that
+    scrolls out of the fetched window and later comes back with the same last
+    message would be reported again, an acceptable edge case at this volume.
+    An empty pass keeps the markers already recorded, so a later message in one
+    of those same threads still reads as new.
     """
-    if not current_markers:
-        return []
-
     known = await r.exists(seen_key)
     seen = set(await r.smembers(seen_key)) if known else set()
     new_markers = [m for m in current_markers if m not in seen] if known else []
 
     pipe = r.pipeline()
-    pipe.delete(seen_key)
-    pipe.sadd(seen_key, *current_markers)
+    if current_markers:
+        pipe.delete(seen_key)
+        pipe.sadd(seen_key, _BASELINE_MEMBER, *current_markers)
+    else:
+        pipe.sadd(seen_key, _BASELINE_MEMBER)
     pipe.expire(seen_key, _SEEN_TTL)
     await pipe.execute()
 
