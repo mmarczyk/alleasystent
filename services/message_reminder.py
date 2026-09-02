@@ -61,8 +61,11 @@ _ASK_DURATION_TEXT = "Jasne — na jak długo mam odłożyć przypomnienie o wia
 # długo?" follow-up above. Matched against the LAST ASSISTANT TURN — never
 # against the seller's message — to tell whether the assistant's open question
 # really is this one.
+# Both branches name messages on purpose — see the matching note in
+# services/invoice_reminder.py._OWN_ASK_RE for what a generic duration pattern
+# costs when two reminders ask the same shape of question.
 _OWN_ASK_RE = re.compile(
-    r"nieprzeczytan\w*\s+wiadomo|na\s+jak\s+d[łl]ugo\s+mam\s+od[łl]o[żz]y[ćc]\s+przypomnienie\s+o\s+wiadomo",
+    r"nieprzeczytan\w*\s+wiadomo|od[łl]o[żz]y[ćc]\s+przypomnienie\s+o\s+wiadomo",
     re.IGNORECASE,
 )
 
@@ -252,7 +255,7 @@ async def _ask(user_id: str, threads: list[dict], again: bool, awaiting_duration
     elif awaiting_duration:
         text = (
             f"💬 Ponownie przypominam o {phrase} od kupujących{buyers} — "
-            "na jak długo mam odłożyć to przypomnienie? Albo napisz „pokaż”, "
+            "na jak długo mam odłożyć przypomnienie o wiadomościach? Albo napisz „pokaż”, "
             "jeśli chcesz je zobaczyć teraz."
         )
     else:

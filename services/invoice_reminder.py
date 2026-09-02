@@ -62,15 +62,20 @@ _STATUS_AWAITING_DURATION = "awaiting_duration"
 # The follow-up the reminder itself asks when the seller defers without saying
 # for how long. A constant because _reminder_owns_reply below has to recognize
 # it as one of the reminder's OWN questions (see there).
-_ASK_DURATION_TEXT = "Jasne — na jak długo mam odłożyć to przypomnienie?"
+_ASK_DURATION_TEXT = "Jasne — na jak długo mam odłożyć przypomnienie o fakturach?"
 
 # Wording unique to the reminder's own outgoing messages: the three "wystawić
 # faktury?" asks (all of which say "niewystawioną fakturę"/"niewystawionych
 # faktur") and the "na jak długo?" follow-up above. Matched against the LAST
 # ASSISTANT TURN — never against the seller's message — to tell whether the
 # assistant's open question really is the invoice one.
+#
+# Both branches name invoices on purpose. The generic "na jak długo mam
+# odłożyć" this used to accept also matched the unread-MESSAGE reminder's
+# identically-shaped follow-up (services/message_reminder.py), so a "2 godziny"
+# meant for that one was read here and snoozed the wrong reminder.
 _OWN_ASK_RE = re.compile(
-    r"niewystawion\w*\s+faktur|na\s+jak\s+d[łl]ugo\s+mam\s+od[łl]o[żz]y[ćc]",
+    r"niewystawion\w*\s+faktur|od[łl]o[żz]y[ćc]\s+przypomnienie\s+o\s+faktur",
     re.IGNORECASE,
 )
 

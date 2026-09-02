@@ -303,12 +303,13 @@ class TestMarkRequest:
         assert since_start_s >= 5
 
 
-class TestInvoiceReminderGetsTheOpenQuestion:
-    """The invoice reminder gets first look at every message, and its state
-    lives in Redis rather than in the session — so on its own it cannot tell
-    a "Tak" meant for it from a "Tak" answering the question the assistant
-    asked a second ago. It once took the seller's "Tak" to "Masz 1 nową
-    wiadomość (od: Modelinarnia). Pokazać szczegóły?" and issued 3 real VAT
+class TestReminderGetsTheOpenQuestion:
+    """The reminder layer (services/reminder_router.py, which picks between the
+    invoice and unread-message reminders) gets first look at every message, and
+    its state lives in Redis rather than in the session — so on its own it
+    cannot tell a "Tak" meant for it from a "Tak" answering the question the
+    assistant asked a second ago. It once took the seller's "Tak" to "Masz 1
+    nową wiadomość (od: Modelinarnia). Pokazać szczegóły?" and issued 3 real VAT
     invoices. handle() must hand it the thread's last assistant turn."""
 
     def _orchestrator_with_session(self):
@@ -338,7 +339,7 @@ class TestInvoiceReminderGetsTheOpenQuestion:
         orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro_messages:chat"))
         handle_reply = AsyncMock(return_value=None)
 
-        with patch("services.invoice_reminder.handle_reply", handle_reply):
+        with patch("services.reminder_router.handle_reply", handle_reply):
             await orc.handle(self._message("Tak"), user_id="u1")
 
         handle_reply.assert_awaited_once_with(
@@ -356,7 +357,7 @@ class TestInvoiceReminderGetsTheOpenQuestion:
             return_value=AgentResponse(text="treść wiadomości", agent_type="allegro_messages:chat"),
         )
 
-        with patch("services.invoice_reminder.handle_reply", AsyncMock(return_value=None)):
+        with patch("services.reminder_router.handle_reply", AsyncMock(return_value=None)):
             response = await orc.handle(self._message("Tak"), user_id="u1")
 
         assert response.text == "treść wiadomości"
@@ -371,7 +372,7 @@ class TestInvoiceReminderGetsTheOpenQuestion:
         orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="none:chat"))
         handle_reply = AsyncMock(return_value=None)
 
-        with patch("services.invoice_reminder.handle_reply", handle_reply):
+        with patch("services.reminder_router.handle_reply", handle_reply):
             await orc.handle(self._message("tak"), user_id="u1")
 
         assert handle_reply.await_args[0][2] is None
@@ -382,10 +383,10 @@ class TestInvoiceReminderGetsTheOpenQuestion:
         orc._classify = AsyncMock()
         orc._route = AsyncMock()
 
-        with patch("services.invoice_reminder.handle_reply", AsyncMock(return_value="Wystawiam 1 fakturę:")):
+        with patch("services.reminder_router.handle_reply", AsyncMock(return_value="Wystawiam 1 fakturę:")):
             response = await orc.handle(self._message("tak, wystaw faktury"), user_id="u1")
 
-        assert response.agent_type == "invoice_reminder"
+        assert response.agent_type == "reminder"
         assert response.text == "Wystawiam 1 fakturę:"
         orc._route.assert_not_awaited()
 
