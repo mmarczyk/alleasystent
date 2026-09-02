@@ -22,6 +22,19 @@ logger = logging.getLogger(__name__)
 # fast enough for a few hundred orders without hammering the API.
 _INVOICE_LOOKUP_CONCURRENCY = 8
 
+# Statuses worth a second attempt: the request was fine, Allegro just couldn't
+# serve it now. 0 is our own marker for a network error/timeout (see _get).
+_RETRYABLE_STATUSES = frozenset({0, 429, 500, 502, 503, 504})
+
+# Billing listings are fetched one month-sized window at a time rather than as a
+# single year-long range: a yearly sales summary is thousands of entries, and
+# one long chain of pages is one 429 or timeout away from losing the whole cost
+# report. Windows are independent, so a hiccup costs a retry of one window.
+_BILLING_WINDOW_DAYS = 31
+# Per window: 200 pages × 100 entries. A month of billing never comes close —
+# the cap only exists so a paging bug can't spin forever.
+_BILLING_MAX_PAGES = 200
+
 
 def parse_invoice_buyer(checkout_form: dict[str, Any]) -> AllegroInvoiceBuyer:
     """Read the VAT-invoice address block off a checkout form.
@@ -346,8 +359,11 @@ class AllegroService:
                 auth=(self._settings.allegro_client_id, self._settings.allegro_client_secret),
                 data={
                     "client_id": self._settings.allegro_client_id,
+                    # billing:read is what /billing/billing-entries needs — without it
+                    # every cost figure in the sales summary comes back 403.
                     "scope": "allegro:api:sale:offers:read allegro:api:orders:read "
-                             "allegro:api:orders:write allegro:api:messaging",
+                             "allegro:api:orders:write allegro:api:messaging "
+                             "allegro:api:billing:read",
                 },
             )
             # Allegro may return 302 with JSON body, or 200 directly
@@ -948,28 +964,102 @@ class AllegroService:
         logger.info("get_billing_entries_for_order %s TOTAL: %d entries", order_id, len(all_entries))
         return all_entries
 
-    async def get_billing_entries_in_period(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
-        """Fetch all billing entries in a date range (paginated)."""
-        all_entries: list[dict[str, Any]] = []
+    @staticmethod
+    def _split_period(date_from: str, date_to: str, window_days: int) -> list[tuple[str, str]]:
+        """Cut [date_from, date_to] into windows of at most `window_days`.
+
+        Windows share their boundary instant (both bounds are inclusive on the
+        Allegro side), so nothing that occurred exactly on a boundary can slip
+        between two windows; callers de-duplicate by entry id.
+        """
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        start = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+        if end <= start:
+            return [(date_from, date_to)]
+        windows: list[tuple[str, str]] = []
+        cursor = start
+        step = timedelta(days=window_days)
+        while cursor < end:
+            window_end = min(cursor + step, end)
+            windows.append((cursor.strftime(fmt), window_end.strftime(fmt)))
+            cursor = window_end
+        return windows
+
+    async def _get_with_retry(
+        self, path: str, params: dict | list | None = None, attempts: int = 3
+    ) -> dict[str, Any]:
+        """GET that retries the transient failures (429, 5xx, network) with backoff.
+
+        Anything else — a 403 for a missing scope, a 400 for a bad filter — is
+        raised on the first try: retrying it would only make the caller wait.
+        """
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._get(path, params=params)
+            except AllegroAPIError as exc:
+                if attempt == attempts or exc.status_code not in _RETRYABLE_STATUSES:
+                    raise
+                delay = 2.0 ** (attempt - 1)
+                logger.warning(
+                    "GET %s failed (%s), retry %d/%d in %.0fs",
+                    path, exc, attempt, attempts - 1, delay,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _get_billing_window(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+        """All billing entries of one window, paginated."""
+        entries: list[dict[str, Any]] = []
         page_size = 100
-        offset = 0
-        while True:
+        for page in range(_BILLING_MAX_PAGES):
             params = {
                 "occurredAt.gte": date_from,
                 "occurredAt.lte": date_to,
                 "limit": page_size,
-                "offset": offset,
+                "offset": page * page_size,
             }
-            data = await self._get("/billing/billing-entries", params=params)
-            entries = data.get("billingEntries", [])
-            all_entries.extend(entries)
+            data = await self._get_with_retry("/billing/billing-entries", params=params)
+            page_entries = data.get("billingEntries", [])
+            entries.extend(page_entries)
+            if len(page_entries) < page_size:
+                return entries
+        logger.warning(
+            "get_billing_entries_in_period: window %s – %s hit the %d-page cap (%d entries) — "
+            "cost data for it may be incomplete",
+            date_from[:10], date_to[:10], _BILLING_MAX_PAGES, len(entries),
+        )
+        return entries
+
+    async def get_billing_entries_in_period(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+        """Fetch all billing entries in a date range (windowed + paginated).
+
+        Requires the `allegro:api:billing:read` scope on the token; without it
+        Allegro answers 403 and the caller has to say so rather than report
+        zero costs.
+        """
+        windows = self._split_period(date_from, date_to, _BILLING_WINDOW_DAYS)
+        all_entries: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for window_from, window_to in windows:
+            entries = await self._get_billing_window(window_from, window_to)
+            new = 0
+            for entry in entries:
+                entry_id = entry.get("id")
+                if entry_id:
+                    if entry_id in seen_ids:
+                        continue
+                    seen_ids.add(entry_id)
+                all_entries.append(entry)
+                new += 1
             logger.info(
-                "get_billing_entries_in_period: offset=%d → %d entries (total so far: %d)",
-                offset, len(entries), len(all_entries),
+                "get_billing_entries_in_period: window %s – %s → %d entries (%d new, total: %d)",
+                window_from[:10], window_to[:10], len(entries), new, len(all_entries),
             )
-            if len(entries) < page_size:
-                break
-            offset += page_size
+        logger.info(
+            "get_billing_entries_in_period: %d window(s) %s – %s → %d entries",
+            len(windows), date_from[:10], date_to[:10], len(all_entries),
+        )
         return all_entries
 
     async def get_carriers(self) -> list[dict[str, Any]]:

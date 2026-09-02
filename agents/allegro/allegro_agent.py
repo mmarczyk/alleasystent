@@ -982,6 +982,34 @@ class AllegroAgent(BaseAgent):
         return type_id == "PAD" or "pobranie opłat z wpływów" in type_desc or "pobranie opłaty z wpływów" in type_desc
 
     @staticmethod
+    def _billing_error_reason(exc: BaseException) -> str:
+        """Why a billing fetch failed, in the words the seller can act on.
+
+        Everything used to be reported as a missing permission, so a rate limit
+        or a dropped connection on a year-long query told the seller to log in
+        again — advice that never helped because nothing was wrong with the
+        token. Only 401/403 is actually about permissions.
+        """
+        status = getattr(exc, "status_code", None)
+        if status in (401, 403):
+            return (
+                "token Allegro nie ma uprawnienia `allegro:api:billing:read`. "
+                "Zaloguj się ponownie przez /allegro/login, aby odświeżyć uprawnienia."
+            )
+        if status == 429:
+            return (
+                "Allegro chwilowo ogranicza liczbę zapytań (błąd 429). "
+                "Spróbuj ponownie za kilka minut."
+            )
+        if status == 0:
+            return "nie udało się połączyć z API Allegro. Spróbuj ponownie za chwilę."
+        if isinstance(status, int) and status >= 500:
+            return f"API Allegro zwróciło błąd {status}. Spróbuj ponownie za chwilę."
+        if isinstance(status, int) and status:
+            return f"API Allegro odrzuciło zapytanie o rozliczenia (błąd {status})."
+        return f"nieoczekiwany błąd pobierania ({type(exc).__name__})."
+
+    @staticmethod
     def _offer_fields(offer: dict) -> tuple[str, str, float, str, int]:
         """Extract (id, name, price, currency, stock) from raw offer dict."""
         oid = offer.get("id", "?")
@@ -2575,7 +2603,10 @@ class AllegroAgent(BaseAgent):
             if isinstance(results[0], BaseException):
                 raise results[0]
             if billing_error:
-                logger.warning("get_sales_summary: billing fetch failed (%s), continuing without cost data", billing_error)
+                logger.warning(
+                    "get_sales_summary: billing fetch failed (status=%s: %s), continuing without cost data",
+                    getattr(billing_error, "status_code", "—"), billing_error,
+                )
             # Entries tied to one of our orders (matched by order.id) count regardless of their
             # own date — the widened fetch above is what guarantees they were found. Entries
             # with no order ref at all (subscriptions, listing fees) have nothing to match by,
@@ -2756,8 +2787,11 @@ class AllegroAgent(BaseAgent):
                     "",
                     "## Koszty Allegro",
                     "",
-                    "⚠️ Dane o kosztach Allegro niedostępne (brak uprawnień do rozliczeń). "
-                    "Zaloguj się ponownie przez /allegro/login, aby uzyskać dostęp do billing.",
+                    "⚠️ Nie udało się pobrać danych o kosztach Allegro — "
+                    + self._billing_error_reason(billing_error),
+                    "",
+                    "Pozostałe dane w tym podsumowaniu (przychód, zamówienia, produkty) "
+                    "są kompletne.",
                 ]
 
             return "\n".join([
@@ -2938,13 +2972,13 @@ class AllegroAgent(BaseAgent):
                     )
                     period_label = "ostatnie operacje"
             except AllegroAPIError as exc:
-                if "403" in str(exc):
-                    return (
-                        "Brak dostępu do danych rozliczeniowych (błąd 403). "
-                        "Token OAuth nie zawiera uprawnienia `allegro:api:billing:read`. "
-                        "Zaloguj się ponownie przez /allegro/login, aby odświeżyć token z pełnymi uprawnieniami."
-                    )
-                raise
+                logger.warning(
+                    "get_billing_summary: billing fetch failed (status=%s: %s)", exc.status_code, exc
+                )
+                return (
+                    "Nie udało się pobrać danych rozliczeniowych — "
+                    + self._billing_error_reason(exc)
+                )
             if not entries:
                 return f"Brak wpisów rozliczeniowych ({period_label})."
             fee_by_type: dict[str, float] = {}
