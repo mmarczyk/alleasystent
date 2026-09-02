@@ -199,8 +199,10 @@ Centralny router odpowiedzialny za cały przepływ przetwarzania wiadomości.
 
 **Funkcjonalności:**
 - Ekran powitalny z 4 sugestiami przykładowych pytań
-- Wielowątkowe rozmowy z historią w LocalStorage
-- Automatyczne tytuły rozmów (pierwsze 50 znaków pytania)
+- Wielowątkowe rozmowy — lista rozmów w panelu bocznym (zakładka „Rozmowy”), przełączanie, zmiana nazwy, usuwanie
+- Rozmowy przypisane do użytkownika, nie do urządzenia: ta sama rozmowa na komputerze i w telefonie
+  (backend: `GET/PATCH/DELETE /conversations`, LocalStorage tylko jako cache offline)
+- Automatyczne tytuły rozmów (pierwsze 60 znaków pytania)
 - Renderowanie Markdown z podświetlaniem składni (Marked.js + Highlight.js)
 - Kopiowanie wiadomości do schowka
 - Regeneracja ostatniej odpowiedzi asystenta

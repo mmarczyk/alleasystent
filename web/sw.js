@@ -116,6 +116,7 @@ self.addEventListener('fetch', e => {
     url.pathname.startsWith('/allegro/') ||
     url.pathname.startsWith('/auth/') ||
     url.pathname.startsWith('/chat') ||
+    url.pathname.startsWith('/conversations') ||
     url.pathname.startsWith('/notifications') ||
     url.pathname.startsWith('/push/')
   ) return;

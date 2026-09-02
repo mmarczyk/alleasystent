@@ -241,8 +241,10 @@ Dla zapytań niejednoznacznych, nierozpoznanych przez reguły. Fallback przy nie
 ### Interfejs webowy (PWA)
 
 - Ekran powitalny z 4 sugestiami pytań
-- Wielowątkowe rozmowy z historią w LocalStorage
-- Automatyczne tytuły rozmów (pierwsze 50 znaków pytania)
+- Wielowątkowe rozmowy — lista rozmów w panelu bocznym, z przełączaniem, zmianą nazwy i usuwaniem
+- Rozmowy synchronizowane między urządzeniami tego samego użytkownika (`/conversations`);
+  LocalStorage pełni rolę cache'u (szybkie otwarcie, tryb offline)
+- Automatyczne tytuły rozmów (pierwsze 60 znaków pytania)
 - Renderowanie Markdown (Marked.js + Highlight.js)
 - Kopiowanie wiadomości, regeneracja odpowiedzi, eksport do `.txt`
 - Skróty: `Enter` — wyślij, `Shift+Enter` — nowa linia

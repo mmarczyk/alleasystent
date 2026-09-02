@@ -236,6 +236,40 @@ class TestEmptyReplyNeverPersisted:
         assert len(orc._route.call_args[0][2]) == _HISTORY_TURNS
 
 
+class TestReplyFormatStoredWithTheTurn:
+    """A table/document reply has to come back as a table/document when the
+    thread is reopened somewhere else, so the stored turn carries the agent
+    type the output format is read from."""
+
+    def _orchestrator_with_session(self):
+        from models.conversation import ChannelType, ConversationSession
+
+        orc = _make_orchestrator()
+        session = ConversationSession(session_id="u1:c1", channel=ChannelType.API, sender_id="u1")
+        orc._session_store.get_or_create_session = AsyncMock(return_value=session)
+        orc._session_store.save_session = AsyncMock()
+        return orc, session
+
+    def _message(self, text: str):
+        from models.conversation import ChannelType, IncomingMessage
+        return IncomingMessage(text=text, session_id="u1:c1", channel=ChannelType.API, sender_id="u1")
+
+    @pytest.mark.asyncio
+    async def test_assistant_turn_records_the_agent_type(self):
+        from models.conversation import AgentResponse, MessageRole
+
+        orc, session = self._orchestrator_with_session()
+        orc._classify = AsyncMock(return_value="allegro_orders")
+        orc._route = AsyncMock(
+            return_value=AgentResponse(text="| nr |", agent_type="allegro_orders:table"),
+        )
+
+        await orc.handle(self._message("pokaż zamówienia"))
+
+        assistant = [m for m in session.messages if m.role == MessageRole.ASSISTANT]
+        assert assistant[-1].metadata["agent"] == "allegro_orders:table"
+
+
 class TestMarkRequest:
     """See agents/orchestrator.py._mark_request — flags the first request
     this process handles as a likely Cloud Run cold start (--min-instances=0)
