@@ -15,7 +15,11 @@ from tests.tools import dataset as ds
 
 _TODAY = date.today()
 _MONTH_START = _TODAY.replace(day=1).isoformat()
+_YEAR_START = _TODAY.replace(month=1, day=1).isoformat()
 _TODAY_ISO = _TODAY.isoformat()
+# A year-to-date period only spans more than one calendar month from February
+# on — in January the report is a single month and drops the breakdown.
+_YTD_IS_MULTI_MONTH = _TODAY.month > 1
 
 
 @dataclass(frozen=True)
@@ -180,6 +184,14 @@ CASES: list[Case] = [
          "Ile zarobiłem w tym miesiącu?",
          ("Podsumowanie sprzedaży", "Top produkty", "Przychód po opłatach Allegro"),
          note="Przychód, opłaty i zestawienie per zamówienie (format dashboard)."),
+    Case("get_sales_summary__year", "get_sales_summary",
+         {"date_from_local": _YEAR_START, "date_to_local": _TODAY_ISO},
+         "Podsumuj sprzedaż z tego roku z podziałem na miesiące",
+         ("Podsumowanie sprzedaży",)
+         + (("Sprzedaż wg miesięcy", "Najlepszy miesiąc") if _YTD_IS_MULTI_MONTH else ()),
+         note="Cały rok w JEDNYM wywołaniu — dla okresu dłuższego niż miesiąc raport "
+              "sam dokłada podział na miesiące (w styczniu okres mieści się w jednym "
+              "miesiącu, więc sekcji nie ma)."),
 
     # ── Kupujący ─────────────────────────────────────────────────────────────
     Case("get_buyers", "get_buyers", {},
