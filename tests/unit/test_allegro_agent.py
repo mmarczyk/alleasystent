@@ -1105,6 +1105,35 @@ class TestSalesSummaryMonthlyBreakdown:
         ]
 
     @pytest.mark.asyncio
+    async def test_section_order_puts_costs_between_the_summary_and_the_products(self):
+        """Reading order: what came in (totals, then month by month), what
+        Allegro took out, what sold — and only then the long per-order listing
+        the costs were computed from."""
+        agent = self._agent_with(
+            [self._order("a", 100.0, "2026-01-10T10:00:00Z"),
+             self._order("b", 300.0, "2026-03-02T10:00:00Z")],
+            billing=[{
+                "id": "1",
+                "occurredAt": "2026-01-11T10:00:00Z",
+                "value": {"amount": "-12.50", "currency": "PLN"},
+                "type": {"id": "SUC", "description": "Prowizja od sprzedaży"},
+                "order": {"id": "a"},
+            }],
+        )
+
+        result = await agent._dispatch(
+            "get_sales_summary", {"date_from_local": "2026-01-01", "date_to_local": "2026-03-31"}
+        )
+
+        assert [ln for ln in result.splitlines() if ln.startswith("## ")] == [
+            "## Podsumowanie sprzedaży (2026-01-01 – 2026-03-31)",
+            "## Sprzedaż wg miesięcy",
+            "## Koszty Allegro (2026-01-01 – 2026-03-31)",
+            "## Top produkty wg przychodu",
+            "## Zestawienie per zamówienie",
+        ]
+
+    @pytest.mark.asyncio
     async def test_single_month_period_has_no_breakdown(self):
         agent = self._agent_with([self._order("a", 100.0, "2026-03-10T10:00:00Z")])
 
