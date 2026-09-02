@@ -28,6 +28,12 @@ answers a DIFFERENT open question back to normal routing untouched
 (_reminder_owns_reply). Without that, a "tak" meant for the assistant's own
 question issued real, irreversible VAT invoices.
 
+Which orders it nags about is filtered through services/invoice_ledger.py:
+Allegro reports an invoice only once its PDF was attached to the order, so
+an invoice issued in inFakt and left unattached kept the order on the
+"niewystawione" list and the reminder kept asking about it — a second "tak"
+then issued a second real invoice for it.
+
 The reminder's TEXT is a separate matter: it is recorded as an assistant turn
 in whichever conversation it finally gets delivered to (see
 main.py._record_assistant_turns), so the assistant can see what it said and
@@ -140,6 +146,7 @@ async def _poll_all_users(now: datetime) -> None:
 
 
 async def _poll_user(r, user_id: str, now: datetime) -> None:
+    from services import invoice_ledger
     from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
 
     if not await r.exists(f"allegro:tokens:{user_id}"):
@@ -165,7 +172,25 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
         logger.warning("Invoice reminder: Allegro API error user=%s: %s", user_id, exc)
         return
 
-    if not orders:
+    order_ids = [o.order_id for o in orders]
+
+    # Drop orders this system has already invoiced. Allegro only reports an
+    # invoice once its PDF has been ATTACHED to the order — a separate step
+    # that often never happens — so get_orders_needing_invoice keeps handing
+    # back orders whose invoice exists in inFakt. Asking about those again is
+    # exactly how the same order got invoiced twice: the seller answered
+    # "tak" to a reminder that should never have been sent. The ledger is the
+    # only place that knows (see services/invoice_ledger.py).
+    if order_ids:
+        already = await invoice_ledger.already_handled(user_id, order_ids)
+        if already:
+            logger.info(
+                "Invoice reminder: user=%s skipping %d already-issued order(s): %s",
+                user_id, len(already), ", ".join(sorted(already)),
+            )
+            order_ids = [oid for oid in order_ids if oid not in already]
+
+    if not order_ids:
         # Nothing pending (possibly resolved since the last ask) — go quiet
         # until the next scheduled check.
         await _save_state(
@@ -174,8 +199,6 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
             interval_minutes=interval, reminder_count=0,
         )
         return
-
-    order_ids = [o.order_id for o in orders]
 
     if status == _STATUS_IDLE:
         await _ask(user_id, order_ids, again=False, awaiting_duration=False)
@@ -370,11 +393,25 @@ async def handle_reply(
 
 
 async def _issue_all(user_id: str, state: dict) -> str:
+    """Issue every order the open ask covered — one at a time, through the
+    same guarded path the chat tool uses.
+
+    The state this works from was written when the ask went out, so by now
+    some of those orders may already have been invoiced (the seller did it
+    in inFakt, or answered "tak" twice and both replies got this far).
+    Orders already in the ledger are therefore dropped up front, and
+    issue_invoice_for_order refuses any that slip through the gap between
+    this check and its own claim.
+    """
     from config.settings import get_settings
+    from services import invoice_ledger
     from services.allegro_service import AllegroService
     from services.infakt_service import issue_invoice_for_order
 
     order_ids = state.get("order_ids", [])
+    if order_ids:
+        already = await invoice_ledger.already_handled(user_id, order_ids)
+        order_ids = [oid for oid in order_ids if oid not in already]
     if not order_ids:
         await _resolve_state(user_id, state)
         return "Nie znalazłem już żadnych niewystawionych faktur do wystawienia — chyba ktoś mnie ubiegł. 🙂"

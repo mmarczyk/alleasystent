@@ -17,6 +17,12 @@ that's the one that misfired on an ambiguous yes/no question earlier;
 scoping real submission to a single named order at a time caps the
 blast radius of any future misfire at one invoice.
 
+That cap is per misfire, not per order: the same order asked about twice
+used to produce two real invoices, because the only "already invoiced?"
+check was Allegro's, which cannot see an inFakt invoice nobody attached to
+the order. issue_invoice_for_order now claims each order in
+services/invoice_ledger.py before calling inFakt at all.
+
 API docs: https://github.com/infakt/API (KSeF specifics in ksef.md)
 """
 
@@ -289,7 +295,26 @@ def _delivery_service(cost: float, is_production: bool) -> dict[str, Any]:
 # module docstring above for why bulk issuance stays preview-only.
 
 async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -> str:
-    """Create ONE real VAT invoice in inFakt for a single named Allegro order."""
+    """Create ONE real VAT invoice in inFakt for a single named Allegro order.
+
+    Guarded on both sides, because either guard alone lets the same order be
+    invoiced twice:
+      * Allegro's own per-order invoice list — but it only knows about
+        invoices someone already ATTACHED to the order (a separate step), so
+        it says "no invoice" for one that exists in inFakt and was never
+        uploaded;
+      * services/invoice_ledger.py — every issuance this system performs,
+        attached or not, claimed atomically BEFORE inFakt is called so a
+        second caller (the reminder firing again, a repeated chat request,
+        the monitor job racing the chat process) is refused rather than
+        served.
+
+    The claim is released only when inFakt is known NOT to have created
+    anything. An outcome we cannot confirm keeps the claim — see
+    services/invoice_ledger.py for why that trade is the right way round.
+    """
+    from services import invoice_ledger
+
     order = await allegro.get_order(order_id)
     if not order.invoice_required:
         return f"Zamówienie `{order_id}`: kupujący nie poprosił o fakturę VAT — nic nie wystawiono."
@@ -298,33 +323,81 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
     if existing:
         return f"Zamówienie `{order_id}`: faktura już istnieje w Allegro — nie wystawiono kolejnej."
 
+    user_id = getattr(allegro, "_user_id", "default")
+    claim = await invoice_ledger.claim(user_id, order_id)
+    if not claim.acquired:
+        logger.info("issue_invoice_for_order: order %s already claimed — refusing duplicate", order_id)
+        return invoice_ledger.describe(order_id, claim.record)
+
     try:
         address = await allegro.get_order_invoice_data(order_id)
         payload = build_invoice_payload(order, address, is_production)
-        infakt = InfaktService.get_instance()
+    except Exception:
+        # Still nothing sent to inFakt, so the order must stay issuable.
+        await invoice_ledger.release(user_id, order_id)
+        raise
+
+    infakt = InfaktService.get_instance()
+    try:
         status = await infakt.create_invoice(payload)
-        invoice_uuid = status["invoice_uuid"]
-        link = await infakt.get_share_link(invoice_uuid)
-        buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
-        return (
-            f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt: {link}\n"
-            f"ID faktury w inFakt: `{invoice_uuid}`\n"
-            f"Nabywca: {buyer_kind}.\n"
-            "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
-        )
     except TimeoutError as exc:
         # The task was accepted by inFakt and simply hasn't finished within the
         # polling window — the invoice may still appear a moment later, so this
         # must not read as "nothing happened, try again": a blind retry would
-        # create a second invoice for the same order.
+        # create a second invoice for the same order. The claim stays for the
+        # same reason, so a later "wystaw" for this order is refused too.
         logger.error("issue_invoice_for_order: order %s still pending: %s", order_id, exc)
         return (
             f"⏳ inFakt przyjął zlecenie faktury dla zamówienia `{order_id}`, ale nie potwierdził "
             "jej wystawienia w czasie oczekiwania. Faktura prawdopodobnie i tak się utworzy — "
             "sprawdź panel inFakt za chwilę i NIE wystawiaj jej ponownie, dopóki tego nie "
-            "zweryfikujesz (inaczej powstanie duplikat).\n"
+            "zweryfikujesz (inaczej powstanie duplikat). Kolejne zlecenie dla tego zamówienia "
+            "i tak odrzucę.\n"
             f"Szczegóły: {exc}"
         )
     except (InfaktAPIError, InfaktTaskError) as exc:
+        # inFakt rejected the invoice or never got the request — nothing was
+        # created, so the order goes back to being issuable.
+        await invoice_ledger.release(user_id, order_id)
         logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
         return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
+
+    invoice_uuid = status.get("invoice_uuid")
+    if not invoice_uuid:
+        # inFakt said 201 without telling us which invoice — it exists, we just
+        # can't name it. Keep the claim: the seller must look it up, not reissue.
+        logger.error("issue_invoice_for_order: order %s created without invoice_uuid: %s", order_id, status)
+        return (
+            f"⚠️ inFakt potwierdził utworzenie faktury dla zamówienia `{order_id}`, ale nie zwrócił "
+            "jej identyfikatora. Znajdź ją w panelu inFakt — nie wystawiam jej ponownie, bo "
+            "powstałby duplikat."
+        )
+
+    await invoice_ledger.mark_issued(user_id, order_id, invoice_uuid)
+
+    buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
+    head = (
+        f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt"
+    )
+    try:
+        link = await infakt.get_share_link(invoice_uuid)
+    except InfaktAPIError as exc:
+        # The invoice EXISTS — only the share link failed. Reporting this as a
+        # failed issuance is what used to send sellers back to issue it again.
+        logger.warning(
+            "issue_invoice_for_order: order %s issued (%s) but share link failed: %s",
+            order_id, invoice_uuid, exc,
+        )
+        return (
+            f"{head}, ale nie udało się wygenerować linku do podglądu ({exc}).\n"
+            f"ID faktury w inFakt: `{invoice_uuid}`\n"
+            f"Nabywca: {buyer_kind}.\n"
+            "Fakturę znajdziesz w panelu inFakt — jest wystawiona, nie wystawiaj jej ponownie."
+        )
+
+    return (
+        f"{head}: {link}\n"
+        f"ID faktury w inFakt: `{invoice_uuid}`\n"
+        f"Nabywca: {buyer_kind}.\n"
+        "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
+    )

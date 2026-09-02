@@ -14,6 +14,16 @@ def set_env(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def clear_invoice_ledger():
+    """services/invoice_ledger.py is deliberately persistent — reset it
+    between tests so one test's issuance doesn't leak into the next."""
+    from services import invoice_ledger
+    invoice_ledger._MEMORY.clear()
+    yield
+    invoice_ledger._MEMORY.clear()
+
+
 class TestParseClassification:
     """The reply classifier's output parser — safety-critical: anything it
     can't confidently parse must fall back to "unrelated", never "issue"."""
@@ -391,3 +401,99 @@ class TestHandleReplyRespectsOtherQuestions:
              patch.object(invoice_reminder, "_classify_reply", mock_classify):
             await invoice_reminder.handle_reply("user1", "wystaw faktury", self.OTHER_ASK)
         mock_classify.assert_awaited_once_with("wystaw faktury", state, self.OTHER_ASK)
+
+
+def _order(order_id: str):
+    return type("O", (), {"order_id": order_id})()
+
+
+class TestAlreadyIssuedOrdersAreNotNaggedAboutAgain:
+    """The reminder's half of the duplicate bug.
+
+    get_orders_needing_invoice answers from Allegro, which only counts an
+    invoice once its PDF has been ATTACHED to the order. An invoice issued in
+    inFakt and never attached therefore left the order on that list, the
+    reminder asked about it again hours later, and a second "tak" issued a
+    second real VAT invoice.
+    """
+
+    async def _poll(self, orders, user_id="user1"):
+        import services.invoice_reminder as ir
+
+        r = AsyncMock()
+        r.exists.return_value = 1
+
+        allegro = AsyncMock()
+        allegro._tokens = object()
+        allegro.get_orders_needing_invoice.return_value = [_order(o) for o in orders]
+
+        mock_ask = AsyncMock()
+        mock_save = AsyncMock()
+        with patch("services.allegro_service.AllegroService.get_instance", return_value=allegro), \
+             patch.object(ir, "_load_state", AsyncMock(return_value=None)), \
+             patch.object(ir, "_ask", mock_ask), \
+             patch.object(ir, "_save_state", mock_save):
+            await ir._poll_user(r, user_id, datetime.now(ZoneInfo("Europe/Warsaw")))
+        return mock_ask, mock_save
+
+    async def test_an_already_issued_order_is_dropped_from_the_ask(self):
+        from services import invoice_ledger
+
+        await invoice_ledger.mark_issued("user1", "ORD-1", "uuid-1")
+        mock_ask, _ = await self._poll(["ORD-1", "ORD-2"])
+
+        mock_ask.assert_awaited_once()
+        assert mock_ask.await_args.args[1] == ["ORD-2"]
+
+    async def test_nothing_is_asked_when_every_order_was_already_issued(self):
+        from services import invoice_ledger
+
+        await invoice_ledger.mark_issued("user1", "ORD-1", "uuid-1")
+        await invoice_ledger.mark_issued("user1", "ORD-2", "uuid-2")
+        mock_ask, mock_save = await self._poll(["ORD-1", "ORD-2"])
+
+        mock_ask.assert_not_awaited()
+        assert mock_save.await_args.kwargs["order_ids"] == []
+
+    async def test_orders_issued_for_another_user_are_still_asked_about(self):
+        from services import invoice_ledger
+
+        await invoice_ledger.mark_issued("someone-else", "ORD-1", "uuid-1")
+        mock_ask, _ = await self._poll(["ORD-1"])
+
+        assert mock_ask.await_args.args[1] == ["ORD-1"]
+
+
+class TestIssueAll:
+    async def test_orders_already_issued_are_skipped(self):
+        import services.infakt_service as infakt_service
+        import services.invoice_reminder as ir
+        from services import invoice_ledger
+
+        await invoice_ledger.mark_issued("user1", "ORD-1", "uuid-1")
+        mock_issue = AsyncMock(return_value="✅ ok")
+
+        with patch("services.allegro_service.AllegroService.get_instance", return_value=AsyncMock()), \
+             patch.object(infakt_service, "issue_invoice_for_order", mock_issue), \
+             patch.object(ir, "_resolve_state", AsyncMock()):
+            out = await ir._issue_all("user1", {"order_ids": ["ORD-1", "ORD-2"]})
+
+        assert mock_issue.await_count == 1
+        assert mock_issue.await_args.args[1] == "ORD-2"
+        assert "1 fakturę" in out
+
+    async def test_all_already_issued_means_nothing_to_do(self):
+        import services.infakt_service as infakt_service
+        import services.invoice_reminder as ir
+        from services import invoice_ledger
+
+        await invoice_ledger.mark_issued("user1", "ORD-1", "uuid-1")
+        mock_issue = AsyncMock(return_value="✅ ok")
+
+        with patch("services.allegro_service.AllegroService.get_instance", return_value=AsyncMock()), \
+             patch.object(infakt_service, "issue_invoice_for_order", mock_issue), \
+             patch.object(ir, "_resolve_state", AsyncMock()):
+            out = await ir._issue_all("user1", {"order_ids": ["ORD-1"]})
+
+        mock_issue.assert_not_awaited()
+        assert "ktoś mnie ubiegł" in out
