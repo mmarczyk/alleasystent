@@ -275,7 +275,9 @@ class Orchestrator:
             if reminder_text is not None:
                 response = AgentResponse(text=reminder_text, agent_type="invoice_reminder")
                 session.add_message(MessageRole.USER, message.text)
-                session.add_message(MessageRole.ASSISTANT, response.text)
+                session.add_message(
+                    MessageRole.ASSISTANT, response.text, {"agent": response.agent_type},
+                )
                 await self._session_store.save_session(session)
                 perf.log(source="invoice_reminder", channel=message.channel)
                 return response
@@ -295,7 +297,9 @@ class Orchestrator:
                 agent_type="error",
             )
             session.add_message(MessageRole.USER, message.text)
-            session.add_message(MessageRole.ASSISTANT, response.text)
+            session.add_message(
+                MessageRole.ASSISTANT, response.text, {"agent": response.agent_type},
+            )
             await self._session_store.save_session(session)
             perf.log(source="error", channel=message.channel)
             return response
@@ -347,7 +351,12 @@ class Orchestrator:
         # Persist conversation
         with perf.stage("session_save"):
             session.add_message(MessageRole.USER, message.text)
-            session.add_message(MessageRole.ASSISTANT, response.text)
+            # agent_type is "<data_source>:<output_format>" — storing it is what
+            # lets a table/document reply come back as a table/document when the
+            # thread is reopened on another device, instead of as flat text.
+            session.add_message(
+                MessageRole.ASSISTANT, response.text, {"agent": response.agent_type},
+            )
             await self._session_store.save_session(session)
 
         perf.log(source=data_source, channel=message.channel)

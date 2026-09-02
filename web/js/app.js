@@ -519,19 +519,47 @@ const Settings = (() => {
 })();
 
 // ── Conversation store ───────────────────────────
+// A cache of the server's conversations (see Sync), not the master copy: the
+// same threads are stored per user on the backend, so localStorage exists to
+// paint instantly and to keep the app readable offline — nothing more. Sorted
+// newest-first by last activity, which is the order the sidebar shows and the
+// rule that decides which thread opens on a device that has just synced.
 const Store = (() => {
   const KEY = 'ae_conversations';
+  const TITLE_MAX = 60;
   let convs = [];
   let activeId = null;
 
+  // Ids name the conversation on the server too, so two devices minting one at
+  // the same moment must not collide: timestamp (keeps them roughly ordered)
+  // plus randomness. Kept inside [A-Za-z0-9_-], which is all the backend
+  // accepts in a conversation id.
+  function newId() {
+    return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function sort() {
+    convs.sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+  }
+
   function load() {
     try { convs = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { convs = []; }
+    convs.forEach(c => {
+      if (!c.updatedAt) {
+        const last = c.messages?.[c.messages.length - 1];
+        c.updatedAt = last?.ts || c.createdAt || 0;
+      }
+    });
+    sort();
     if (convs.length) activeId = convs[0].id;
   }
-  function save() { localStorage.setItem(KEY, JSON.stringify(convs)); }
+  function save() { sort(); localStorage.setItem(KEY, JSON.stringify(convs)); }
 
   function create(title = 'Nowa rozmowa') {
-    const c = { id: Date.now().toString(), title, messages: [], createdAt: Date.now() };
+    const now = Date.now();
+    // `local: true` marks a conversation the server has never seen. Sync uses
+    // it to tell a brand-new draft from a thread deleted on another device.
+    const c = { id: newId(), title, messages: [], createdAt: now, updatedAt: now, local: true };
     convs.unshift(c);
     activeId = c.id;
     save();
@@ -539,6 +567,7 @@ const Store = (() => {
   }
 
   function active() { return convs.find(c => c.id === activeId) || null; }
+  function get(id) { return convs.find(c => c.id === id) || null; }
 
   function setActive(id) {
     activeId = id;
@@ -549,10 +578,26 @@ const Store = (() => {
     const c = active();
     if (!c) return;
     c.messages.push({ role, content, ts: Date.now(), format });
+    c.updatedAt = Date.now();
     if (c.messages.length === 2 && role === 'assistant') {
-      c.title = c.messages[0].content.slice(0, 50).replace(/\n/g, ' ');
+      c.title = titleFrom(c.messages[0].content);
     }
     save();
+  }
+
+  // Same rule the backend uses when it derives a title, so a thread carries the
+  // same name whether it is read from the local cache or fetched from a device
+  // that has never seen it.
+  function titleFrom(text) {
+    return (text || '').trim().replace(/\n/g, ' ').slice(0, TITLE_MAX) || 'Nowa rozmowa';
+  }
+
+  function rename(id, title) {
+    const c = get(id);
+    if (!c) return null;
+    c.title = titleFrom(title);
+    save();
+    return c;
   }
 
   function updateLastMessage(content, format) {
@@ -563,7 +608,18 @@ const Store = (() => {
       last.content = content;
       if (format) last.format = format;
     }
+    c.updatedAt = Date.now();
     save();
+  }
+
+  // Replaces a conversation's contents with what the server holds (merged by
+  // Sync). Creates it locally when this device has never seen the thread.
+  function put(conv) {
+    const existing = get(conv.id);
+    if (existing) Object.assign(existing, conv);
+    else convs.push({ ...conv });
+    save();
+    return get(conv.id);
   }
 
   function deleteConv(id) {
@@ -574,11 +630,241 @@ const Store = (() => {
 
   function clearAll() { convs = []; activeId = null; localStorage.removeItem(KEY); }
 
-  return { load, create, active, setActive, addMessage, updateLastMessage, deleteConv, clearAll, all: () => convs };
+  return {
+    load, save, create, active, activeId: () => activeId, get, put, setActive,
+    addMessage, updateLastMessage, rename, titleFrom, deleteConv, clearAll,
+    all: () => convs,
+  };
 })();
 
-// ── Sidebar (FAQ + Documents) ─────────────────────
-// Replaces the old chat-history list: surfaces the most common questions
+// ── Cross-device conversation sync ───────────────
+// "Ta sama rozmowa na komputerze i w telefonie": conversations belong to the
+// logged-in seller, not to the browser they were typed in. The backend already
+// stores every turn under `<user>:<conversation>` (that is what gives the
+// assistant its memory), so this module simply keeps the local cache in step
+// with it — pulling on startup, when the app comes back to the foreground, and
+// on a slow timer while it stays open, and pushing renames/deletions so they
+// take effect everywhere rather than on one device only.
+//
+// Nothing here is allowed to lose a message: the server copy is the trunk, and
+// any local turn it never saw (a question whose request died on a phone in a
+// tunnel) is kept and appended rather than overwritten.
+const Sync = (() => {
+  const POLL_MS = 25 * 1000;
+  const LIST_LIMIT = 100;
+  let _timer = null;
+  let _inflight = false;
+  let _firstPullDone = false;
+
+  async function _req(path, opts = {}) {
+    const res = await fetch(Settings.api(path), {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...Auth.headers() },
+      ...opts,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.status === 204 ? null : res.json();
+  }
+
+  const _key = m => `${m.role}|${m.content}`;   // role never contains "|", so this is unambiguous
+
+  // Server turns first, in the order it stored them, then whatever this device
+  // holds that never reached it. Matching is by (role, content) with counts, so
+  // the same question asked twice stays two turns instead of collapsing to one.
+  function _mergeMessages(localMsgs, remoteMsgs) {
+    const remaining = new Map();
+    remoteMsgs.forEach(m => remaining.set(_key(m), (remaining.get(_key(m)) || 0) + 1));
+    const extras = [];
+    (localMsgs || []).forEach(m => {
+      if (!m.content) return;
+      const left = remaining.get(_key(m)) || 0;
+      if (left > 0) remaining.set(_key(m), left - 1);
+      else extras.push(m);
+    });
+    extras.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    return remoteMsgs.concat(extras);
+  }
+
+  // Fetches one conversation in full and folds it into the local cache.
+  // Returns null if the seller started typing at us mid-fetch — a reply in
+  // flight is written into the store as an empty placeholder turn, and folding
+  // the server's copy over that would leave the answer with nowhere to land.
+  async function _pullOne(summary) {
+    const detail = await _req(`/conversations/${encodeURIComponent(summary.id)}`);
+    if (Chat.isBusy()) return null;
+    const local = Store.get(detail.id);
+    const messages = _mergeMessages(local?.messages, detail.messages || []);
+    return Store.put({
+      id: detail.id,
+      title: detail.title,
+      messages,
+      createdAt: detail.createdAt,
+      updatedAt: Math.max(detail.updatedAt || 0, local?.updatedAt || 0),
+      local: false,
+    });
+  }
+
+  // True when the server's copy differs from what this device has cached.
+  function _isStale(summary) {
+    const local = Store.get(summary.id);
+    if (!local) return true;
+    if (local.local) return true;                       // never reconciled here
+    if (local.title !== summary.title) return true;
+    if ((local.syncedCount ?? -1) !== summary.messageCount) return true;
+    return (summary.updatedAt || 0) > (local.syncedAt || 0);
+  }
+
+  // Result of a pull: what the sidebar has to redraw, and whether the thread
+  // on screen changed (the only case worth repainting the message list for —
+  // a poll that repaints regardless would yank a reader back to the bottom).
+  const _NOTHING = { changed: false, activeChanged: false };
+
+  async function pull() {
+    // A query in flight owns the active conversation (its empty assistant turn
+    // is a placeholder the reply fills in) — merging underneath it would paint
+    // a half-finished thread. The next tick picks this up.
+    if (_inflight || Chat.isBusy()) return _NOTHING;
+    _inflight = true;
+    let changed = false;
+    let activeChanged = false;
+    try {
+      const data = await _req(`/conversations?limit=${LIST_LIMIT}`);
+      const remote = data.conversations || [];
+      const activeId = Store.activeId();
+
+      for (const summary of remote) {
+        if (Chat.isBusy()) return { changed, activeChanged };
+        summary.title = await _flushPendingTitle(summary);
+        if (!_isStale(summary)) continue;
+        const before = Store.get(summary.id)?.messages.length ?? -1;
+        const conv = await _pullOne(summary);
+        if (!conv) continue;
+        conv.syncedCount = summary.messageCount;
+        conv.syncedAt = summary.updatedAt;
+        if (summary.id === activeId && conv.messages.length !== before) activeChanged = true;
+        changed = true;
+      }
+
+      // A thread deleted on another device disappears from the listing — drop
+      // it here too. Deliberately narrow, because this is the one step that can
+      // destroy local history: only conversations the server has handed us
+      // before (syncedAt), only when the listing is complete (a truncated page
+      // says nothing about what it left out), and never on an empty listing,
+      // which is what a backend that lost its store looks like.
+      if (remote.length && remote.length < LIST_LIMIT) {
+        const alive = new Set(remote.map(c => c.id));
+        Store.all()
+          .filter(c => c.syncedAt && !alive.has(c.id))
+          .forEach(c => {
+            Store.deleteConv(c.id);
+            changed = true;
+            if (c.id === activeId) activeChanged = true;
+          });
+      }
+
+      if (changed) Store.save();
+
+      // On the first successful pull, open what the seller was last working on
+      // — that is what makes a thread started at the desk simply be there when
+      // they pick up the phone. Only when this device has nothing of its own
+      // in progress, so it never yanks anyone out of a chat they are reading.
+      // The server lists newest-first, and that is the thread to open — not
+      // Store's own first entry, which is whatever empty "Nowa rozmowa" this
+      // device opened with (created just now, so always the newest of all).
+      const current = Store.get(activeId);
+      if (!_firstPullDone && remote.length && (!current || !current.messages.length)) {
+        const newest = Store.get(remote[0].id);
+        if (newest && newest.id !== activeId) {
+          Store.setActive(newest.id);
+          changed = true;
+          activeChanged = true;
+        }
+      }
+      _firstPullDone = true;
+
+      // Tidy up empty drafts left behind by the switch above (and by any
+      // "Nowa rozmowa" the seller opened and never used) — an empty thread
+      // carries nothing, and a list of them is just noise.
+      Store.all()
+        .filter(c => c.local && !c.messages.length && c.id !== Store.activeId())
+        .forEach(c => { Store.deleteConv(c.id); changed = true; });
+
+      return { changed, activeChanged };
+    } catch {
+      // Offline, or the session expired — the local cache stays as it is and
+      // the next tick tries again.
+      return _NOTHING;
+    } finally {
+      _inflight = false;
+    }
+  }
+
+  // Pull and repaint whatever the user is looking at.
+  async function refresh() {
+    const { changed, activeChanged } = await pull();
+    if (!changed) return;
+    if (activeChanged) Chat.renderMessages();
+    Sidebar.render();
+  }
+
+  // Titles the seller set on a thread the server could not accept yet — a
+  // conversation whose first question has not been asked, or one renamed while
+  // offline. Held here and flushed by the next pull that finds the thread, so
+  // the server's own derived title ("first 60 characters of the question")
+  // never quietly replaces the name they chose.
+  const _pendingTitles = new Map();
+
+  function renameRemote(id, title) {
+    return _req(`/conversations/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title }),
+    }).catch(() => { _pendingTitles.set(id, title); });
+  }
+
+  // Returns the title the server ends up holding for this conversation.
+  async function _flushPendingTitle(summary) {
+    if (!_pendingTitles.has(summary.id)) return summary.title;
+    const title = _pendingTitles.get(summary.id);
+    _pendingTitles.delete(summary.id);
+    try {
+      const updated = await _req(`/conversations/${encodeURIComponent(summary.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title }),
+      });
+      return updated?.title || title;
+    } catch {
+      _pendingTitles.set(summary.id, title);   // still not there — try again later
+      return summary.title;
+    }
+  }
+
+  function deleteRemote(id) {
+    return _req(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      .catch(() => {});
+  }
+
+  function deleteAllRemote(ids) {
+    return Promise.all(ids.map(deleteRemote));
+  }
+
+  function start() {
+    refresh();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') refresh();
+    });
+    if (_timer) clearInterval(_timer);
+    _timer = setInterval(() => {
+      if (document.visibilityState === 'visible') refresh();
+    }, POLL_MS);
+  }
+
+  return { start, refresh, pull, renameRemote, deleteRemote, deleteAllRemote };
+})();
+
+// ── Sidebar (Chats + FAQ + Documents) ─────────────
+// Three tabs. "Rozmowy" is the list of the seller's chats — every one of them,
+// wherever it was started, since Sync keeps the list in step with the server.
+// The other two surface the most common questions
 // (aggregated across all conversations, so several phrasings of "new orders?"
 // collapse into one entry, shown as a short "nowe zamówienia"-style headline
 // rather than the raw question) and every document/summary the assistant has
@@ -788,6 +1074,43 @@ const Sidebar = (() => {
   let _faqCache = [];
   let _docsCache = [];
 
+  // Relative "kiedy ostatnio" stamp, so the list reads as a timeline of what
+  // the seller was working on rather than as a wall of identical rows.
+  function _when(ts) {
+    if (!ts) return '';
+    const mins = Math.floor((Date.now() - ts) / 60000);
+    if (mins < 1) return 'teraz';
+    if (mins < 60) return `${mins} min`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours} godz.`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days} dn.`;
+    return new Date(ts).toLocaleDateString('pl-PL', { day: 'numeric', month: 'short' });
+  }
+
+  function _renderChats() {
+    const el = document.getElementById('sidebar-chats');
+    if (!el) return;
+    const activeId = Store.activeId();
+    const convs = Store.all();
+    el.innerHTML = convs.length ? convs.map(c => {
+      const id = escHtml(c.id);
+      const title = c.title || 'Nowa rozmowa';
+      return `
+      <div class="sidebar-list-item conv-item${c.id === activeId ? ' active' : ''}"
+           onclick="Chat.loadConversation('${id}')" title="${escHtml(title)}">
+        <span class="sli-icon">💬</span>
+        <span class="sli-text">${escHtml(title)}</span>
+        <span class="sli-when">${escHtml(_when(c.updatedAt))}</span>
+        <button class="sli-act" title="Zmień nazwę"
+                onclick="event.stopPropagation();Chat.renameConversation('${id}')">✏</button>
+        <button class="sli-act sli-del" title="Usuń rozmowę"
+                onclick="event.stopPropagation();Chat.deleteConversation('${id}')">✕</button>
+      </div>`;
+    }).join('')
+      : '<p class="sidebar-empty">Nie masz jeszcze żadnych rozmów.</p>';
+  }
+
   function _renderFaq() {
     const el = document.getElementById('sidebar-faq');
     if (!el) return;
@@ -816,6 +1139,7 @@ const Sidebar = (() => {
   }
 
   function render() {
+    _renderChats();
     _renderFaq();
     _renderDocs();
   }
@@ -839,7 +1163,7 @@ const Sidebar = (() => {
   const TAB_KEY = 'ae_sidebar_tab';
 
   function switchTab(name) {
-    const panels = { faq: 'sidebar-faq', docs: 'sidebar-docs' };
+    const panels = { chats: 'sidebar-chats', faq: 'sidebar-faq', docs: 'sidebar-docs' };
     Object.keys(panels).forEach(key => {
       document.getElementById(panels[key])?.classList.toggle('hidden', key !== name);
       const tab = document.getElementById(`sidebar-tab-${key}`);
@@ -852,7 +1176,7 @@ const Sidebar = (() => {
 
   function initTab() {
     const saved = (() => { try { return localStorage.getItem(TAB_KEY); } catch { return null; } })();
-    switchTab(saved === 'docs' ? 'docs' : 'faq');
+    switchTab(['chats', 'faq', 'docs'].includes(saved) ? saved : 'chats');
   }
 
   return { render, ask, openDoc, switchTab, initTab };
@@ -1654,7 +1978,9 @@ const UI = (() => {
   }
 
   function clearAllHistory() {
-    if (!confirm('Usunąć całą historię rozmów?')) return;
+    if (!confirm('Usunąć całą historię rozmów? Zniknie ze wszystkich Twoich urządzeń.')) return;
+    // Server-side too, or the next sync would simply pull everything back.
+    Sync.deleteAllRemote(Store.all().filter(c => !c.local).map(c => c.id));
     Store.clearAll();
     Chat.newConversation();
     closeSettings();
@@ -2066,7 +2392,10 @@ const Chat = (() => {
   function sendSuggestion(btn) { send(btn.textContent); }
 
   function newConversation() {
-    Store.create();
+    // An empty conversation exists on this device only — it reaches the server
+    // (and therefore the seller's other devices) with its first question.
+    const existing = Store.active();
+    if (!existing || existing.messages.length) Store.create();
     renderSidebar();
     renderMessages();
     document.getElementById('sidebar').classList.remove('open');
@@ -2081,9 +2410,30 @@ const Chat = (() => {
   }
 
   function deleteConversation(id) {
+    const conv = Store.get(id);
+    if (!conv) return;
+    if (!confirm(`Usunąć rozmowę „${conv.title || 'Nowa rozmowa'}”? Zniknie ze wszystkich Twoich urządzeń.`)) return;
+    const wasActive = Store.activeId() === id;
     Store.deleteConv(id);
+    Sync.deleteRemote(id);   // gone on every device, not just this one
+    if (!Store.all().length) Store.create();
+    else if (wasActive) Store.setActive(Store.all()[0].id);
     renderSidebar();
     renderMessages();
+  }
+
+  function renameConversation(id) {
+    const conv = Store.get(id);
+    if (!conv) return;
+    const title = prompt('Nazwa rozmowy:', conv.title || '');
+    if (title === null) return;
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    Store.rename(id, trimmed);
+    // Fire it at the server even for a thread it has not seen yet — Sync holds
+    // the name and applies it as soon as the thread lands there.
+    Sync.renameRemote(id, Store.get(id).title);
+    renderSidebar();
   }
 
   function copyMessage(btn) {
@@ -2103,7 +2453,11 @@ const Chat = (() => {
     if (lastUser) await send(lastUser.content);
   }
 
-  return { send, handleKey, sendSuggestion, newConversation, loadConversation, deleteConversation, copyMessage, regenerate, retryLast, renderMessages };
+  return {
+    send, handleKey, sendSuggestion, newConversation, loadConversation,
+    deleteConversation, renameConversation, copyMessage, regenerate, retryLast,
+    renderMessages, isBusy: () => _waiting,
+  };
 })();
 
 // ── Allegro OAuth login ──────────────────────────────────────────────────
@@ -2316,6 +2670,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Deliver anything the assistant wrote while this device wasn't listening,
   // and keep watching for more while the app stays open.
   PendingChat.start();
+
+  // Pull the seller's conversations down from the server and keep them in step
+  // while the app is open — this is what makes a chat started on the desktop
+  // continue on the phone.
+  Sync.start();
 
   // Init monitors AFTER full UI setup so chat injection finds a ready DOM
   const _startParams = new URLSearchParams(location.search);
