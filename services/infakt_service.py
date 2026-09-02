@@ -28,6 +28,7 @@ API docs: https://github.com/infakt/API (KSeF specifics in ksef.md)
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -121,6 +122,7 @@ class InfaktService:
         invoice_payload: dict,
         poll_interval: float = 1.5,
         max_attempts: int = 40,
+        on_task_ref: "Callable[[str], Awaitable[None]] | None" = None,
     ) -> dict[str, Any]:
         """
         Create an invoice and poll until the async task resolves.
@@ -130,12 +132,21 @@ class InfaktService:
         codes and needs a moment to build the invoice, so one look at the task
         is not enough to tell "still working" from "failed".
 
+        `on_task_ref` is awaited with the task reference the moment the POST
+        returns, before any polling. Every outcome below except a clean
+        success leaves the caller unable to name the invoice, and the task
+        reference is what makes that recoverable later (see
+        unblock_invoice_for_order) — so it has to be handed over before the
+        outcome is known, not returned alongside it.
+
         Returns the final status payload (includes invoice_uuid on success).
         Raises InfaktTaskError if inFakt rejects the invoice (validation errors
         etc.), InfaktAPIError on a network/HTTP-level failure, or TimeoutError
         if the task is still pending after max_attempts.
         """
         task_ref = await self.create_invoice_async(invoice_payload)
+        if on_task_ref is not None:
+            await on_task_ref(task_ref)
         last_transient: InfaktAPIError | None = None
         for attempt in range(max_attempts):
             # Check first, sleep only between checks — a small invoice is often
@@ -338,8 +349,15 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         raise
 
     infakt = InfaktService.get_instance()
+
+    async def _remember_task_ref(task_ref: str) -> None:
+        # Stored before the outcome is known: if the polling below times out,
+        # this reference is the only way to ever ask inFakt what happened to
+        # this attempt (see unblock_invoice_for_order).
+        await invoice_ledger.record_task_ref(user_id, order_id, task_ref)
+
     try:
-        status = await infakt.create_invoice(payload)
+        status = await infakt.create_invoice(payload, on_task_ref=_remember_task_ref)
     except TimeoutError as exc:
         # The task was accepted by inFakt and simply hasn't finished within the
         # polling window — the invoice may still appear a moment later, so this
@@ -352,7 +370,8 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
             "jej wystawienia w czasie oczekiwania. Faktura prawdopodobnie i tak się utworzy — "
             "sprawdź panel inFakt za chwilę i NIE wystawiaj jej ponownie, dopóki tego nie "
             "zweryfikujesz (inaczej powstanie duplikat). Kolejne zlecenie dla tego zamówienia "
-            "i tak odrzucę.\n"
+            "i tak odrzucę — a jeśli faktury w inFakt nie będzie, napisz o tym, sprawdzę status "
+            "zlecenia w inFakt i odblokuję wystawianie.\n"
             f"Szczegóły: {exc}"
         )
     except (InfaktAPIError, InfaktTaskError) as exc:
@@ -370,7 +389,8 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         return (
             f"⚠️ inFakt potwierdził utworzenie faktury dla zamówienia `{order_id}`, ale nie zwrócił "
             "jej identyfikatora. Znajdź ją w panelu inFakt — nie wystawiam jej ponownie, bo "
-            "powstałby duplikat."
+            "powstałby duplikat. Jeśli jej tam nie ma, napisz o tym, sprawdzę zlecenie w inFakt "
+            "i odblokuję wystawianie."
         )
 
     await invoice_ledger.mark_issued(user_id, order_id, invoice_uuid)
@@ -400,4 +420,146 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         f"ID faktury w inFakt: `{invoice_uuid}`\n"
         f"Nabywca: {buyer_kind}.\n"
         "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
+    )
+
+
+# ── Unblocking an order the ledger holds ─────────────────────────────────────
+
+async def unblock_invoice_for_order(allegro, order_id: str, seller_confirmed: bool = False) -> str:
+    """Lift the duplicate block on ONE order — but only after checking inFakt.
+
+    The block exists because an unconfirmed issuance is more likely to have
+    created an invoice than not (see issue_invoice_for_order). It is still a
+    guess, and a wrong one strands the order: the reminder skips it and every
+    "wystaw fakturę" for it is refused, forever.
+
+    So this resolves the guess against inFakt rather than removing the block
+    on request. Every branch below either has an authoritative answer or
+    refuses:
+      * the invoice is attached to the order in Allegro → it exists, refuse;
+      * the ledger knows its uuid → GET the invoice: a 404 is inFakt saying
+        it does not exist (unblock), anything else means it does (refuse);
+      * the ledger knows the async task reference → re-read the task status,
+        which is the same source create_invoice polled: success names the
+        invoice (refuse, and record the uuid the timeout lost), a terminal
+        failure means nothing was created (unblock), still-processing means
+        ask again in a moment;
+      * nothing to check against — the claim was taken but the POST never
+        got far enough to produce a reference. Only here does the seller's
+        own "I looked, it is not there" decide it, and it has to be an
+        explicit statement, not an inference (`seller_confirmed`).
+    """
+    from services import invoice_ledger
+
+    user_id = getattr(allegro, "_user_id", "default")
+    record = await invoice_ledger.get(user_id, order_id)
+    if not record:
+        return (
+            f"Zamówienie `{order_id}`: nic nie blokuje wystawienia faktury — nie mam zapisanego "
+            "żadnego wystawienia dla tego zamówienia. Możesz je wystawić normalnie."
+        )
+
+    existing = await allegro.get_order_invoices(order_id)
+    if existing:
+        return (
+            f"Zamówienie `{order_id}`: faktura jest dołączona do zamówienia w Allegro, więc na "
+            "pewno istnieje — nie zdejmuję blokady."
+        )
+
+    infakt = InfaktService.get_instance()
+    invoice_uuid = record.get("invoice_uuid")
+
+    if invoice_uuid:
+        try:
+            invoice = await infakt.get_invoice(invoice_uuid)
+        except InfaktAPIError as exc:
+            if exc.status_code == 404:
+                await invoice_ledger.release(user_id, order_id)
+                logger.warning(
+                    "unblock_invoice_for_order: order %s unblocked — inFakt has no invoice %s",
+                    order_id, invoice_uuid,
+                )
+                return (
+                    f"✅ Zamówienie `{order_id}`: inFakt nie zna faktury `{invoice_uuid}` (404), "
+                    "więc jej tam nie ma. Zdjąłem blokadę — możesz wystawić fakturę dla tego "
+                    "zamówienia."
+                )
+            return (
+                f"❌ Zamówienie `{order_id}`: nie udało się sprawdzić faktury `{invoice_uuid}` "
+                f"w inFakt ({exc}). Nie zdejmuję blokady, dopóki nie wiem, czy faktura istnieje — "
+                "spróbuj ponownie za chwilę."
+            )
+        number = invoice.get("number") or invoice_uuid
+        return (
+            f"Zamówienie `{order_id}`: faktura {number} JEST w inFakt — nie zdejmuję blokady, bo "
+            "wystawienie drugiej dałoby duplikat.\n"
+            f"ID faktury w inFakt: `{invoice_uuid}`\n"
+            "Jeśli ta faktura jest błędna, skoryguj lub anuluj ją w panelu inFakt."
+        )
+
+    task_ref = record.get("task_ref")
+    if task_ref:
+        try:
+            status = await infakt.get_task_status(task_ref)
+        except InfaktAPIError as exc:
+            return (
+                f"❌ Zamówienie `{order_id}`: nie udało się sprawdzić w inFakt statusu zlecenia "
+                f"`{task_ref}` ({exc}). Nie zdejmuję blokady, dopóki nie wiem, czy faktura "
+                "powstała — spróbuj ponownie za chwilę."
+            )
+
+        code = status.get("processing_code")
+        if code == _PROCESSING_CODE_SUCCESS:
+            uuid_from_task = status.get("invoice_uuid")
+            if uuid_from_task:
+                # The invoice the timeout couldn't name. Record it, so the
+                # seller can now attach it or send it to KSeF like any other.
+                await invoice_ledger.mark_issued(user_id, order_id, uuid_from_task)
+                return (
+                    f"Zamówienie `{order_id}`: faktura jednak powstała — inFakt zakończył zlecenie "
+                    "sukcesem. Nie zdejmuję blokady.\n"
+                    f"ID faktury w inFakt: `{uuid_from_task}`\n"
+                    "Mogę ją dołączyć do zamówienia w Allegro albo wysłać do KSeF."
+                )
+            return (
+                f"Zamówienie `{order_id}`: inFakt zakończył zlecenie sukcesem, więc faktura "
+                "istnieje, ale nie zwrócił jej identyfikatora — nie zdejmuję blokady. Znajdź ją "
+                "w panelu inFakt."
+            )
+
+        if not isinstance(code, int) or code < _PROCESSING_CODE_TERMINAL_FROM:
+            return (
+                f"Zamówienie `{order_id}`: inFakt nadal przetwarza to zlecenie "
+                f"(status: {status.get('processing_description') or code}). Nie zdejmuję blokady — "
+                "zapytaj ponownie za chwilę, wtedy będzie już wiadomo, czy faktura powstała."
+            )
+
+        await invoice_ledger.release(user_id, order_id)
+        logger.warning(
+            "unblock_invoice_for_order: order %s unblocked — inFakt task %s failed (%s)",
+            order_id, task_ref, code,
+        )
+        return (
+            f"✅ Zamówienie `{order_id}`: inFakt odrzucił tamto zlecenie "
+            f"({status.get('processing_description') or code}), więc faktura nie powstała. "
+            "Zdjąłem blokadę — możesz wystawić fakturę dla tego zamówienia."
+        )
+
+    if not seller_confirmed:
+        return (
+            f"⚠️ Zamówienie `{order_id}`: nie mam po czym sprawdzić tamtej próby w inFakt — nie "
+            "znam ani numeru faktury, ani numeru zlecenia. Sprawdź w panelu inFakt, czy faktura "
+            "dla tego zamówienia tam jest. Jeśli NIE MA jej tam, napisz mi to wprost, a zdejmę "
+            "blokadę."
+        )
+
+    await invoice_ledger.release(user_id, order_id)
+    logger.warning(
+        "unblock_invoice_for_order: order %s unblocked on the seller's confirmation "
+        "(no invoice_uuid, no task_ref to verify against)",
+        order_id,
+    )
+    return (
+        f"✅ Zamówienie `{order_id}`: zdjąłem blokadę na Twoje potwierdzenie, że faktury nie ma "
+        "w inFakt. Możesz teraz wystawić ją normalnie."
     )

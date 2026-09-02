@@ -147,6 +147,22 @@ class TestCreateInvoicePolling:
         assert status["invoice_uuid"] == INVOICE_UUID
         await svc.aclose()
 
+    async def test_task_reference_is_handed_over_before_any_polling(self):
+        """The reference has to reach the caller even when the poll never
+        resolves — that timed-out case is the only one that needs it."""
+        seen: list[str] = []
+
+        async def remember(task_ref: str) -> None:
+            seen.append(task_ref)
+
+        svc, _ = await _service([_pending(140, "Zlecenie jest w trakcie przetwarzania")])
+        with pytest.raises(TimeoutError):
+            await svc.create_invoice(
+                {"services": []}, poll_interval=0, max_attempts=2, on_task_ref=remember,
+            )
+        assert seen == [TASK_REF]
+        await svc.aclose()
+
     async def test_client_error_on_status_check_raises_immediately(self):
         """A 401/404 will not fix itself — don't spend the whole poll budget."""
         from services.infakt_service import InfaktAPIError
@@ -366,3 +382,248 @@ class TestIssueInvoiceForOrderShareLink:
         assert INVOICE_UUID in out
         assert "nie wystawiaj jej ponownie" in out
         assert "Nie udało się wystawić faktury" not in out
+
+
+class TestUnblockInvoiceForOrder:
+    """The escape hatch for the guard above.
+
+    The guard errs towards "the invoice probably exists", so an issuance that
+    really did fail unrecorded would strand the order for good. Unblocking
+    resolves that against inFakt — the seller's word only decides when there
+    is nothing left to ask inFakt about.
+    """
+
+    async def _unblock(self, allegro, infakt, **kwargs):
+        from unittest.mock import patch
+
+        import services.infakt_service as infakt_service
+
+        with patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt):
+            return await infakt_service.unblock_invoice_for_order(allegro, "ORD-1", **kwargs)
+
+    async def _issue_with(self, allegro, infakt):
+        """Run a real issuance so the ledger ends up in the state under test."""
+        from unittest.mock import patch
+
+        import services.infakt_service as infakt_service
+
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt):
+            return await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+    async def test_nothing_blocked_says_so(self):
+        from unittest.mock import AsyncMock
+
+        out = await self._unblock(_fake_allegro(), AsyncMock())
+        assert "nic nie blokuje" in out
+
+    async def test_invoice_missing_from_infakt_clears_the_block(self):
+        """inFakt answering 404 for the recorded invoice is the one thing that
+        proves the block was protecting nothing."""
+        from unittest.mock import AsyncMock
+
+        import services.infakt_service as infakt_service
+        from services.infakt_service import InfaktAPIError
+
+        allegro = _fake_allegro()
+        infakt = AsyncMock()
+        infakt.create_invoice.return_value = {"invoice_uuid": INVOICE_UUID}
+        infakt.get_share_link.return_value = "https://infakt.example/share/1"
+        await self._issue_with(allegro, infakt)
+
+        infakt.get_invoice.side_effect = InfaktAPIError(404, "Not Found")
+        out = await self._unblock(allegro, infakt)
+
+        assert "✅" in out
+        # …and the order is issuable again.
+        infakt.create_invoice.reset_mock()
+        assert "✅" in await self._issue_with(allegro, infakt)
+        assert infakt.create_invoice.await_count == 1
+
+    async def test_invoice_present_in_infakt_keeps_the_block(self):
+        from unittest.mock import AsyncMock
+
+        allegro = _fake_allegro()
+        infakt = AsyncMock()
+        infakt.create_invoice.return_value = {"invoice_uuid": INVOICE_UUID}
+        infakt.get_share_link.return_value = "https://infakt.example/share/1"
+        await self._issue_with(allegro, infakt)
+
+        infakt.get_invoice.return_value = {"number": "FV/7/2026"}
+        out = await self._unblock(allegro, infakt)
+
+        assert "FV/7/2026" in out
+        assert "nie zdejmuję blokady" in out
+
+    async def test_infakt_unreachable_keeps_the_block(self):
+        """Not knowing is not the same as knowing it isn't there."""
+        from unittest.mock import AsyncMock
+
+        from services.infakt_service import InfaktAPIError
+
+        allegro = _fake_allegro()
+        infakt = AsyncMock()
+        infakt.create_invoice.return_value = {"invoice_uuid": INVOICE_UUID}
+        infakt.get_share_link.return_value = "https://infakt.example/share/1"
+        await self._issue_with(allegro, infakt)
+
+        infakt.get_invoice.side_effect = InfaktAPIError(500, "boom")
+        out = await self._unblock(allegro, infakt)
+
+        assert "❌" in out
+        assert "Nie zdejmuję blokady" in out
+
+    async def test_attached_in_allegro_keeps_the_block(self):
+        from unittest.mock import AsyncMock
+
+        from services import invoice_ledger
+
+        allegro = _fake_allegro(existing_invoices=[{"id": "inv-1"}])
+        await invoice_ledger.mark_issued("user1", "ORD-1", INVOICE_UUID)
+
+        out = await self._unblock(allegro, AsyncMock())
+        assert "nie zdejmuję blokady" in out
+
+
+class TestUnblockAfterATimeout:
+    """A timed-out issuance leaves no invoice_uuid — only the inFakt task
+    reference recorded before polling started. That reference is what makes
+    the block recoverable without anyone guessing."""
+
+    async def _timed_out_issuance(self, task_status_side_effect=None):
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+
+        allegro = _fake_allegro()
+        infakt = AsyncMock()
+
+        async def create_invoice(payload, on_task_ref=None, **kwargs):
+            await on_task_ref(TASK_REF)
+            raise TimeoutError("still pending")
+
+        infakt.create_invoice.side_effect = create_invoice
+
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt):
+            await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+        return allegro, infakt
+
+    async def test_task_reference_is_recorded_before_the_polling_starts(self):
+        from services import invoice_ledger
+
+        await self._timed_out_issuance()
+        record = await invoice_ledger.get("user1", "ORD-1")
+        assert record["task_ref"] == TASK_REF
+
+    async def test_a_failed_task_clears_the_block(self):
+        from unittest.mock import patch
+
+        import services.infakt_service as infakt_service
+
+        allegro, infakt = await self._timed_out_issuance()
+        infakt.get_task_status.return_value = {
+            "processing_code": 400, "processing_description": "Nieprawidłowe dane faktury",
+        }
+
+        with patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt):
+            out = await infakt_service.unblock_invoice_for_order(allegro, "ORD-1")
+
+        assert "✅" in out
+        assert "Nieprawidłowe dane faktury" in out
+
+    async def test_a_succeeded_task_keeps_the_block_and_recovers_the_uuid(self):
+        """The invoice the timeout couldn't name — recovering its id here is
+        what lets the seller attach it or send it to KSeF afterwards."""
+        from unittest.mock import patch
+
+        import services.infakt_service as infakt_service
+        from services import invoice_ledger
+
+        allegro, infakt = await self._timed_out_issuance()
+        infakt.get_task_status.return_value = {
+            "processing_code": 201, "invoice_uuid": INVOICE_UUID,
+        }
+
+        with patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt):
+            out = await infakt_service.unblock_invoice_for_order(allegro, "ORD-1")
+
+        assert INVOICE_UUID in out
+        assert "Nie zdejmuję blokady" in out
+        record = await invoice_ledger.get("user1", "ORD-1")
+        assert record["invoice_uuid"] == INVOICE_UUID
+
+    async def test_a_still_processing_task_keeps_the_block(self):
+        from unittest.mock import patch
+
+        import services.infakt_service as infakt_service
+
+        allegro, infakt = await self._timed_out_issuance()
+        infakt.get_task_status.return_value = {
+            "processing_code": 140, "processing_description": "Zlecenie jest w trakcie przetwarzania",
+        }
+
+        with patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt):
+            out = await infakt_service.unblock_invoice_for_order(allegro, "ORD-1")
+
+        assert "nadal przetwarza" in out
+        assert "✅" not in out
+
+
+class TestUnblockOnTheSellersWord:
+    """Last resort: no invoice id and no task reference to check against."""
+
+    async def _claimed_only(self):
+        from services import invoice_ledger
+
+        allegro = _fake_allegro()
+        await invoice_ledger.claim("user1", "ORD-1")
+        return allegro
+
+    async def test_without_explicit_confirmation_the_block_stays(self):
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+
+        allegro = await self._claimed_only()
+        with patch.object(infakt_service.InfaktService, "get_instance", return_value=AsyncMock()):
+            out = await infakt_service.unblock_invoice_for_order(allegro, "ORD-1")
+
+        assert "⚠️" in out
+        assert "Sprawdź w panelu inFakt" in out
+
+    async def test_explicit_confirmation_clears_the_block(self):
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+        from services import invoice_ledger
+
+        allegro = await self._claimed_only()
+        with patch.object(infakt_service.InfaktService, "get_instance", return_value=AsyncMock()):
+            out = await infakt_service.unblock_invoice_for_order(
+                allegro, "ORD-1", seller_confirmed=True,
+            )
+
+        assert "✅" in out
+        assert await invoice_ledger.get("user1", "ORD-1") is None
+
+    async def test_confirmation_does_not_override_a_verifiable_invoice(self):
+        """seller_confirmed is a last resort, not an override — an invoice
+        inFakt can still be asked about is checked, not taken on faith."""
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+        from services import invoice_ledger
+
+        allegro = _fake_allegro()
+        await invoice_ledger.mark_issued("user1", "ORD-1", INVOICE_UUID)
+        infakt = AsyncMock()
+        infakt.get_invoice.return_value = {"number": "FV/7/2026"}
+
+        with patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt):
+            out = await infakt_service.unblock_invoice_for_order(
+                allegro, "ORD-1", seller_confirmed=True,
+            )
+
+        assert "nie zdejmuję blokady" in out
+        assert await invoice_ledger.get("user1", "ORD-1") is not None

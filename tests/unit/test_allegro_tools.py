@@ -119,6 +119,13 @@ class TestMatchedLabels:
         from agents.allegro.allegro_tools import matched_labels
         assert matched_labels("co klient odebrał") == {"zamowienia"}
 
+    def test_unblock_phrasing_that_names_no_invoice_word_still_finds_the_label(self):
+        """"odblokuj to zamówienie" is the natural follow-up to a refused
+        issuance — without a stem for it the invoice tools get filtered out of
+        the very turn that needs unblock_invoice_for_order."""
+        from agents.allegro.allegro_tools import matched_labels
+        assert "faktury" in matched_labels("odblokuj to zamówienie")
+
     def test_english_query_matches(self):
         from agents.allegro.allegro_tools import matched_labels
         assert "zamowienia" in matched_labels("show me my new orders")

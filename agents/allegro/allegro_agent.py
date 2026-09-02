@@ -371,6 +371,16 @@ class AllegroAgent(BaseAgent):
         "A question about WHETHER invoices are pending ('czy mam faktury do wystawienia?', "
         "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
         "never issue_invoice_for_order or preview_pending_invoices for a yes/no question.\n"
+        "REFUSED AS ALREADY ISSUED: when issue_invoice_for_order answers that the invoice was already "
+        "issued or already ordered for that order ('faktura została już wystawiona', 'nie wystawiam "
+        "drugiej', 'nie zlecam tego drugi raz'), that is a duplicate guard, not a failure — do NOT call "
+        "issue_invoice_for_order again for that order, whatever the user says. Report what the tool said. "
+        "ONLY if the user then states the invoice is not actually in inFakt ('nie ma tam takiej faktury', "
+        "'odblokuj to zamówienie') call unblock_invoice_for_order — it re-checks inFakt itself and clears "
+        "the block only if inFakt confirms nothing was created. Pass seller_confirmed=true ONLY when the "
+        "user explicitly said they looked in the inFakt panel and the invoice is not there; otherwise "
+        "leave it out. After the block is cleared, issuing still takes a separate "
+        "issue_invoice_for_order call.\n"
         "AFTER ISSUING AN INVOICE (issue_invoice_for_order succeeded) — delivering it further:\n"
         "  - attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
         "Allegro order, so the buyer sees it on their order page. Needs order_id + invoice_uuid "
@@ -2020,6 +2030,21 @@ class AllegroAgent(BaseAgent):
 
         return await issue_invoice_for_order(self._allegro, order_id, self._settings.is_production)
 
+    async def _unblock_invoice_for_order(self, order_id: str, seller_confirmed: bool) -> str:
+        """Re-check inFakt and lift the duplicate block on one order, if inFakt agrees.
+
+        The counterpart to the guard in issue_invoice_for_order: that guard
+        deliberately errs towards "the invoice probably exists", which would
+        otherwise strand an order whose issuance really did fail unrecorded.
+        This does NOT issue anything — see
+        services.infakt_service.unblock_invoice_for_order for which branch is
+        allowed to clear the block and why the seller's own word only counts
+        when there is nothing left to ask inFakt about.
+        """
+        from services.infakt_service import unblock_invoice_for_order
+
+        return await unblock_invoice_for_order(self._allegro, order_id, seller_confirmed)
+
     async def _attach_invoice_to_allegro_order(self, order_id: str, invoice_uuid: str) -> str:
         """Fetch the invoice PDF from inFakt and attach it to the Allegro order.
 
@@ -3047,6 +3072,11 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "issue_invoice_for_order":
             return await self._issue_invoice_for_order(tool_input["order_id"])
+
+        if tool_name == "unblock_invoice_for_order":
+            return await self._unblock_invoice_for_order(
+                tool_input["order_id"], bool(tool_input.get("seller_confirmed")),
+            )
 
         if tool_name == "attach_invoice_to_allegro_order":
             return await self._attach_invoice_to_allegro_order(

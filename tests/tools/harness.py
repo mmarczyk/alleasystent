@@ -68,7 +68,7 @@ class ToolHarness:
 async def tool_harness(monitors: dict[str, bool] | None = None, empty: bool = False):
     """Yield a ToolHarness with fake transports and monitoring flags installed."""
     from config.settings import get_settings
-    from services import monitor_state, order_monitor
+    from services import invoice_ledger, monitor_state, order_monitor
     from services.allegro_service import AllegroService
     from services.infakt_service import InfaktService
 
@@ -116,6 +116,15 @@ async def tool_harness(monitors: dict[str, bool] | None = None, empty: bool = Fa
     prev_instances = dict(AllegroService._instances)
     AllegroService._instances[USER_ID] = allegro
 
+    # The duplicate-invoice ledger (services/invoice_ledger.py) is Redis-backed
+    # state that deliberately outlives a single tool call — with REDIS_URL empty
+    # it falls back to a process-local dict, which would otherwise carry one
+    # case's issuance into the next and turn every later "wystaw fakturę" for
+    # the same order into a refused duplicate. Each harness gets a clean one,
+    # like each gets a fresh fake store.
+    prev_ledger = dict(invoice_ledger._MEMORY)
+    invoice_ledger._MEMORY.clear()
+
     from agents.allegro.allegro_agent import AllegroAgent
 
     agent = AllegroAgent(user_id=USER_ID)
@@ -123,6 +132,8 @@ async def tool_harness(monitors: dict[str, bool] | None = None, empty: bool = Fa
     try:
         yield ToolHarness(agent, allegro_api, infakt_api)
     finally:
+        invoice_ledger._MEMORY.clear()
+        invoice_ledger._MEMORY.update(prev_ledger)
         order_monitor.is_monitor_enabled = prev_order
         monitor_state.is_monitor_enabled = prev_kind
         InfaktService._instance = prev_infakt_instance

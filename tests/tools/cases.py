@@ -246,6 +246,11 @@ CASES: list[Case] = [
          f"Wystaw fakturę dla zamówienia {ds.ORD_3}",
          ("nie poprosił o fakturę",),
          note="Kupujący nie chciał faktury — nic nie zostaje wystawione."),
+    Case("unblock_invoice_for_order", "unblock_invoice_for_order", {"order_id": ds.ORD_1},
+         f"Odblokuj wystawianie faktury dla zamówienia {ds.ORD_1}",
+         ("nic nie blokuje",), no_api=True,
+         note="Nic nie było wystawiane dla tego zamówienia — nie ma czego odblokowywać "
+              "i nie ma po co pytać inFaktu."),
     Case("attach_invoice_to_allegro_order", "attach_invoice_to_allegro_order",
          {"order_id": ds.ORD_1, "invoice_uuid": ds.INFAKT_INVOICE_UUID},
          "Dołącz tę fakturę do zamówienia w Allegro",

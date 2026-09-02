@@ -60,6 +60,31 @@ class TestClaim:
         assert blocked.record["invoice_uuid"] == "uuid-1"
 
 
+class TestRecordTaskRef:
+    async def test_decorates_an_open_claim(self):
+        from services import invoice_ledger
+        await invoice_ledger.claim("user1", "ORD-1")
+        await invoice_ledger.record_task_ref("user1", "ORD-1", "task-77")
+        assert (await invoice_ledger.get("user1", "ORD-1"))["task_ref"] == "task-77"
+
+    async def test_never_creates_a_claim_of_its_own(self):
+        """It only ever annotates an issuance already in flight — inventing a
+        record here would block an order nobody tried to invoice."""
+        from services import invoice_ledger
+        await invoice_ledger.record_task_ref("user1", "ORD-1", "task-77")
+        assert await invoice_ledger.get("user1", "ORD-1") is None
+        assert (await invoice_ledger.claim("user1", "ORD-1")).acquired is True
+
+    async def test_does_not_touch_an_already_issued_record(self):
+        from services import invoice_ledger
+        await invoice_ledger.claim("user1", "ORD-1")
+        await invoice_ledger.mark_issued("user1", "ORD-1", "uuid-1")
+        await invoice_ledger.record_task_ref("user1", "ORD-1", "task-77")
+        record = await invoice_ledger.get("user1", "ORD-1")
+        assert record["status"] == invoice_ledger.STATUS_ISSUED
+        assert "task_ref" not in record
+
+
 class TestRelease:
     async def test_released_order_can_be_claimed_again(self):
         """A rejection by inFakt creates nothing, so the seller must be able

@@ -74,6 +74,65 @@ async def test_tool_case_hits_the_api(case: Case):
 # ── Regressions found by reading the captured screenshots ────────────────────
 
 
+async def test_the_same_order_cannot_be_invoiced_twice():
+    """The whole reason services/invoice_ledger.py exists: an invoice issued in
+    inFakt and not attached to the Allegro order is invisible to Allegro, so
+    the second "wystaw fakturę" for it used to create a second real invoice."""
+    from tests.tools import dataset as ds
+    from tests.tools.harness import tool_harness
+
+    async with tool_harness() as h:
+        first = await h.run("issue_invoice_for_order", {"order_id": ds.ORD_1})
+        second = await h.run("issue_invoice_for_order", {"order_id": ds.ORD_1})
+        posts = [c for c in h.infakt_api.calls if c == ("POST", "/api/v3/async/invoices.json")]
+
+    assert first.startswith("✅"), first
+    assert len(posts) == 1, f"inFakt was asked to create {len(posts)} invoices"
+    assert "nie wystawiam drugiej" in second, second
+
+
+async def test_unblocking_refuses_while_the_invoice_is_really_in_infakt():
+    """Unblocking asks inFakt rather than taking the request at face value —
+    an invoice that is there keeps the block, however it is asked for."""
+    from tests.tools import dataset as ds
+    from tests.tools.harness import tool_harness
+
+    async with tool_harness() as h:
+        await h.run("issue_invoice_for_order", {"order_id": ds.ORD_1})
+        out = await h.run(
+            "unblock_invoice_for_order", {"order_id": ds.ORD_1, "seller_confirmed": True},
+        )
+        blocked_again = await h.run("issue_invoice_for_order", {"order_id": ds.ORD_1})
+
+    assert "nie zdejmuję blokady" in out, out
+    assert ds.INFAKT_INVOICE_UUID in out
+    assert "nie wystawiam drugiej" in blocked_again
+
+
+async def test_unblocking_recovers_the_invoice_id_a_timeout_lost():
+    """A timed-out issuance leaves no invoice id — only the task reference
+    recorded before polling. Re-reading that task both keeps the block honest
+    and hands back the id the seller needs to attach the invoice or send it
+    to KSeF."""
+    from unittest.mock import patch
+
+    from tests.tools import dataset as ds
+    from tests.tools.harness import tool_harness
+
+    async with tool_harness() as h:
+        # Longer than issue_invoice_for_order's polling budget, so the call
+        # gives up while inFakt is still working on the invoice.
+        h.infakt_api.pending_codes = [140] * 40
+        with patch("asyncio.sleep"):
+            timed_out = await h.run("issue_invoice_for_order", {"order_id": ds.ORD_1})
+        out = await h.run("unblock_invoice_for_order", {"order_id": ds.ORD_1})
+
+    assert timed_out.startswith("⏳"), timed_out
+    assert ds.INFAKT_INVOICE_UUID not in timed_out
+    assert "Nie zdejmuję blokady" in out, out
+    assert ds.INFAKT_INVOICE_UUID in out
+
+
 async def test_preview_invoices_keeps_the_id_placeholder():
     """Chat replies render as markdown, so a bare <id> is parsed as an HTML tag
     and dropped — the hint has to survive as literal text."""

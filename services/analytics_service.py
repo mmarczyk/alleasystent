@@ -65,6 +65,7 @@ _TOOL_LABELS = {
     "get_orders_pending_invoice":      "Faktury do wystawienia",
     "get_order_invoice_data":          "Dane do faktury",
     "issue_invoice_for_order":         "Wystawianie faktury",
+    "unblock_invoice_for_order":       "Odblokowanie faktury",
     "preview_pending_invoices":        "Podgląd faktur",
     "attach_invoice_to_allegro_order": "Załączanie faktury",
     "send_invoice_to_ksef":            "Wysyłka do KSeF",

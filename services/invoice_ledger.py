@@ -24,6 +24,13 @@ claim that we cannot rule out — the poll timing out, a status payload without
 an invoice_uuid — deliberately STAYS, because a stale claim costs one manual
 check in the inFakt panel while a wrong release costs a duplicate VAT invoice.
 
+A claim that outlives the invoice it was protecting would lock the order out
+for good, so the claim also carries whatever inFakt told us about the attempt
+— the invoice_uuid once known, and before that the task reference from the
+async POST. Both are lookups the seller can't do but we can, which is what
+services/infakt_service.unblock_invoice_for_order uses to answer "does this
+invoice actually exist?" against inFakt instead of against a guess.
+
 Redis is the store (shared by the chat process and the Cloud Run monitor job,
 which are separate processes — an in-process guard would not see the other
 one). Without REDIS_URL it degrades to a process-local dict: still enough to
@@ -126,6 +133,39 @@ async def claim(user_id: str, order_id: str) -> Claim:
         await r.aclose()
 
     return Claim(False, _decode(raw))
+
+
+async def record_task_ref(user_id: str, order_id: str, task_ref: str) -> None:
+    """Note which inFakt task this claim is waiting on.
+
+    Written as soon as the async POST returns, i.e. before anyone knows
+    whether the invoice was created. That ordering is the point: if the poll
+    then times out or the process dies, the task reference is the only handle
+    left on an attempt whose outcome is unknown, and
+    infakt_service.unblock_invoice_for_order asks inFakt about it rather than
+    asking the seller to guess.
+
+    Only ever decorates an existing claim — it never creates one, and never
+    touches a record that already resolved to an issued invoice.
+    """
+    key = _key(user_id, order_id)
+
+    url = _redis_url()
+    if not url:
+        record = _MEMORY.get(key)
+        if record is not None and record.get("status") == STATUS_CLAIMED:
+            record["task_ref"] = task_ref
+        return
+
+    r = _connect(url)
+    try:
+        record = _decode(await r.get(key))
+        if record is None or record.get("status") != STATUS_CLAIMED:
+            return
+        record["task_ref"] = task_ref
+        await r.set(key, json.dumps(record), ex=_TTL)
+    finally:
+        await r.aclose()
 
 
 async def mark_issued(
@@ -231,7 +271,8 @@ def describe(order_id: str, record: dict[str, Any] | None) -> str:
         f"Zamówienie `{order_id}`: wystawienie faktury zostało już zlecone inFaktowi"
         + (f" ({claimed_at})" if claimed_at else "")
         + ", ale nie potwierdzono jego zakończenia — nie zlecam tego drugi raz, "
-        "bo powstałby duplikat. Sprawdź fakturę w panelu inFakt."
+        "bo powstałby duplikat. Sprawdź fakturę w panelu inFakt.\n"
+        "Jeśli tej faktury tam nie ma, napisz o tym — sprawdzę to w inFakt i zdejmę blokadę."
     )
 
 

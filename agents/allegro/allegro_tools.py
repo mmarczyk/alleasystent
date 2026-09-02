@@ -935,6 +935,44 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "unblock_invoice_for_order",
+            "description": (
+                "Re-check inFakt and, only if inFakt agrees no invoice exists, lift the duplicate "
+                "block that is stopping ONE order from being invoiced. This ISSUES NOTHING — it "
+                "verifies against inFakt and at most clears the block, after which the user can ask "
+                "to issue the invoice normally. "
+                "Use ONLY when BOTH hold: (a) an issuance for that order was refused as already "
+                "done or already ordered ('faktura została już wystawiona', 'nie zlecam tego drugi "
+                "raz', 'nie wystawiam drugiej'), and (b) the user says the invoice is not actually "
+                "in inFakt — 'nie ma tam tej faktury', 'w inFakt tego nie ma', 'to zamówienie jednak "
+                "nie ma faktury', 'odblokuj to zamówienie'. "
+                "NEVER call this to force through an issuance the user simply repeated, and never as "
+                "a reaction to an issuance that failed for any other reason (bad data, API error) — "
+                "those are not blocked and can just be retried with issue_invoice_for_order."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
+                    "seller_confirmed": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true ONLY when the user has explicitly stated that they looked in the "
+                            "inFakt panel and the invoice for this order is NOT there. Never set it "
+                            "because it seems likely, because the user is insisting, or to get past the "
+                            "check. It is used only as a last resort, when inFakt itself has nothing left "
+                            "to verify against — a wrong true creates a duplicate VAT invoice. "
+                            "Default false."
+                        ),
+                    },
+                },
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "attach_invoice_to_allegro_order",
             "description": (
                 "Download the invoice PDF from inFakt and attach it to the corresponding Allegro order, "
@@ -1307,6 +1345,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_order_invoice_data": "chat",
     "preview_pending_invoices": "action",
     "issue_invoice_for_order": "action",
+    "unblock_invoice_for_order": "action",
     "attach_invoice_to_allegro_order": "action",
     "send_invoice_to_ksef": "action",
     # Zwroty i reklamacje
@@ -1385,6 +1424,7 @@ _TOOL_LABELS: dict[str, str] = {
     "get_order_invoice_data":          "faktury",
     "preview_pending_invoices":        "faktury",
     "issue_invoice_for_order":         "faktury",
+    "unblock_invoice_for_order":       "faktury",
     "attach_invoice_to_allegro_order": "faktury",
     "send_invoice_to_ksef":            "faktury",
     # zwroty (incl. reklamacje — Allegro treats them as related but distinct
@@ -1434,7 +1474,12 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
     "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),
     "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz", "bilans"),
-    "faktury":    ("faktur", "nip", "ksef", "vat"),
+    # "odblok" is here for unblock_invoice_for_order: the seller's follow-up
+    # is often just "odblokuj to zamówienie", which names no invoice word at
+    # all. The refusal it answers does say "faktura", so history usually
+    # carries the label anyway — this covers the turn where it doesn't, and
+    # nothing else in the app is unblocked.
+    "faktury":    ("faktur", "nip", "ksef", "vat", "odblok"),
     # A buyer question names the person, not the order: "lista kupujących",
     # "jakie firmy u mnie kupowały", "zestawienie kontrahentów". "nip"/"firm"
     # are shared with the invoice vocabulary on purpose — "kupujący z NIP-em"
