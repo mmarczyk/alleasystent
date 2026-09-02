@@ -80,11 +80,24 @@ def _delivery(
     dispatch_to: str,
     tracking: str | None = None,
     pickup_point: str | None = None,
+    recipient: str = "",
 ) -> dict:
+    """`recipient` is "Imię Nazwisko" (or a company name) on delivery.address —
+    the name get_buyers falls back to for a buyer who never asked for an
+    invoice, so it must be present on every order the way Allegro sends it."""
+    first, _, last = recipient.partition(" ")
     d: dict = {
         "method": {"id": method_id, "name": method_name},
         "cost": _price(cost),
         "time": {"dispatch": {"from": hours_ago(24), "to": dispatch_to}},
+        "address": {
+            "firstName": first,
+            "lastName": last,
+            "street": "ul. Testowa 1",
+            "city": "Warszawa",
+            "zipCode": "00-001",
+            "countryCode": "PL",
+        },
     }
     if tracking:
         d["smart"] = {"trackingCode": tracking}
@@ -104,7 +117,8 @@ CHECKOUT_FORMS: list[dict] = [
         "boughtAt": in_month(1.3),
         "summary": {"totalToPay": _price(429.98)},
         "delivery": _delivery("INPOST_LOCKER", "Allegro Paczkomaty InPost", 9.99,
-                              hours_ahead(20), pickup_point="POZ01A — Poznań, ul. Głogowska 12"),
+                              hours_ahead(20), pickup_point="POZ01A — Poznań, ul. Głogowska 12",
+                              recipient="Anna Kowalska"),
         "lineItems": [
             _line_item("14587236901", "Ekspres do kawy DeLonghi Magnifica S ECAM", 1, 399.99),
             _line_item("14587236955", "Filtr wody do ekspresu DLSC002", 1, 30.00),
@@ -132,7 +146,7 @@ CHECKOUT_FORMS: list[dict] = [
         "boughtAt": in_month(2.5),
         "summary": {"totalToPay": _price(899.00)},
         # Deadline already blown → "⚠️ po terminie" marker in every order view.
-        "delivery": _delivery("DPD", "Kurier DPD", 14.99, hours_ago(6)),
+        "delivery": _delivery("DPD", "Kurier DPD", 14.99, hours_ago(6), recipient="Marek Zieliński"),
         "lineItems": [
             _line_item("14587301122", "Odkurzacz pionowy Dyson V12 Detect Slim", 1, 899.00),
         ],
@@ -157,7 +171,8 @@ CHECKOUT_FORMS: list[dict] = [
         "payment": {"type": "ONLINE", "finishedAt": hours_ago(3)},
         "boughtAt": hours_ago(3.5),
         "summary": {"totalToPay": _price(137.70)},
-        "delivery": _delivery("INPOST_COURIER", "Kurier InPost", 12.99, hours_ahead(44)),
+        "delivery": _delivery("INPOST_COURIER", "Kurier InPost", 12.99, hours_ahead(44),
+                              recipient="Katarzyna Wójcik"),
         "lineItems": [
             _line_item("14587355001", "Czajnik elektryczny Bosch TWK7203", 1, 109.00),
             _line_item("14587355044", "Zestaw filtrów Brita Maxtra+ 3 szt.", 1, 28.70),
@@ -173,7 +188,7 @@ CHECKOUT_FORMS: list[dict] = [
         "boughtAt": in_month(3.2),
         "summary": {"totalToPay": _price(259.00)},
         "delivery": _delivery("DPD", "Kurier DPD", 14.99, hours_ahead(8),
-                              tracking="1234567890PL"),
+                              tracking="1234567890PL", recipient="Tomasz Nowak"),
         "lineItems": [
             _line_item("14587377310", "Blender kielichowy Philips HR2291", 1, 259.00),
         ],
@@ -189,7 +204,8 @@ CHECKOUT_FORMS: list[dict] = [
         "summary": {"totalToPay": _price(74.98)},
         "delivery": _delivery("INPOST_LOCKER", "Allegro Paczkomaty InPost", 8.99,
                               hours_ahead(30), tracking="620012345678901234567890",
-                              pickup_point="WRO24M — Wrocław, ul. Legnicka 58"),
+                              pickup_point="WRO24M — Wrocław, ul. Legnicka 58",
+                              recipient="Agnieszka Maj"),
         "lineItems": [
             _line_item("14587355044", "Zestaw filtrów Brita Maxtra+ 3 szt.", 2, 28.70),
             _line_item("14587399881", "Ściereczki z mikrofibry 10 szt.", 1, 17.58),
@@ -205,7 +221,7 @@ CHECKOUT_FORMS: list[dict] = [
         "boughtAt": in_month(6.2),
         "summary": {"totalToPay": _price(1249.00)},
         "delivery": _delivery("DHL", "Kurier DHL", 16.99, in_month(5.0),
-                              tracking="JJD000390007312345678"),
+                              tracking="JJD000390007312345678", recipient="Paweł Bąk"),
         "lineItems": [
             _line_item("14587401234", "Ekspres do kawy DeLonghi Magnifica S ECAM", 1, 1249.00),
         ],

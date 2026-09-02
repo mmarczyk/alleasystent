@@ -781,9 +781,11 @@ class TestBuyersReport:
 
     @staticmethod
     def _order(order_id, login, price, *, company="", nip="", first="", last="",
-               invoice_required=False, paid_at="2026-03-04T10:00:00Z"):
+               invoice_required=False, paid_at="2026-03-04T10:00:00Z",
+               recipient="", recipient_company=""):
         from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine
 
+        recipient_first, _, recipient_last = recipient.partition(" ")
         return AllegroOrder(
             order_id=order_id,
             buyer_login=login,
@@ -794,6 +796,14 @@ class TestBuyersReport:
             currency="PLN",
             created_at=paid_at,
             paid_at=paid_at,
+            delivery={
+                "method": {"id": "dpd", "name": "Kurier DPD"},
+                "address": {
+                    "firstName": recipient_first,
+                    "lastName": recipient_last,
+                    "companyName": recipient_company,
+                },
+            } if (recipient or recipient_company) else {},
             line_items=[AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=1, price=price)],
             invoice_required=invoice_required,
             invoice_buyer=AllegroInvoiceBuyer(
@@ -823,8 +833,12 @@ class TestBuyersReport:
             self._order("c2", "anna.firma", 600.0, company="Kawa i Spółka", nip="7792445588",
                         invoice_required=True, paid_at="2026-05-01T10:00:00Z"),
             self._order("p1", "marek", 899.0, first="Marek", last="Zieliński",
-                        invoice_required=True, paid_at="2026-03-01T10:00:00Z"),
-            self._order("p2", "kasia", 137.7, paid_at="2026-04-01T10:00:00Z"),
+                        invoice_required=True, paid_at="2026-03-01T10:00:00Z",
+                        recipient="Marek Zieliński"),
+            # No invoice at all — the name can only come from the parcel's
+            # delivery address.
+            self._order("p2", "kasia", 137.7, paid_at="2026-04-01T10:00:00Z",
+                        recipient="Katarzyna Wójcik"),
         ]
 
     @pytest.mark.asyncio
@@ -837,11 +851,53 @@ class TestBuyersReport:
         assert rows == [
             "| Kawa i Spółka | Firma | 7792445588 | `anna.firma`, `anna` | 2 | 1000,00 PLN | 01.05.2026 |",
             "| Marek Zieliński | Osoba prywatna | — | `marek` | 1 | 899,00 PLN | 01.03.2026 |",
-            "| kasia | Osoba prywatna | — | `kasia` | 1 | 137,70 PLN | 01.04.2026 |",
+            "| Katarzyna Wójcik | Osoba prywatna | — | `kasia` | 1 | 137,70 PLN | 01.04.2026 |",
         ]
         assert result.splitlines()[0] == "# Kupujący"
         # The summary is LAST — that is the half the chat bubble shows.
         assert result.splitlines()[-1].startswith("**3** kupujących w okresie")
+
+    @pytest.mark.asyncio
+    async def test_buyer_column_names_the_person_not_their_allegro_login(self):
+        """The name comes from the invoice address, else from whoever the parcel
+        was addressed to — a login like `kasia.w` is a machine handle, and it
+        has its own column."""
+        agent = self._agent_with([
+            self._order("i1", "kasia.w", 100.0, first="Katarzyna", last="Wójcik",
+                        invoice_required=True, recipient="Kasia W"),
+            self._order("d1", "tomek.nowak", 90.0, recipient="Tomasz Nowak"),
+            self._order("f1", "biuro77", 80.0, recipient_company="Biuro Serwis sp. z o.o."),
+        ])
+
+        result = await agent._dispatch("get_buyers", {})
+
+        assert "| Katarzyna Wójcik |" in result   # invoice name wins over delivery
+        assert "| Tomasz Nowak |" in result       # no invoice → delivery address
+        assert "| Biuro Serwis sp. z o.o. |" in result  # delivery company name
+        for login in ("| kasia.w |", "| tomek.nowak |", "| biuro77 |"):
+            assert login not in result, f"{login} rendered as a buyer name"
+
+    @pytest.mark.asyncio
+    async def test_login_is_the_last_resort_when_no_order_names_the_buyer(self):
+        agent = self._agent_with([self._order("n1", "anonim22", 50.0)])
+
+        result = await agent._dispatch("get_buyers", {})
+
+        assert "| anonim22 | Osoba prywatna | — | `anonim22` | 1 |" in result
+
+    @pytest.mark.asyncio
+    async def test_name_falls_back_to_an_older_order_that_has_one(self):
+        """Newest-first, but a nameless newest order must not blank out a buyer
+        the seller can identify from their previous one."""
+        agent = self._agent_with([
+            self._order("new", "kasia", 10.0, paid_at="2026-06-01T10:00:00Z"),
+            self._order("old", "kasia", 10.0, paid_at="2026-01-01T10:00:00Z",
+                        recipient="Katarzyna Wójcik"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {})
+
+        assert "| Katarzyna Wójcik |" in result
 
     @pytest.mark.asyncio
     async def test_company_filter_keeps_only_buyers_with_invoice_company_data(self):
@@ -860,7 +916,7 @@ class TestBuyersReport:
         result = await agent._dispatch("get_buyers", {"buyer_type": "person"})
 
         assert "Kawa i Spółka" not in result
-        assert "Marek Zieliński" in result and "`kasia`" in result
+        assert "Marek Zieliński" in result and "Katarzyna Wójcik" in result
 
     @pytest.mark.asyncio
     async def test_issued_filter_keeps_only_orders_with_an_invoice_attached(self):
@@ -942,8 +998,8 @@ class TestBuyersReport:
         def first_row(result):
             return [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1]
 
-        assert first_row(by_orders).startswith("| kasia |")   # 3 orders, lowest value
-        assert first_row(by_recent).startswith("| kasia |")   # bought most recently
+        assert first_row(by_orders).startswith("| Katarzyna Wójcik |")  # 3 orders, lowest value
+        assert first_row(by_recent).startswith("| Katarzyna Wójcik |")  # bought most recently
         assert first_row(await agent._dispatch("get_buyers", {})).startswith("| Kawa i Spółka |")
 
     @pytest.mark.asyncio

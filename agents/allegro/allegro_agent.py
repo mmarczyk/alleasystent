@@ -1682,6 +1682,23 @@ class AllegroAgent(BaseAgent):
             return "firma", buyer.company_name.strip().lower()
         return "login", order.buyer_login
 
+    @staticmethod
+    def _delivery_recipient(order: Any) -> str:
+        """Who the parcel is addressed to, from delivery.address: the company
+        name when the recipient gave one, otherwise their first and last name.
+
+        This is the second-best name Allegro carries after the invoice address —
+        every order has it, including the ones where nobody asked for an invoice.
+        Empty only when Allegro returned no delivery address at all.
+        """
+        address = order.delivery.get("address") if isinstance(order.delivery, dict) else None
+        if not isinstance(address, dict):
+            return ""
+        company = (address.get("companyName") or "").strip()
+        if company:
+            return company
+        return f"{address.get('firstName') or ''} {address.get('lastName') or ''}".strip()
+
     @classmethod
     def _aggregate_buyers(
         cls, orders: list[Any], invoice_flags: dict[str, bool | None]
@@ -1695,7 +1712,7 @@ class AllegroAgent(BaseAgent):
             if group is None:
                 buyer = order.invoice_buyer
                 group = groups[key] = {
-                    "name": buyer.display_name or order.buyer_login or "—",
+                    "name": "",
                     "is_company": buyer.is_company,
                     "vat_id": buyer.vat_id,
                     "logins": [],
@@ -1705,6 +1722,14 @@ class AllegroAgent(BaseAgent):
                     "invoices": 0,
                     "last_bought": "",
                 }
+            if not group["name"]:
+                # Newest-first iteration, so this is the most recent order that
+                # actually names the buyer: the invoice address if there is one,
+                # otherwise whoever the parcel was addressed to. The Allegro
+                # login is a machine handle ("kasia.w"), never a name — it only
+                # steps in below when the order carries neither, and it has its
+                # own column anyway.
+                group["name"] = order.invoice_buyer.display_name or cls._delivery_recipient(order)
             if order.buyer_login and order.buyer_login not in group["logins"]:
                 group["logins"].append(order.buyer_login)
             group["orders"] += 1
@@ -1715,6 +1740,8 @@ class AllegroAgent(BaseAgent):
             # (sort_by='recent', and max() here) and what _format_dt_pl needs to
             # render the date in Warsaw local time at the end.
             group["last_bought"] = max(group["last_bought"], order.paid_at or order.created_at or "")
+        for group in groups.values():
+            group["name"] = group["name"] or (group["logins"] or ["—"])[0]
         return list(groups.values())
 
     async def _invoice_flags(self, orders: list[Any]) -> tuple[dict[str, bool | None], int]:
