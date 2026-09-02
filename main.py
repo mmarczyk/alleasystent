@@ -237,7 +237,14 @@ async def allegro_auth_status(request: Request):
     if service._tokens is None:
         return {"status": "idle", "authenticated": False}
 
-    return {"status": "authorized", "authenticated": True}
+    # Scopes come along so a "brak uprawnień" can be diagnosed without having to
+    # reproduce the failing call: the token carries them, and they only change
+    # when the seller logs in again.
+    return {
+        "status": "authorized",
+        "authenticated": True,
+        "scopes": service.token_scopes(),
+    }
 
 
 @app.get("/allegro/callback", tags=["Auth"])

@@ -3,6 +3,7 @@ from __future__ import annotations
 """Allegro REST API client with OAuth2 device-flow authentication."""
 
 import asyncio
+import base64
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,46 @@ _BILLING_WINDOW_DAYS = 31
 # Per window: 200 pages × 100 entries. A month of billing never comes close —
 # the cap only exists so a paging bug can't spin forever.
 _BILLING_MAX_PAGES = 200
+
+# Allegro grants a token exactly the scopes the app was authorized with, and
+# rejects anything outside them with 403 — so a missing scope looks like a
+# permission problem on the account, which it isn't. Naming the scope a call
+# needs lets the 403 say which one is absent instead of leaving it to guesswork.
+SCOPE_BILLING_READ = "allegro:api:billing:read"
+SCOPE_ORDERS_WRITE = "allegro:api:orders:write"
+
+# Allegro's own limit on an order's invoice attachment.
+INVOICE_FILE_MAX_BYTES = 3 * 1024 * 1024
+
+
+def decode_token_scopes(access_token: str | None) -> list[str] | None:
+    """Scopes carried by an Allegro access token, or None if they can't be read.
+
+    Allegro issues JWTs, and the payload's `scope` claim is the authoritative
+    answer to "may this token do that" — asking it locally turns a bare 403
+    into a message that names the missing permission. The signature is
+    irrelevant here (Allegro already validated it; this only reports what the
+    token says about itself), so it is not checked. Anything unparseable —
+    a mock token, a format change — reads as None, i.e. "unknown", never as
+    "no scopes".
+    """
+    if not access_token:
+        return None
+    parts = access_token.split(".")
+    if len(parts) != 3:
+        return None
+    payload_b64 = parts[1]
+    try:
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return None
+    scope = payload.get("scope")
+    if isinstance(scope, str):
+        return scope.split()
+    if isinstance(scope, list):
+        return [str(s) for s in scope]
+    return None
 
 
 def parse_invoice_buyer(checkout_form: dict[str, Any]) -> AllegroInvoiceBuyer:
@@ -178,9 +219,37 @@ async def exchange_allegro_code(code: str, redirect_uri: str | None = None) -> t
 
 
 class AllegroAPIError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, code: str = "", user_message: str = ""):
         self.status_code = status_code
+        self.code = code
+        self.user_message = user_message
         super().__init__(f"Allegro API error {status_code}: {detail}")
+
+
+def _api_error(response: httpx.Response) -> AllegroAPIError:
+    """Turn an error response into an AllegroAPIError carrying Allegro's own wording.
+
+    Allegro answers failures with {"errors": [{"code", "message", "userMessage"}]}.
+    Dumping that JSON verbatim at the seller ("Allegro API error 403: {...}")
+    hides the one sentence that explains the problem, so the parsed userMessage
+    becomes the exception's detail and stays available on the exception for
+    callers that build their own message. Anything unparseable falls back to
+    the raw body, which is what this always used to show.
+    """
+    raw = response.text[:500]
+    try:
+        errors = response.json().get("errors") or []
+        first = errors[0] if isinstance(errors, list) and errors else {}
+    except Exception:
+        first = {}
+    if not isinstance(first, dict):
+        first = {}
+    code = str(first.get("code") or "")
+    user_message = str(first.get("userMessage") or first.get("message") or "")
+    detail = user_message or raw
+    if code and user_message:
+        detail = f"{user_message} ({code})"
+    return AllegroAPIError(response.status_code, detail, code=code, user_message=user_message)
 
 
 def is_thread_unread(thread: dict[str, Any]) -> bool:
@@ -472,6 +541,23 @@ class AllegroService:
             await self._save_tokens()
             logger.info("Allegro tokens refreshed")
 
+    def token_scopes(self) -> list[str] | None:
+        """Scopes on the currently loaded access token, or None when unknown."""
+        if self._tokens is None:
+            return None
+        return decode_token_scopes(self._tokens.access_token)
+
+    def has_scope(self, scope: str) -> bool | None:
+        """True/False when the token's scopes can be read, None when they can't.
+
+        Three-valued on purpose: "we cannot tell" must not be reported to the
+        seller as "you are missing the permission".
+        """
+        scopes = self.token_scopes()
+        if scopes is None:
+            return None
+        return scope in scopes
+
     async def _get_headers(self) -> dict[str, str]:
         if self._tokens is None:
             await self._load_tokens_from_redis()
@@ -494,7 +580,7 @@ class AllegroService:
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
-            raise AllegroAPIError(resp.status_code, resp.text[:500])
+            raise _api_error(resp)
         return resp.json()
 
     async def _post(self, path: str, body: dict) -> dict[str, Any]:
@@ -504,7 +590,7 @@ class AllegroService:
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
-            raise AllegroAPIError(resp.status_code, resp.text[:500])
+            raise _api_error(resp)
         return resp.json()
 
     async def _put_bytes(self, path: str, content: bytes, content_type: str) -> None:
@@ -515,7 +601,7 @@ class AllegroService:
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
-            raise AllegroAPIError(resp.status_code, resp.text[:500])
+            raise _api_error(resp)
 
     # ── Orders ────────────────────────────────────────────────────────────────
 
@@ -728,6 +814,7 @@ class AllegroService:
         """POST .../invoices — register invoice metadata on the order, return Allegro's invoice id.
 
         Must be followed by upload_order_invoice_file() with the same id.
+        Needs the SCOPE_ORDERS_WRITE scope on the token.
         """
         body: dict[str, Any] = {"file": {"name": filename}}
         if invoice_number:
@@ -737,7 +824,13 @@ class AllegroService:
         return data["id"]
 
     async def upload_order_invoice_file(self, order_id: str, allegro_invoice_id: str, pdf_bytes: bytes) -> None:
-        """PUT .../invoices/{invoiceId}/file — upload the actual PDF (max 2MB, one per order)."""
+        """PUT .../invoices/{invoiceId}/file — upload the actual PDF.
+
+        Allegro takes up to 10 invoices per order, each at most
+        INVOICE_FILE_MAX_BYTES. Needs the SCOPE_ORDERS_WRITE scope on the token;
+        without it the upload comes back 403 and the seller is told they lack
+        permission to add invoices.
+        """
         await self._put_bytes(
             f"/order/checkout-forms/{order_id}/invoices/{allegro_invoice_id}/file",
             pdf_bytes,
