@@ -1849,6 +1849,40 @@ const InvoiceReminder = (() => {
   return { isEnabled, enable, disable };
 })();
 
+// ── Unread-message reminder ──────────────────────
+// Nags in chat for as long as a buyer message stays unread
+// (services/message_reminder.py), on the same Cloud Run pass and the same
+// 2h/7:00-20:00 cadence as InvoiceReminder. Distinct from MessageMonitor,
+// which pushes once when a message ARRIVES: this one is about messages that
+// stay unanswered, so both can be on at the same time without duplicating.
+// Toggle only — no push subscription, since it is delivered as a chat message.
+const MessageReminder = (() => {
+  const ENABLED_KEY = 'ae_message_reminder_enabled';
+
+  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
+
+  async function enable() {
+    localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/message-reminder/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+    UI.toast('✓ Przypomnienia o nieprzeczytanych wiadomościach włączone — napiszę Ci na czacie (co 2h, 7:00-20:00)');
+    document.querySelectorAll('.btn-message-reminder').forEach(btn => {
+      btn.outerHTML = '<span class="monitoring-badge">✓ Przypomnienia o wiadomościach aktywne</span>';
+    });
+    return true;
+  }
+
+  function disable() {
+    localStorage.removeItem(ENABLED_KEY);
+    fetch(Settings.api('/allegro/message-reminder/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+  }
+
+  return { isEnabled, enable, disable };
+})();
+
 // ── Notifications (bell icon panel) ──────────────
 const Notifications = (() => {
   let _items = [];
@@ -2036,6 +2070,7 @@ const UI = (() => {
     document.getElementById('set-toggle-messages').checked = MessageMonitor.isEnabled();
     document.getElementById('set-toggle-returns').checked = ReturnsMonitor.isEnabled();
     document.getElementById('set-toggle-invoice-reminder').checked = InvoiceReminder.isEnabled();
+    document.getElementById('set-toggle-message-reminder').checked = MessageReminder.isEnabled();
     document.getElementById('set-toggle-theme').checked = Theme.isDark();
     updateVersionInfo();
   }
@@ -2059,6 +2094,10 @@ const UI = (() => {
 
   function toggleInvoiceReminder(on) {
     if (on) InvoiceReminder.enable(); else InvoiceReminder.disable();
+  }
+
+  function toggleMessageReminder(on) {
+    if (on) MessageReminder.enable(); else MessageReminder.disable();
   }
 
   function toggleDarkTheme(on) {
@@ -2093,7 +2132,7 @@ const UI = (() => {
   return {
     toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
     toggleOrderMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
-    toggleInvoiceReminder, toggleDarkTheme,
+    toggleInvoiceReminder, toggleMessageReminder, toggleDarkTheme,
   };
 })();
 
