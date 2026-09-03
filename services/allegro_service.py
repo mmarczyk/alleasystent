@@ -3,6 +3,7 @@ from __future__ import annotations
 """Allegro REST API client with OAuth2 device-flow authentication."""
 
 import asyncio
+import base64
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,59 @@ logger = logging.getLogger(__name__)
 # Allegro rate-limits per second, and the seller is waiting on the answer — 8 is
 # fast enough for a few hundred orders without hammering the API.
 _INVOICE_LOOKUP_CONCURRENCY = 8
+
+# Statuses worth a second attempt: the request was fine, Allegro just couldn't
+# serve it now. 0 is our own marker for a network error/timeout (see _get).
+_RETRYABLE_STATUSES = frozenset({0, 429, 500, 502, 503, 504})
+
+# Billing listings are fetched one month-sized window at a time rather than as a
+# single year-long range: a yearly sales summary is thousands of entries, and
+# one long chain of pages is one 429 or timeout away from losing the whole cost
+# report. Windows are independent, so a hiccup costs a retry of one window.
+_BILLING_WINDOW_DAYS = 31
+# Per window: 200 pages × 100 entries. A month of billing never comes close —
+# the cap only exists so a paging bug can't spin forever.
+_BILLING_MAX_PAGES = 200
+
+# Allegro grants a token exactly the scopes the app was authorized with, and
+# rejects anything outside them with 403 — so a missing scope looks like a
+# permission problem on the account, which it isn't. Naming the scope a call
+# needs lets the 403 say which one is absent instead of leaving it to guesswork.
+SCOPE_BILLING_READ = "allegro:api:billing:read"
+SCOPE_ORDERS_WRITE = "allegro:api:orders:write"
+
+# Allegro's own limit on an order's invoice attachment.
+INVOICE_FILE_MAX_BYTES = 3 * 1024 * 1024
+
+
+def decode_token_scopes(access_token: str | None) -> list[str] | None:
+    """Scopes carried by an Allegro access token, or None if they can't be read.
+
+    Allegro issues JWTs, and the payload's `scope` claim is the authoritative
+    answer to "may this token do that" — asking it locally turns a bare 403
+    into a message that names the missing permission. The signature is
+    irrelevant here (Allegro already validated it; this only reports what the
+    token says about itself), so it is not checked. Anything unparseable —
+    a mock token, a format change — reads as None, i.e. "unknown", never as
+    "no scopes".
+    """
+    if not access_token:
+        return None
+    parts = access_token.split(".")
+    if len(parts) != 3:
+        return None
+    payload_b64 = parts[1]
+    try:
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return None
+    scope = payload.get("scope")
+    if isinstance(scope, str):
+        return scope.split()
+    if isinstance(scope, list):
+        return [str(s) for s in scope]
+    return None
 
 
 def parse_invoice_buyer(checkout_form: dict[str, Any]) -> AllegroInvoiceBuyer:
@@ -165,9 +219,37 @@ async def exchange_allegro_code(code: str, redirect_uri: str | None = None) -> t
 
 
 class AllegroAPIError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, code: str = "", user_message: str = ""):
         self.status_code = status_code
+        self.code = code
+        self.user_message = user_message
         super().__init__(f"Allegro API error {status_code}: {detail}")
+
+
+def _api_error(response: httpx.Response) -> AllegroAPIError:
+    """Turn an error response into an AllegroAPIError carrying Allegro's own wording.
+
+    Allegro answers failures with {"errors": [{"code", "message", "userMessage"}]}.
+    Dumping that JSON verbatim at the seller ("Allegro API error 403: {...}")
+    hides the one sentence that explains the problem, so the parsed userMessage
+    becomes the exception's detail and stays available on the exception for
+    callers that build their own message. Anything unparseable falls back to
+    the raw body, which is what this always used to show.
+    """
+    raw = response.text[:500]
+    try:
+        errors = response.json().get("errors") or []
+        first = errors[0] if isinstance(errors, list) and errors else {}
+    except Exception:
+        first = {}
+    if not isinstance(first, dict):
+        first = {}
+    code = str(first.get("code") or "")
+    user_message = str(first.get("userMessage") or first.get("message") or "")
+    detail = user_message or raw
+    if code and user_message:
+        detail = f"{user_message} ({code})"
+    return AllegroAPIError(response.status_code, detail, code=code, user_message=user_message)
 
 
 def is_thread_unread(thread: dict[str, Any]) -> bool:
@@ -346,8 +428,11 @@ class AllegroService:
                 auth=(self._settings.allegro_client_id, self._settings.allegro_client_secret),
                 data={
                     "client_id": self._settings.allegro_client_id,
+                    # billing:read is what /billing/billing-entries needs — without it
+                    # every cost figure in the sales summary comes back 403.
                     "scope": "allegro:api:sale:offers:read allegro:api:orders:read "
-                             "allegro:api:orders:write allegro:api:messaging",
+                             "allegro:api:orders:write allegro:api:messaging "
+                             "allegro:api:billing:read",
                 },
             )
             # Allegro may return 302 with JSON body, or 200 directly
@@ -456,6 +541,23 @@ class AllegroService:
             await self._save_tokens()
             logger.info("Allegro tokens refreshed")
 
+    def token_scopes(self) -> list[str] | None:
+        """Scopes on the currently loaded access token, or None when unknown."""
+        if self._tokens is None:
+            return None
+        return decode_token_scopes(self._tokens.access_token)
+
+    def has_scope(self, scope: str) -> bool | None:
+        """True/False when the token's scopes can be read, None when they can't.
+
+        Three-valued on purpose: "we cannot tell" must not be reported to the
+        seller as "you are missing the permission".
+        """
+        scopes = self.token_scopes()
+        if scopes is None:
+            return None
+        return scope in scopes
+
     async def _get_headers(self) -> dict[str, str]:
         if self._tokens is None:
             await self._load_tokens_from_redis()
@@ -478,7 +580,7 @@ class AllegroService:
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
-            raise AllegroAPIError(resp.status_code, resp.text[:500])
+            raise _api_error(resp)
         return resp.json()
 
     async def _post(self, path: str, body: dict) -> dict[str, Any]:
@@ -488,7 +590,7 @@ class AllegroService:
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
-            raise AllegroAPIError(resp.status_code, resp.text[:500])
+            raise _api_error(resp)
         return resp.json()
 
     async def _put_bytes(self, path: str, content: bytes, content_type: str) -> None:
@@ -499,7 +601,7 @@ class AllegroService:
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise AllegroAPIError(0, f"Network error: {exc}") from exc
         if resp.status_code >= 400:
-            raise AllegroAPIError(resp.status_code, resp.text[:500])
+            raise _api_error(resp)
 
     # ── Orders ────────────────────────────────────────────────────────────────
 
@@ -712,6 +814,7 @@ class AllegroService:
         """POST .../invoices — register invoice metadata on the order, return Allegro's invoice id.
 
         Must be followed by upload_order_invoice_file() with the same id.
+        Needs the SCOPE_ORDERS_WRITE scope on the token.
         """
         body: dict[str, Any] = {"file": {"name": filename}}
         if invoice_number:
@@ -721,7 +824,13 @@ class AllegroService:
         return data["id"]
 
     async def upload_order_invoice_file(self, order_id: str, allegro_invoice_id: str, pdf_bytes: bytes) -> None:
-        """PUT .../invoices/{invoiceId}/file — upload the actual PDF (max 2MB, one per order)."""
+        """PUT .../invoices/{invoiceId}/file — upload the actual PDF.
+
+        Allegro takes up to 10 invoices per order, each at most
+        INVOICE_FILE_MAX_BYTES. Needs the SCOPE_ORDERS_WRITE scope on the token;
+        without it the upload comes back 403 and the seller is told they lack
+        permission to add invoices.
+        """
         await self._put_bytes(
             f"/order/checkout-forms/{order_id}/invoices/{allegro_invoice_id}/file",
             pdf_bytes,
@@ -948,28 +1057,102 @@ class AllegroService:
         logger.info("get_billing_entries_for_order %s TOTAL: %d entries", order_id, len(all_entries))
         return all_entries
 
-    async def get_billing_entries_in_period(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
-        """Fetch all billing entries in a date range (paginated)."""
-        all_entries: list[dict[str, Any]] = []
+    @staticmethod
+    def _split_period(date_from: str, date_to: str, window_days: int) -> list[tuple[str, str]]:
+        """Cut [date_from, date_to] into windows of at most `window_days`.
+
+        Windows share their boundary instant (both bounds are inclusive on the
+        Allegro side), so nothing that occurred exactly on a boundary can slip
+        between two windows; callers de-duplicate by entry id.
+        """
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        start = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+        if end <= start:
+            return [(date_from, date_to)]
+        windows: list[tuple[str, str]] = []
+        cursor = start
+        step = timedelta(days=window_days)
+        while cursor < end:
+            window_end = min(cursor + step, end)
+            windows.append((cursor.strftime(fmt), window_end.strftime(fmt)))
+            cursor = window_end
+        return windows
+
+    async def _get_with_retry(
+        self, path: str, params: dict | list | None = None, attempts: int = 3
+    ) -> dict[str, Any]:
+        """GET that retries the transient failures (429, 5xx, network) with backoff.
+
+        Anything else — a 403 for a missing scope, a 400 for a bad filter — is
+        raised on the first try: retrying it would only make the caller wait.
+        """
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._get(path, params=params)
+            except AllegroAPIError as exc:
+                if attempt == attempts or exc.status_code not in _RETRYABLE_STATUSES:
+                    raise
+                delay = 2.0 ** (attempt - 1)
+                logger.warning(
+                    "GET %s failed (%s), retry %d/%d in %.0fs",
+                    path, exc, attempt, attempts - 1, delay,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _get_billing_window(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+        """All billing entries of one window, paginated."""
+        entries: list[dict[str, Any]] = []
         page_size = 100
-        offset = 0
-        while True:
+        for page in range(_BILLING_MAX_PAGES):
             params = {
                 "occurredAt.gte": date_from,
                 "occurredAt.lte": date_to,
                 "limit": page_size,
-                "offset": offset,
+                "offset": page * page_size,
             }
-            data = await self._get("/billing/billing-entries", params=params)
-            entries = data.get("billingEntries", [])
-            all_entries.extend(entries)
+            data = await self._get_with_retry("/billing/billing-entries", params=params)
+            page_entries = data.get("billingEntries", [])
+            entries.extend(page_entries)
+            if len(page_entries) < page_size:
+                return entries
+        logger.warning(
+            "get_billing_entries_in_period: window %s – %s hit the %d-page cap (%d entries) — "
+            "cost data for it may be incomplete",
+            date_from[:10], date_to[:10], _BILLING_MAX_PAGES, len(entries),
+        )
+        return entries
+
+    async def get_billing_entries_in_period(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+        """Fetch all billing entries in a date range (windowed + paginated).
+
+        Requires the `allegro:api:billing:read` scope on the token; without it
+        Allegro answers 403 and the caller has to say so rather than report
+        zero costs.
+        """
+        windows = self._split_period(date_from, date_to, _BILLING_WINDOW_DAYS)
+        all_entries: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for window_from, window_to in windows:
+            entries = await self._get_billing_window(window_from, window_to)
+            new = 0
+            for entry in entries:
+                entry_id = entry.get("id")
+                if entry_id:
+                    if entry_id in seen_ids:
+                        continue
+                    seen_ids.add(entry_id)
+                all_entries.append(entry)
+                new += 1
             logger.info(
-                "get_billing_entries_in_period: offset=%d → %d entries (total so far: %d)",
-                offset, len(entries), len(all_entries),
+                "get_billing_entries_in_period: window %s – %s → %d entries (%d new, total: %d)",
+                window_from[:10], window_to[:10], len(entries), new, len(all_entries),
             )
-            if len(entries) < page_size:
-                break
-            offset += page_size
+        logger.info(
+            "get_billing_entries_in_period: %d window(s) %s – %s → %d entries",
+            len(windows), date_from[:10], date_to[:10], len(all_entries),
+        )
         return all_entries
 
     async def get_carriers(self) -> list[dict[str, Any]]:
