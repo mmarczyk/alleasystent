@@ -95,6 +95,8 @@ _TOOL_LABELS = {
     # read as a name instead of a raw tool id.
     "suggest_invoice_monitoring":      "Monitoring faktur",
     "disable_invoice_monitoring":      "Monitoring faktur",
+    "suggest_message_reminder":        "Przypomnienia o wiadomościach",
+    "disable_message_reminder":        "Przypomnienia o wiadomościach",
     "suggest_message_monitoring":      "Monitoring wiadomości",
     "disable_message_monitoring":      "Monitoring wiadomości",
     "suggest_returns_monitoring":      "Monitoring zwrotów",

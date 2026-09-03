@@ -177,7 +177,7 @@ _EMPTY_REPLY_FALLBACK = (
 def _last_assistant_text(session) -> str | None:
     """The last thing the assistant said in this thread, or None if it hasn't
     spoken yet. Used to tell which open question a short reply ("tak") is
-    answering — see the invoice-reminder check in Orchestrator.handle().
+    answering — see the reminder check in Orchestrator.handle().
 
     Deliberately not age-limited like the history sent to the agents: a stale
     question is exactly the case where a bare "tak" must NOT be read as
@@ -248,38 +248,42 @@ class Orchestrator:
                 sender_id=message.sender_id,
             )
 
-        # Give the invoice reminder first look at every incoming message: if it
-        # has an open "wystawić faktury?" ask outstanding for this user, this
-        # interprets the reply (issue now / snooze / snooze-for-how-long /
-        # turn reminders off) and answers directly. Its STATE lives in Redis
+        # An open REMINDER — unissued invoices (services/invoice_reminder.py)
+        # or unread buyer messages (services/message_reminder.py) — gets first
+        # refusal on this message, because it may be the answer to a question
+        # the assistant asked proactively. Both keep their STATE in Redis
         # rather than in this session, since the seller may reply from a
-        # different chat thread than the one the reminder was written into
-        # (see services/invoice_reminder.py's module docstring).
+        # different chat thread than the reminder was written into (see those
+        # modules' docstrings).
         #
-        # The last assistant turn of THIS thread still goes with it, because
-        # Redis state alone cannot tell "tak" answering the reminder from "tak"
+        # The last assistant turn of THIS thread goes with it, because Redis
+        # state alone cannot tell "tak" answering a reminder from "tak"
         # answering whatever the assistant asked a second ago ("Masz 1 nową
         # wiadomość. Pokazać szczegóły?"). Without it that "tak" was taken as
-        # consent and issued real VAT invoices. A message unrelated to an open
-        # reminder falls through unchanged.
+        # consent and issued real VAT invoices.
+        #
+        # services/reminder_router.py picks between them and, when a reply
+        # could belong to either, asks the seller which one instead of
+        # guessing. A message unrelated to any open reminder falls through
+        # unchanged.
         if user_id:
-            with perf.stage("invoice_reminder_check"):
+            with perf.stage("reminder_check"):
                 try:
-                    from services.invoice_reminder import handle_reply as _handle_invoice_reminder_reply
-                    reminder_text = await _handle_invoice_reminder_reply(
+                    from services.reminder_router import handle_reply as _handle_reminder_reply
+                    reminder_text = await _handle_reminder_reply(
                         user_id, message.text, _last_assistant_text(session),
                     )
                 except Exception as exc:
-                    logger.warning("Invoice reminder reply handling failed: %s", exc)
+                    logger.warning("Reminder reply handling failed: %s", exc)
                     reminder_text = None
             if reminder_text is not None:
-                response = AgentResponse(text=reminder_text, agent_type="invoice_reminder")
+                response = AgentResponse(text=reminder_text, agent_type="reminder")
                 session.add_message(MessageRole.USER, message.text)
                 session.add_message(
                     MessageRole.ASSISTANT, response.text, {"agent": response.agent_type},
                 )
                 await self._session_store.save_session(session)
-                perf.log(source="invoice_reminder", channel=message.channel)
+                perf.log(source="reminder", channel=message.channel)
                 return response
 
         # Classify the data source

@@ -1014,6 +1014,36 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "suggest_message_reminder",
+            "description": (
+                "Present the user with a button to enable the automatic unread-MESSAGE REMINDER — "
+                "a scheduled check (every 2h, 7:00-20:00) that asks the seller IN CHAT whenever a "
+                "buyer message is still UNREAD, lists those threads on request, and reschedules "
+                "itself if the seller asks to be reminded later (remembering for how long). "
+                "Different from suggest_message_monitoring: the MONITOR pushes once the moment a "
+                "message ARRIVES, this REMINDER keeps asking for as long as something STAYS "
+                "unread. Call it when the user wants to be nagged/reminded about messages they "
+                "have not answered yet, or is worried about missing or forgetting messages. "
+                "Do NOT call multiple times in one conversation."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_message_reminder",
+            "description": (
+                "Show a button to disable the automatic unread-message REMINDER in the browser — "
+                "the one that asks in chat about messages that are still unread. Call it when the "
+                "user asks to stop being reminded or nagged about unanswered messages."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "suggest_message_monitoring",
             "description": (
                 "Present the user with a button to enable automatic monitoring of new/unread buyer "
@@ -1316,6 +1346,8 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # Monitoring (przyciski w UI)
     "suggest_order_monitoring": "action",
     "suggest_invoice_reminder": "action",
+    "suggest_message_reminder": "action",
+    "disable_message_reminder": "action",
     "suggest_message_monitoring": "action",
     "suggest_returns_monitoring": "action",
     "disable_order_monitoring": "action",
@@ -1402,6 +1434,8 @@ _TOOL_LABELS: dict[str, str] = {
     "disable_order_monitoring":        "monitoring",
     "suggest_invoice_reminder":        "monitoring",
     "disable_invoice_reminder":        "monitoring",
+    "suggest_message_reminder":        "monitoring",
+    "disable_message_reminder":        "monitoring",
     "suggest_message_monitoring":      "monitoring",
     "disable_message_monitoring":      "monitoring",
     "suggest_returns_monitoring":      "monitoring",
