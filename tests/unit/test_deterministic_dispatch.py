@@ -308,6 +308,23 @@ class TestMonitoringToggles:
             assert _resolve(query) == ("suggest_invoice_reminder", {}), query
 
 
+class TestNamedBuyerAccount:
+    """No matcher here extracts a buyer login — they resolve arguments from
+    stage/period wording alone — so a query naming one bails to the LLM instead
+    of answering about one buyer with the whole store's listing."""
+
+    @pytest.mark.parametrize("query", [
+        "co mam do wysłania dla konta np1988",
+        "ile zamówień od kupującego marek_zielinski",
+        "nowe zamówienia użytkownika anna.kowalska88",
+    ])
+    def test_named_login_bails_to_the_llm(self, query):
+        assert _resolve(query) is None
+
+    def test_the_same_query_without_a_login_still_dispatches(self):
+        assert _resolve("co mam do wysłania") == ("get_orders_delivery", {})
+
+
 class TestMultiTopicAndUnrelatedQueries:
     def test_multi_topic_query_never_dispatches(self):
         assert _resolve("nowe zamówienia i moje konto") is None

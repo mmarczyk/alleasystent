@@ -1,5 +1,7 @@
 """Tool definitions for the Allegro agent (OpenAI/Gemini function-calling format)."""
 
+import re
+
 # ── Zamówienia: trzy intencje, jedna implementacja ──────────────────────────
 # get_new_orders / get_orders / get_orders_delivery stay three separate tool
 # schemas on purpose: intent routing is far more reliable against named
@@ -29,7 +31,17 @@ _ORDER_PARAMS: dict[str, dict] = {
     },
     "buyer_login": {
         "type": "string",
-        "description": "Filter by buyer's Allegro login (the login, never a company or person's name).",
+        "description": (
+            "Filter by ONE buyer's Allegro login. This is the only filter in the whole tool "
+            "list that can answer a question about a NAMED buyer account — 'czy w tym roku "
+            "kupował ode mnie ktoś z konta np1988', 'co kupił użytkownik anna.kowalska88', "
+            "'ile zamówień złożył kasia.w' — so pass it whenever the question names one, "
+            "together with the period filters if a period is named. get_buyers CANNOT do this: "
+            "it has no login parameter and would answer with every customer of the period "
+            "instead. Always the Allegro LOGIN, exactly as the user wrote it — never a company "
+            "or person's name (Allegro matches it exactly); if the user gave a NAME instead, "
+            "ask for the login rather than guessing it."
+        ),
     },
     "line_items_sent": {
         "type": "array",
@@ -175,6 +187,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "For new/pending orders use get_new_orders instead. "
                 "This is also the FALLBACK for any order question no more specific tool covers — "
                 "reach for it when the user names no fulfillment stage at all. "
+                "ONE NAMED BUYER — 'czy w tym roku kupował ode mnie ktoś z konta np1988', "
+                "'co kupował użytkownik X', 'ile zamówień złożyło konto Y': pass buyer_login "
+                "(plus the period as bought_after_local/bought_before_local, and count_only=true "
+                "for a 'czy'/'ile' question). NOT get_buyers for that — it has no login filter, "
+                "so it answers with the whole customer list of the period. "
                 "STAGE FILTERS only this tool can serve: 'w trakcie (realizacji)' / 'przetwarzane' / "
                 "'w toku' / 'kompletowane' / 'co mam w robocie' / 'nieskończone' / 'do dokończenia' "
                 "→ fulfillment_status=PROCESSING; 'odebrane' / 'dostarczone' / 'zrealizowane' / "
@@ -755,7 +772,14 @@ ALLEGRO_TOOLS: list[dict] = [
                 "the same basis as get_sales_summary, so the two agree on the same period. "
                 "NOT get_sales_summary (that answers 'ile zarobiłem' — revenue, Allegro fees and "
                 "top products, and never names a buyer) and NOT get_orders (one bullet per order, "
-                "no per-buyer totals)."
+                "no per-buyer totals). "
+                "ONE NAMED ACCOUNT IS THE OTHER WAY ROUND: this tool describes the buyer "
+                "POPULATION of a period and has NO buyer_login parameter, so a question about "
+                "ONE named account — 'czy w tym roku kupował ode mnie ktoś z konta np1988', "
+                "'co kupił użytkownik anna.kowalska88' — must go to get_orders with "
+                "buyer_login=<that login>. Calling this tool for such a question drops the login "
+                "silently and answers with every customer of the period, which reads like a real "
+                "answer to a question nobody asked."
             ),
             "parameters": {
                 "type": "object",
@@ -1493,6 +1517,69 @@ def _normalize(text: str) -> str:
     return text.lower().translate(_DIACRITICS)
 
 
+# ── A NAMED buyer account: "z konta np1988" ─────────────────────────────────
+# A seller says "konto" about their OWN Allegro account ("moje konto", "dane
+# konta") — that is get_account_info, the "konto" label above. Followed by a
+# name, the very same word means somebody ELSE'S account: the buyer's login,
+# and the ONLY tool that can filter by it is the order listing
+# (get_orders' buyer_login).
+#
+# Without this, "czy w tym roku kupował ode mnie ktoś z konta np1988" matched
+# {konto, kupujacy}, so the model never even SAW get_orders and answered with
+# get_buyers — the whole year's customer list, with the login silently dropped.
+# That is the worst failure shape this pipeline has: a filtered question
+# answered by an unfiltered list, which reads like a real answer.
+_ACCOUNT_WORD_RE = re.compile(
+    r"^(?:kont(?:o|a|u|em|cie)|kontrahent\w*|login\w*|nick\w*|uzytkownik\w*|"
+    r"kupujac\w*|buyer|user|account)$"
+)
+# Words that may sit between the account word and the name itself —
+# "z konta o nazwie X", "konto allegro X", "login użytkownika X".
+_LOGIN_FILLER_WORDS = frozenset({
+    "o", "nazwie", "nazwa", "login", "loginie", "loginem", "nick", "nicku",
+    "uzytkownika", "uzytkownik", "allegro", "kupujacego", "klienta",
+})
+# Punctuation and quoting that can wrap a login in a real message
+# ("z konta 'np1988'", "z konta np1988?").
+_TOKEN_TRIM = "\"'„”»«`([{)]}.,!?:;"
+_LOGIN_TOKEN_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._-]{2,}$")
+# What separates a login from an ordinary Polish word standing right after
+# "konta"/"login" ("moje konto allegro jest zawieszone"): a digit or one of
+# the separators logins are built from. A login made purely of letters is
+# missed on purpose — see named_buyer_login's docstring.
+_LOOKS_LIKE_LOGIN_RE = re.compile(r"[0-9._-]")
+
+
+def named_buyer_login(text: str) -> str | None:
+    """The BUYER's Allegro login when `text` names one ("z konta np1988",
+    "od użytkownika anna.kowalska88", "login: sklep-abc"), else None.
+
+    Deliberately narrow: the name has to LOOK like a login (a digit or a
+    ._- separator in it) rather than an ordinary word, so "moje konto
+    allegro" and "dane tego konta" never resolve to one. A miss costs
+    nothing — every caller then behaves exactly as it did before this
+    existed — while a false positive would put an invented login into a
+    tool call, so recall is traded away deliberately.
+    """
+    raw = text.split()
+    # _normalize only lowercases and folds diacritics, so the two lists are
+    # token-for-token aligned and the login can be returned in its original
+    # spelling (Allegro logins are matched exactly by the API).
+    norm = _normalize(text).split()
+    for i, word in enumerate(norm):
+        if not _ACCOUNT_WORD_RE.match(word.strip(_TOKEN_TRIM)):
+            continue
+        # Up to three filler words may sit in between ("z konta o nazwie X").
+        for j in range(i + 1, min(i + 4, len(norm))):
+            if norm[j].strip(_TOKEN_TRIM) in _LOGIN_FILLER_WORDS:
+                continue
+            login = raw[j].strip(_TOKEN_TRIM).lstrip("@")
+            if not (_LOGIN_TOKEN_RE.match(login) and _LOOKS_LIKE_LOGIN_RE.search(login)):
+                break
+            return login
+    return None
+
+
 def matched_labels(text: str) -> set[str]:
     """Labels whose stems appear as a word-prefix anywhere in `text`."""
     words = _normalize(text).split()
@@ -1500,6 +1587,14 @@ def matched_labels(text: str) -> set[str]:
     for label, stems in _LABEL_STEMS.items():
         if any(word.startswith(stem) for word in words for stem in stems):
             found.add(label)
+    # A named buyer account is an ORDER question whatever else it mentions:
+    # get_orders' buyer_login is the only filter in the whole tool list that
+    # can answer "did THIS account buy from me". Added, never substituted —
+    # the stems above stay in force (recall over precision, as everywhere in
+    # this map), so "czy np1988 kupował ode mnie" keeps get_buyers as a
+    # candidate too and the model picks between them on the descriptions.
+    if named_buyer_login(text):
+        found.add("zamowienia")
     return found
 
 
