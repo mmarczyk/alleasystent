@@ -12,7 +12,7 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from agents.communication.facebook_agent import FacebookCommunicationAgent
@@ -43,9 +43,14 @@ def get_orchestrator() -> Orchestrator:
 
 @router.get("")
 async def verify_webhook(
-    hub_mode: str | None = None,
-    hub_verify_token: str | None = None,
-    hub_challenge: str | None = None,
+    # Facebook sends the parameters DOT-separated ("hub.mode", "hub.verify_token",
+    # "hub.challenge"), which is not a valid Python identifier — so each one needs
+    # its alias spelled out. Without them FastAPI looked for "hub_mode" &co., found
+    # nothing, and every verification attempt (including Facebook's own, which is
+    # what enables the webhook) got 403 "token mismatch".
+    hub_mode: str | None = Query(default=None, alias="hub.mode"),
+    hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
 ) -> Response:
     """
     Facebook webhook verification.
