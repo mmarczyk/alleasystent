@@ -978,7 +978,14 @@ class AllegroAgent(BaseAgent):
         """Group offers by name (case-insensitive), summing stock, sorted ascending by stock
         (lowest/most urgent first). Returns list of aggregated dicts. Tracks whether every
         listing behind a name is an ended/sold-out one (see _get_stock_relevant_offers) so
-        callers can flag it."""
+        callers can flag it.
+
+        The name, not the Allegro product id, is the key on purpose: GET /sale/offers does
+        not return productSet, only the per-offer details resource does — so keying on the
+        product would cost one extra request per offer on every stock question, which does
+        not scale. The cost is that two listings of one product titled differently show up
+        as two rows, each with part of the real stock.
+        """
         groups: dict[str, dict] = defaultdict(
             lambda: {"ids": [], "name": "", "price": 0.0, "currency": "PLN", "total_stock": 0, "ended_only": True}
         )
