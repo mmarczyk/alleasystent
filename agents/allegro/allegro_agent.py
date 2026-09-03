@@ -29,6 +29,7 @@ from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
 from services.allegro_service import (
+    INVOICE_FILE_MAX_BYTES, SCOPE_BILLING_READ, SCOPE_ORDERS_WRITE,
     AllegroAPIError, AllegroAuthError, AllegroService,
     is_thread_unread, thread_last_message_at,
 )
@@ -1057,6 +1058,67 @@ class AllegroAgent(BaseAgent):
         type_desc = ((entry.get("type") or {}).get("description") or "").lower()
         type_id = (entry.get("type") or {}).get("id") or ""
         return type_id == "PAD" or "pobranie opłat z wpływów" in type_desc or "pobranie opłaty z wpływów" in type_desc
+
+    def _missing_scope_reason(self, scope: str, exc: BaseException | None = None) -> str:
+        """Why a 401/403 happened, checked against the token's actual scopes.
+
+        Allegro hands a token exactly the scopes the app was authorized with and
+        rejects everything else with 403, so "brak uprawnień" can mean two very
+        different things: the token never carried the scope (fix: turn the
+        permission on for the app, then log in again — a refresh keeps the old
+        scope list), or it does carry it and the block is on the account or the
+        resource. Telling those apart is what makes the message actionable, so
+        the token is asked directly instead of guessing.
+        """
+        has_scope = self._allegro.has_scope(scope)
+        if has_scope is False:
+            scopes = self._allegro.token_scopes() or []
+            granted = ", ".join(f"`{s}`" for s in scopes) or "brak jakichkolwiek"
+            return (
+                f"token Allegro nie ma uprawnienia `{scope}`. "
+                f"Token ma obecnie: {granted}. Włącz to uprawnienie dla aplikacji na "
+                "https://apps.developer.allegro.pl (zakładka „Uprawnienia”), a potem zaloguj się "
+                "ponownie przez /allegro/login — token dostaje uprawnienia w chwili logowania, "
+                "więc samo odświeżenie sesji nic nie zmieni."
+            )
+        detail = getattr(exc, "user_message", "") if exc is not None else ""
+        status = getattr(exc, "status_code", None) or 403
+        said = f" Allegro odpowiedziało: „{detail}”." if detail else ""
+        if has_scope is True:
+            return (
+                f"Allegro odmówiło dostępu (błąd {status}), mimo że token ma uprawnienie "
+                f"`{scope}` — blokada jest po stronie konta lub tego zasobu, nie uprawnień "
+                f"aplikacji.{said}"
+            )
+        return (
+            f"Allegro odmówiło dostępu (błąd {status}). Sprawdź, czy aplikacja ma uprawnienie "
+            f"`{scope}` (https://apps.developer.allegro.pl) i zaloguj się ponownie przez "
+            f"/allegro/login.{said}"
+        )
+
+    def _billing_error_reason(self, exc: BaseException) -> str:
+        """Why a billing fetch failed, in the words the seller can act on.
+
+        Everything used to be reported as a missing permission, so a rate limit
+        or a dropped connection on a year-long query told the seller to log in
+        again — advice that never helped because nothing was wrong with the
+        token. Only 401/403 is actually about permissions.
+        """
+        status = getattr(exc, "status_code", None)
+        if status in (401, 403):
+            return self._missing_scope_reason(SCOPE_BILLING_READ, exc)
+        if status == 429:
+            return (
+                "Allegro chwilowo ogranicza liczbę zapytań (błąd 429). "
+                "Spróbuj ponownie za kilka minut."
+            )
+        if status == 0:
+            return "nie udało się połączyć z API Allegro. Spróbuj ponownie za chwilę."
+        if isinstance(status, int) and status >= 500:
+            return f"API Allegro zwróciło błąd {status}. Spróbuj ponownie za chwilę."
+        if isinstance(status, int) and status:
+            return f"API Allegro odrzuciło zapytanie o rozliczenia (błąd {status})."
+        return f"nieoczekiwany błąd pobierania ({type(exc).__name__})."
 
     @staticmethod
     def _offer_fields(offer: dict) -> tuple[str, str, float, str, int]:
@@ -2168,9 +2230,11 @@ class AllegroAgent(BaseAgent):
     async def _attach_invoice_to_allegro_order(self, order_id: str, invoice_uuid: str) -> str:
         """Fetch the invoice PDF from inFakt and attach it to the Allegro order.
 
-        Allegro allows exactly one PDF invoice per order (2 MB max) via a
+        Allegro takes up to 10 PDF invoices per order (3 MB each) via a
         two-step API: POST registers the invoice metadata, PUT uploads the
-        actual file bytes against the id from that response.
+        actual file bytes against the id from that response. Both steps need
+        the SCOPE_ORDERS_WRITE scope — without it they answer 403, which is
+        the "brak uprawnień" the seller sees.
         """
         from services.infakt_service import InfaktAPIError, InfaktService
 
@@ -2190,11 +2254,33 @@ class AllegroAgent(BaseAgent):
 
         number = invoice.get("number", "")
         filename = f"faktura-{number or invoice_uuid}.pdf"
+        if len(pdf_bytes) > INVOICE_FILE_MAX_BYTES:
+            # Caught here rather than at Allegro: the upload is the second of two
+            # calls, so letting it fail would leave an empty invoice record on the
+            # order that a retry then has to work around.
+            return (
+                f"❌ Faktura {number or invoice_uuid} waży {len(pdf_bytes) / 1024 / 1024:.1f} MB, "
+                f"a Allegro przyjmuje pliki do {INVOICE_FILE_MAX_BYTES // 1024 // 1024} MB — "
+                "nie wysłano jej. Zmniejsz PDF w inFakt i spróbuj ponownie."
+            )
         try:
             allegro_invoice_id = await self._allegro.create_order_invoice_record(order_id, number, filename)
             await self._allegro.upload_order_invoice_file(order_id, allegro_invoice_id, pdf_bytes)
         except AllegroAPIError as exc:
-            logger.error("attach_invoice_to_allegro_order: order %s failed: %s", order_id, exc)
+            logger.error(
+                "attach_invoice_to_allegro_order: order %s failed (status=%s, code=%s): %s",
+                order_id, exc.status_code, exc.code or "—", exc,
+            )
+            if exc.status_code in (401, 403):
+                return (
+                    f"❌ Allegro nie pozwoliło dołączyć faktury do zamówienia `{order_id}` — "
+                    + self._missing_scope_reason(SCOPE_ORDERS_WRITE, exc)
+                )
+            if exc.status_code == 404:
+                return (
+                    f"❌ Allegro nie zna zamówienia `{order_id}` (404) — sprawdź ID zamówienia. "
+                    "Faktura została wystawiona w inFakt i nadal czeka na dołączenie."
+                )
             return f"❌ Nie udało się dołączyć faktury do zamówienia `{order_id}` w Allegro: {exc}"
 
         return f"✅ Faktura {number or invoice_uuid} dołączona do zamówienia `{order_id}` w Allegro — kupujący zobaczy ją na stronie zamówienia."
@@ -2730,7 +2816,10 @@ class AllegroAgent(BaseAgent):
             if isinstance(results[0], BaseException):
                 raise results[0]
             if billing_error:
-                logger.warning("get_sales_summary: billing fetch failed (%s), continuing without cost data", billing_error)
+                logger.warning(
+                    "get_sales_summary: billing fetch failed (status=%s: %s), continuing without cost data",
+                    getattr(billing_error, "status_code", "—"), billing_error,
+                )
             # Entries tied to one of our orders (matched by order.id) count regardless of their
             # own date — the widened fetch above is what guarantees they were found. Entries
             # with no order ref at all (subscriptions, listing fees) have nothing to match by,
@@ -2911,8 +3000,11 @@ class AllegroAgent(BaseAgent):
                     "",
                     "## Koszty Allegro",
                     "",
-                    "⚠️ Dane o kosztach Allegro niedostępne (brak uprawnień do rozliczeń). "
-                    "Zaloguj się ponownie przez /allegro/login, aby uzyskać dostęp do billing.",
+                    "⚠️ Nie udało się pobrać danych o kosztach Allegro — "
+                    + self._billing_error_reason(billing_error),
+                    "",
+                    "Pozostałe dane w tym podsumowaniu (przychód, zamówienia, produkty) "
+                    "są kompletne.",
                 ]
 
             return "\n".join([
@@ -3059,12 +3151,34 @@ class AllegroAgent(BaseAgent):
         if tool_name == "get_account_info":
             info = await self._allegro.get_user_info()
             company = (info.get("company") or {}).get("name")
-            return "\n".join([
+            lines = [
                 f"- Login: **{info.get('login', '—')}**",
                 f"- E-mail: {info.get('email', '—')}",
                 f"- Konto: {company or 'sprzedawca indywidualny'}",
                 f"- Zarejestrowane: {self._format_dt_pl(info.get('registeredAt', ''))}",
-            ])
+            ]
+            # What the token may actually do. Every "brak uprawnień" the seller
+            # hits is one of these being absent, and until now the only way to
+            # find that out was to trigger the failing call again.
+            scopes = self._allegro.token_scopes()
+            if scopes is not None:
+                lines.append("- Uprawnienia tokenu (scope): " + (
+                    ", ".join(f"`{s}`" for s in sorted(scopes)) or "brak"
+                ))
+                missing = [
+                    (SCOPE_BILLING_READ, "koszty i rozliczenia"),
+                    (SCOPE_ORDERS_WRITE, "dołączanie faktur, wysyłki, zmiany w zamówieniach"),
+                ]
+                absent = [(s, what) for s, what in missing if s not in scopes]
+                if absent:
+                    lines.append("")
+                    lines.append("⚠️ Brakujące uprawnienia — te funkcje zwrócą błąd 403:")
+                    lines += [f"  - `{s}` → {what}" for s, what in absent]
+                    lines.append(
+                        "Włącz je dla aplikacji na https://apps.developer.allegro.pl "
+                        "(zakładka „Uprawnienia”), a potem zaloguj się ponownie przez /allegro/login."
+                    )
+            return "\n".join(lines)
 
         if tool_name == "get_billing_summary":
             date_from_local = tool_input.get("date_from_local")
@@ -3093,13 +3207,13 @@ class AllegroAgent(BaseAgent):
                     )
                     period_label = "ostatnie operacje"
             except AllegroAPIError as exc:
-                if "403" in str(exc):
-                    return (
-                        "Brak dostępu do danych rozliczeniowych (błąd 403). "
-                        "Token OAuth nie zawiera uprawnienia `allegro:api:billing:read`. "
-                        "Zaloguj się ponownie przez /allegro/login, aby odświeżyć token z pełnymi uprawnieniami."
-                    )
-                raise
+                logger.warning(
+                    "get_billing_summary: billing fetch failed (status=%s: %s)", exc.status_code, exc
+                )
+                return (
+                    "Nie udało się pobrać danych rozliczeniowych — "
+                    + self._billing_error_reason(exc)
+                )
             if not entries:
                 return f"Brak wpisów rozliczeniowych ({period_label})."
             fee_by_type: dict[str, float] = {}
