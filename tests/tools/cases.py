@@ -320,6 +320,16 @@ CASES: list[Case] = [
          "Wyłącz monitoring wiadomości",
          ("Wyłącz monitoring wiadomości",), monitors={"message": True},
          note="Monitoring wiadomości włączony → przycisk wyłączenia."),
+    Case("suggest_message_reminder", "suggest_message_reminder", {},
+         "Przypominaj mi o nieprzeczytanych wiadomościach",
+         ("Włącz przypomnienia o wiadomościach",),
+         note="Przypomnienia o nieodczytanych wiadomościach (co 2 h, 7:00–20:00) "
+              "wyłączone → przycisk włączenia. To nie to samo co monitoring wiadomości: "
+              "monitoring powiadamia raz, gdy wiadomość przyjdzie."),
+    Case("disable_message_reminder", "disable_message_reminder", {},
+         "Nie przypominaj mi o nieprzeczytanych wiadomościach",
+         ("Wyłącz przypomnienia o wiadomościach",), monitors={"message_reminder": True},
+         note="Przypomnienia włączone → status + przycisk wyłączenia."),
     Case("suggest_returns_monitoring", "suggest_returns_monitoring", {},
          "Informuj mnie o nowych zwrotach i reklamacjach",
          ("Włącz monitoring zwrotów",),

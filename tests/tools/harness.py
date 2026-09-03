@@ -43,12 +43,13 @@ USER_ID = "demo_seller"
 # used in the case matrix.
 MONITOR_KINDS = {
     "message": "message",
+    "message_reminder": "message_reminder",
     "invoice_reminder": "invoice_reminder",
     "returns": "returns_complaints",
 }
 
 ALL_MONITORS_OFF: dict[str, bool] = {
-    "order": False, "message": False,
+    "order": False, "message": False, "message_reminder": False,
     "invoice_reminder": False, "returns": False,
 }
 
