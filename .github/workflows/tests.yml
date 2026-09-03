@@ -1,0 +1,50 @@
+name: Testy
+
+# Deploye (deploy-backend/-chat/-jobs) ruszają dopiero po wejściu na main, więc
+# bez tego workflow nic nie sprawdzało kodu PRZED merge'em — czerwony test
+# potrafił przeleżeć na main niezauważony (tak weszło niespójne
+# test_every_tool_has_a_case, a testy orchestratora latami odwoływały się do
+# metody, której już nie ma). Ten workflow puszcza oba zestawy na każdym PR.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Nowszy push do tej samej gałęzi unieważnia poprzedni przebieg — wynik dla
+# starszego commita i tak nikogo już nie interesuje.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ta sama wersja co w obrazie produkcyjnym (Dockerfile: python:3.12-slim).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/unit/requirements-unit.txt
+
+      - name: Zależności
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/unit/requirements-unit.txt
+
+      # Dwa zestawy, każdy ze swoim pytest.ini (asyncio_mode=auto + pythonpath).
+      # Osobne kroki, żeby z zakładki Actions było widać, który padł — i oba
+      # startują bez ustawiania czegokolwiek w środowisku: fixture'y dosypują
+      # sobie klucze same, a Allegro/inFakt są podmienione na fake'owy transport.
+      - name: Testy jednostkowe
+        run: pytest tests/unit -c tests/unit/pytest.ini
+
+      - name: Matryca narzędzi (fake Allegro/inFakt)
+        run: pytest tests/tools -c tests/tools/pytest.ini

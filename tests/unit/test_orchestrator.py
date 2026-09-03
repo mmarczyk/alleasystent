@@ -31,54 +31,35 @@ class TestClientTimeout:
         assert MockOpenAI.call_args.kwargs["timeout"] == 30.0
 
 
-class TestKeywordClassify:
-    def test_chitchat_greeting(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("cześć, jak się masz?") == "chitchat"
+class TestKeywordSource:
+    """The keyword fast-path (Orchestrator._keyword_source / _SOURCE_KEYWORDS):
+    a domain noun in the query decides the data source outright, with no LLM
+    round-trip — see _classify's docstring for why a match is never second-
+    guessed. The source names are the ones _route dispatches on, so "none" is
+    the chitchat/meta bucket and "rag" the knowledge base."""
 
-    def test_chitchat_hello_en(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("hi there") == "chitchat"
+    @pytest.mark.parametrize("query,source", [
+        # Chitchat / meta → "none"
+        ("cześć, jak się masz?", "none"),
+        ("hi there", "none"),
+        ("co potrafisz zrobić?", "none"),
+        ("CZEŚĆ", "none"),                      # dopasowanie bez względu na wielkość liter
+        # Allegro
+        ("pokaż moje zamówień", "allegro_orders"),
+        ("show me my order status", "allegro_orders"),
+        ("gdzie jest moja paczka?", "allegro_orders"),
+        ("lista moich ofert", "allegro_offers"),
+        ("wiadomości od kupujących", "allegro_messaging"),
+        ("moje konto allegro", "allegro_account"),
+        # Baza wiedzy — sprawdzana przed zamówieniami, więc "polityka zwrotów"
+        # nie ląduje w zamówieniach mimo słowa "zwrot".
+        ("jaka jest polityka zwrotów?", "rag"),
+    ])
+    def test_keyword_decides_the_source(self, query, source):
+        assert _make_orchestrator()._keyword_source(query) == source
 
-    def test_chitchat_capabilities(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("co potrafisz zrobić?") == "chitchat"
-
-    def test_allegro_orders(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("pokaż moje zamówień") == "allegro_orders"
-
-    def test_allegro_orders_en(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("show me my order status") == "allegro_orders"
-
-    def test_allegro_offers(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("lista moich ofert") == "allegro_offers"
-
-    def test_allegro_messaging(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("wiadomości od kupujących") == "allegro_messaging"
-
-    def test_allegro_account(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("moje konto allegro") == "allegro_account"
-
-    def test_general_knowledge_policy(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("jaka jest polityka zwrotów?") == "general_knowledge"
-
-    def test_returns_none_for_unknown(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("xyzzy frobble quux") is None
-
-    def test_paczka_maps_to_orders(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("gdzie jest moja paczka?") == "allegro_orders"
-
-    def test_case_insensitive(self):
-        orc = _make_orchestrator()
-        assert orc._keyword_classify("CZEŚĆ") == "chitchat"
+    def test_no_keyword_leaves_it_to_the_llm(self):
+        assert _make_orchestrator()._keyword_source("xyzzy frobble quux") is None
 
 
 class TestHandleChitchatNameGuard:
@@ -87,20 +68,20 @@ class TestHandleChitchatNameGuard:
         orc = _make_orchestrator()
         response = await orc._handle_chitchat("jak się nazywam?", [])
         assert "imię" in response.text.lower() or "nie" in response.text.lower()
-        assert response.agent_type == "chitchat"
+        assert response.agent_type == "none:chat"
 
     @pytest.mark.asyncio
     async def test_name_query_english(self):
         orc = _make_orchestrator()
         response = await orc._handle_chitchat("what is my name?", [])
         assert "name" in response.text.lower()
-        assert response.agent_type == "chitchat"
+        assert response.agent_type == "none:chat"
 
     @pytest.mark.asyncio
     async def test_jakie_mam_imie(self):
         orc = _make_orchestrator()
         response = await orc._handle_chitchat("jakie mam imię?", [])
-        assert response.agent_type == "chitchat"
+        assert response.agent_type == "none:chat"
         # Should return canned response, no LLM call needed
 
     @pytest.mark.asyncio
@@ -113,7 +94,7 @@ class TestHandleChitchatNameGuard:
         with patch("agents.orchestrator._call_with_retry",
                    new_callable=AsyncMock, return_value=mock_resp):
             response = await orc._handle_chitchat("cześć!", [])
-        assert response.agent_type == "chitchat"
+        assert response.agent_type == "none:chat"
 
 
 class TestRegisterAgent:

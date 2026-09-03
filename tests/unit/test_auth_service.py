@@ -81,25 +81,46 @@ class TestSecretFunction:
         assert _secret() == SECRET
 
 
+def _request(cookie: str | None = None, bearer: str | None = None) -> MagicMock:
+    """A request carrying the session token where the caller says.
+
+    The Authorization header has to be a real string: get_current_user reads it
+    FIRST (Safari ITP blocks the cross-site cookie, so the split deployment
+    sends a Bearer token instead), and a bare MagicMock header is truthy — it
+    would take the Bearer branch and hand jwt.decode a mock object, whatever
+    the cookie says.
+    """
+    request = MagicMock()
+    request.headers.get.return_value = f"Bearer {bearer}" if bearer else ""
+    request.cookies.get.return_value = cookie
+    return request
+
+
 class TestGetCurrentUser:
     @pytest.mark.asyncio
     async def test_no_cookie_raises_401(self):
         from fastapi import HTTPException
         from services.auth_service import get_current_user
-        request = MagicMock()
-        request.cookies.get.return_value = None
         with pytest.raises(HTTPException) as exc_info:
-            await get_current_user(request)
+            await get_current_user(_request())
         assert exc_info.value.status_code == 401
 
     @pytest.mark.asyncio
     async def test_valid_cookie_returns_user(self):
         from services.auth_service import create_session_token, get_current_user
         token = create_session_token({"sub": "u1", "name": "Alice"})
-        request = MagicMock()
-        request.cookies.get.return_value = token
-        user = await get_current_user(request)
+        user = await get_current_user(_request(cookie=token))
         assert user["sub"] == "u1"
+
+    @pytest.mark.asyncio
+    async def test_bearer_header_wins_over_the_cookie(self):
+        """The header is the Safari path — it must be read even when a (stale)
+        cookie is also present."""
+        from services.auth_service import create_session_token, get_current_user
+        token = create_session_token({"sub": "u2", "name": "Bob"})
+        stale = create_session_token({"sub": "u1", "name": "Alice"})
+        user = await get_current_user(_request(cookie=stale, bearer=token))
+        assert user["sub"] == "u2"
 
     @pytest.mark.asyncio
     async def test_expired_cookie_raises_401(self):
@@ -111,10 +132,8 @@ class TestGetCurrentUser:
             "exp": datetime.now(timezone.utc) - timedelta(seconds=1),
         }
         token = jwt.encode(payload, SECRET, algorithm="HS256")
-        request = MagicMock()
-        request.cookies.get.return_value = token
         with pytest.raises(HTTPException) as exc_info:
-            await get_current_user(request)
+            await get_current_user(_request(cookie=token))
         assert exc_info.value.status_code == 401
         assert "expired" in exc_info.value.detail.lower()
 
@@ -122,8 +141,6 @@ class TestGetCurrentUser:
     async def test_invalid_cookie_raises_401(self):
         from fastapi import HTTPException
         from services.auth_service import get_current_user
-        request = MagicMock()
-        request.cookies.get.return_value = "bad-token"
         with pytest.raises(HTTPException) as exc_info:
-            await get_current_user(request)
+            await get_current_user(_request(cookie="bad-token"))
         assert exc_info.value.status_code == 401

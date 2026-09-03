@@ -1,6 +1,7 @@
 """Unit tests for main.py FastAPI endpoints."""
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,7 +15,15 @@ def set_env(monkeypatch):
 
 @pytest.fixture(scope="module")
 def app():
-    """Build the FastAPI app with all startup hooks mocked out."""
+    """Build the FastAPI app with all startup hooks mocked out.
+
+    The env is seeded here rather than left to set_env above: this fixture is
+    module-scoped, so it runs BEFORE any function-scoped monkeypatch, and
+    importing main builds Settings — which refuses to construct without
+    GOOGLE_API_KEY. setdefault, so a real environment still wins.
+    """
+    os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+    os.environ.setdefault("JWT_SECRET", "test-secret")
     with patch("main.asyncio.create_task"), \
          patch("agents.orchestrator.AsyncOpenAI"), \
          patch("agents.orchestrator.SessionStore"), \
@@ -50,13 +59,14 @@ class TestPushVapidKey:
         assert resp.status_code == 503
 
     def test_returns_key_when_configured(self, client, monkeypatch):
-        monkeypatch.setenv("VAPID_PUBLIC_KEY", "BPublicKeyHere")
-        from config.settings import get_settings
-        get_settings.cache_clear()
+        # The endpoint reads main.settings, resolved once at import — clearing
+        # the get_settings cache after the app is built changes nothing, so the
+        # key has to be set on the object the endpoint actually reads.
+        import main as main_module
+        monkeypatch.setattr(main_module.settings, "vapid_public_key", "BPublicKeyHere")
         resp = client.get("/push/vapid-public-key")
         assert resp.status_code == 200
         assert resp.json()["publicKey"] == "BPublicKeyHere"
-        get_settings.cache_clear()
 
 
 class TestAllegroLogin:
@@ -96,11 +106,29 @@ class TestAuthMe:
         assert resp.status_code == 401
 
     def test_returns_user_with_valid_session(self, client):
+        # A valid session is not enough on its own: /auth/me also insists on a
+        # live Allegro token (lost on container restart → re-login), so the
+        # service has to report one or the endpoint answers 401
+        # allegro_auth_required.
         from services.auth_service import create_session_token
         token = create_session_token({"sub": "myuser", "name": "My User"})
-        resp = client.get("/auth/me", cookies={"session": token})
+        service = MagicMock()
+        service._tokens = MagicMock()
+        with patch("services.allegro_service.AllegroService.get_instance", return_value=service):
+            resp = client.get("/auth/me", cookies={"session": token})
         assert resp.status_code == 200
         assert resp.json()["sub"] == "myuser"
+
+    def test_valid_session_without_allegro_tokens_forces_relogin(self, client):
+        from services.auth_service import create_session_token
+        token = create_session_token({"sub": "myuser", "name": "My User"})
+        service = MagicMock()
+        service._tokens = None
+        service._load_tokens_from_redis = AsyncMock()
+        with patch("services.allegro_service.AllegroService.get_instance", return_value=service):
+            resp = client.get("/auth/me", cookies={"session": token})
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "allegro_auth_required"
 
 
 class TestQueryEndpoint:
