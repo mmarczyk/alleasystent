@@ -743,6 +743,7 @@ const Sync = (() => {
   let _timer = null;
   let _inflight = false;
   let _firstPullDone = false;
+  let _firstPull = null;
 
   async function _req(path, opts = {}) {
     const res = await fetch(Settings.api(path), {
@@ -936,7 +937,7 @@ const Sync = (() => {
   }
 
   function start() {
-    refresh();
+    _firstPull = refresh();
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') refresh();
     });
@@ -946,7 +947,16 @@ const Sync = (() => {
     }, POLL_MS);
   }
 
-  return { start, refresh, pull, renameRemote, deleteRemote, deleteAllRemote };
+  // Resolves once the first pull has landed (or gave up), so that a question
+  // asked in the seconds after the app opens joins the thread the seller
+  // already has on the server instead of minting a competing one. Capped,
+  // because a cold-starting backend must not hold a typed question hostage.
+  function whenReady(timeoutMs = 4000) {
+    if (_firstPullDone || !_firstPull) return Promise.resolve();
+    return Promise.race([_firstPull, new Promise(r => setTimeout(r, timeoutMs))]);
+  }
+
+  return { start, refresh, pull, whenReady, renameRemote, deleteRemote, deleteAllRemote };
 })();
 
 // ── Sidebar (Chats + FAQ + Documents) ─────────────
@@ -1232,12 +1242,15 @@ const Sidebar = (() => {
     _renderDocs();
   }
 
-  // Clicking a common question starts a fresh conversation with it, rather
-  // than appending onto whatever thread happens to be active right now.
+  // Clicking a common question simply asks it in the conversation the seller
+  // is already in. It used to open a fresh thread per click, which is what
+  // turned "Rozmowy" into a list of every question ever asked — one
+  // single-question thread each — for someone who uses the app as one running
+  // chat. A new thread is what "+ Nowa rozmowa" is for.
   function ask(i) {
     const q = _faqCache[i];
     if (!q) return;
-    Chat.newConversation();
+    document.getElementById('sidebar').classList.remove('open');
     Chat.send(q.text);
   }
 
@@ -1486,8 +1499,10 @@ const PendingChat = (() => {
     try {
       // The conversation has to exist before the fetch: draining the queue is
       // what records the messages server-side, and that needs to name the
-      // conversation they land in. At most one empty conversation is ever
-      // created this way — only for an account that has never had one.
+      // conversation they land in. Give the first sync a chance to hand us the
+      // seller's own thread first, so a reminder delivered on a device that has
+      // not cached their chats yet lands there rather than opening a new one.
+      if (!Store.active()) await Sync.whenReady();
       if (!Store.active()) Store.create();
       const conv = Store.active();
       if (!conv) return;
@@ -1834,6 +1849,40 @@ const InvoiceReminder = (() => {
   return { isEnabled, enable, disable };
 })();
 
+// ── Unread-message reminder ──────────────────────
+// Nags in chat for as long as a buyer message stays unread
+// (services/message_reminder.py), on the same Cloud Run pass and the same
+// 2h/7:00-20:00 cadence as InvoiceReminder. Distinct from MessageMonitor,
+// which pushes once when a message ARRIVES: this one is about messages that
+// stay unanswered, so both can be on at the same time without duplicating.
+// Toggle only — no push subscription, since it is delivered as a chat message.
+const MessageReminder = (() => {
+  const ENABLED_KEY = 'ae_message_reminder_enabled';
+
+  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
+
+  async function enable() {
+    localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/message-reminder/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+    UI.toast('✓ Przypomnienia o nieprzeczytanych wiadomościach włączone — napiszę Ci na czacie (co 2h, 7:00-20:00)');
+    document.querySelectorAll('.btn-message-reminder').forEach(btn => {
+      btn.outerHTML = '<span class="monitoring-badge">✓ Przypomnienia o wiadomościach aktywne</span>';
+    });
+    return true;
+  }
+
+  function disable() {
+    localStorage.removeItem(ENABLED_KEY);
+    fetch(Settings.api('/allegro/message-reminder/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+  }
+
+  return { isEnabled, enable, disable };
+})();
+
 // ── Notifications (bell icon panel) ──────────────
 const Notifications = (() => {
   let _items = [];
@@ -2021,6 +2070,7 @@ const UI = (() => {
     document.getElementById('set-toggle-messages').checked = MessageMonitor.isEnabled();
     document.getElementById('set-toggle-returns').checked = ReturnsMonitor.isEnabled();
     document.getElementById('set-toggle-invoice-reminder').checked = InvoiceReminder.isEnabled();
+    document.getElementById('set-toggle-message-reminder').checked = MessageReminder.isEnabled();
     document.getElementById('set-toggle-theme').checked = Theme.isDark();
     updateVersionInfo();
   }
@@ -2044,6 +2094,10 @@ const UI = (() => {
 
   function toggleInvoiceReminder(on) {
     if (on) InvoiceReminder.enable(); else InvoiceReminder.disable();
+  }
+
+  function toggleMessageReminder(on) {
+    if (on) MessageReminder.enable(); else MessageReminder.disable();
   }
 
   function toggleDarkTheme(on) {
@@ -2078,13 +2132,16 @@ const UI = (() => {
   return {
     toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
     toggleOrderMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
-    toggleInvoiceReminder, toggleDarkTheme,
+    toggleInvoiceReminder, toggleMessageReminder, toggleDarkTheme,
   };
 })();
 
 // ── Chat engine ──────────────────────────────────
 const Chat = (() => {
   let _waiting = false;
+  // True while send() waits for the first sync to name the thread — a second
+  // Enter in that window would otherwise start a parallel query.
+  let _resolvingThread = false;
   let _welcomeEl = null;  // persistent ref so GC never collects the node
 
   function renderSidebar() {
@@ -2387,14 +2444,26 @@ const Chat = (() => {
   }
 
   async function send(text) {
-    if (_waiting) return;
+    if (_waiting || _resolvingThread) return;
     const input = document.getElementById('user-input');
     const msgText = (text || input.value).trim();
     if (!msgText) return;
+    input.value = ''; input.style.height = 'auto';
+
+    // A question typed before the first sync lands would open a brand-new
+    // thread on a device that has not cached this seller's chats yet (a fresh
+    // phone, cleared storage, a reinstalled PWA) — one more single-question
+    // "rozmowa" in the sidebar for every such visit. Wait for the pull: it
+    // opens the thread they were last working on, and only a seller who has no
+    // thread at all ends up with a new one.
+    const draft = Store.active();
+    if (!draft || (!draft.messages.length && !draft.syncedAt)) {
+      _resolvingThread = true;
+      try { await Sync.whenReady(); } finally { _resolvingThread = false; }
+    }
 
     if (!Store.active()) Store.create();
     Store.addMessage('user', msgText);
-    input.value = ''; input.style.height = 'auto';
 
     const container = document.getElementById('messages');
     const welcome = document.getElementById('welcome');
@@ -2747,9 +2816,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  const convs = Store.all();
-  if (!convs.length) Store.create('Nowa rozmowa');
-
+  // No conversation is minted here: an empty draft created before the first
+  // sync is a second thread competing with the ones the seller already has on
+  // the server. The welcome screen renders without one, and the first question
+  // (or the first assistant-initiated message) creates one only if the sync
+  // found nothing to continue.
   Sidebar.initTab();
   Sidebar.render();
 
@@ -2766,14 +2837,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Re-register push subscription with backend (token may have rotated)
   WebPush.init();
 
+  // Pull the seller's conversations down from the server and keep them in step
+  // while the app is open — this is what makes a chat started on the desktop
+  // continue on the phone. Started before the pending-message poll below, which
+  // waits on this first pull to know which thread to deliver into.
+  Sync.start();
+
   // Deliver anything the assistant wrote while this device wasn't listening,
   // and keep watching for more while the app stays open.
   PendingChat.start();
-
-  // Pull the seller's conversations down from the server and keep them in step
-  // while the app is open — this is what makes a chat started on the desktop
-  // continue on the phone.
-  Sync.start();
 
   // Init monitors AFTER full UI setup so chat injection finds a ready DOM
   const _startParams = new URLSearchParams(location.search);

@@ -460,7 +460,12 @@ class AllegroAgent(BaseAgent):
         "actively ASKS in chat whether to issue pending invoices for shipped orders and adapts to "
         "the reply; this is the ONLY invoice automation there is, so use this pair for ANY request "
         "about invoice notifications/monitoring/reminders), MESSAGE monitoring (suggest_message_monitoring / "
-        "disable_message_monitoring), or RETURNS/COMPLAINTS monitoring (suggest_returns_monitoring / "
+        "disable_message_monitoring — a PUSH fired once the moment a new buyer message ARRIVES), the "
+        "unread-MESSAGE REMINDER (suggest_message_reminder / disable_message_reminder — a scheduled "
+        "7:00-20:00 check that keeps ASKING in chat for as long as a buyer message STAYS unread; "
+        "pick this one when the user wants to stop FORGETTING or MISSING messages, and the monitor "
+        "above when they want to know the moment one arrives — they are independent and can both be "
+        "on), or RETURNS/COMPLAINTS monitoring (suggest_returns_monitoring / "
         "disable_returns_monitoring — a single shared toggle covering BOTH zwroty and reklamacje, "
         "there is no separate tool for each) — call suggest_message_monitoring after get_message_threads "
         "when the user asks about being notified of new buyer messages, and likewise "
@@ -470,7 +475,8 @@ class AllegroAgent(BaseAgent):
         "(though get_new_orders/get_message_threads/get_new_returns/get_returns_to_process/"
         "get_new_complaints/get_orders_pending_invoice ALREADY append their own status block — "
         "don't double-call). "
-        "The invoice REMINDER also handles its own conversation once it has asked — if the user's "
+        "The invoice REMINDER and the unread-message REMINDER also handle their own conversation once "
+        "they have asked — if the user's "
         "current message looks like a reply to that chat question ('tak wystaw', 'później', 'za 3 "
         "godziny', 'przestań pytać'), it is intercepted before reaching you at all "
         "(agents.orchestrator.Orchestrator.handle), so you will never see it; don't try to replicate "
@@ -1561,6 +1567,36 @@ class AllegroAgent(BaseAgent):
             "zapamiętam na jak długo.\n\n"
             '<button class="btn-invoice-reminder" onclick="InvoiceReminder.enable()">'
             '⏰ Włącz przypomnienia o fakturach</button>'
+        )
+
+    async def _message_reminder_status_block(self) -> str:
+        """Deterministic (non-LLM) status + action button for the automatic
+        unread-MESSAGE reminder — a scheduled 7:00-20:00 check (every 2h by
+        default, adjustable by the seller) for buyer messages that are still
+        unread, which asks in chat whether to list them and adapts to the reply
+        (see services/message_reminder.py).
+
+        Not the same thing as _message_monitoring_status_block below: that one
+        is the push notification fired the moment a message ARRIVES, this one
+        keeps asking while a message STAYS unread. Both can be on at once.
+        """
+        from services.message_reminder import is_monitor_enabled
+
+        if await is_monitor_enabled(self._allegro._user_id):
+            return (
+                "⏰ Automatyczne przypomnienia o nieprzeczytanych wiadomościach są włączone — co 2 "
+                "godziny (7:00-20:00) sprawdzę, czy jakaś wiadomość od kupującego wciąż czeka na "
+                "odczytanie, i zapytam Cię o to na czacie.\n\n"
+                '<button class="btn-message-reminder" style="filter:grayscale(1)" '
+                'onclick="MessageReminder.disable();this.outerHTML=\'<span>✓ Przypomnienia o wiadomościach wyłączone</span>\'">'
+                '🔕 Wyłącz przypomnienia o wiadomościach</button>'
+            )
+        return (
+            "💡 Mogę co 2 godziny (7:00-20:00) sprawdzać, czy jakaś wiadomość od kupującego wciąż "
+            "jest nieprzeczytana, i przypominać Ci o niej na czacie — a jeśli poprosisz o "
+            "odłożenie, zapamiętam na jak długo.\n\n"
+            '<button class="btn-message-reminder" onclick="MessageReminder.enable()">'
+            '⏰ Włącz przypomnienia o wiadomościach</button>'
         )
 
     async def _message_monitoring_status_block(self) -> str:
@@ -3186,6 +3222,9 @@ class AllegroAgent(BaseAgent):
 
         if tool_name in ("suggest_invoice_reminder", "disable_invoice_reminder"):
             return await self._invoice_reminder_status_block()
+
+        if tool_name in ("suggest_message_reminder", "disable_message_reminder"):
+            return await self._message_reminder_status_block()
 
         if tool_name in ("suggest_message_monitoring", "disable_message_monitoring"):
             return await self._message_monitoring_status_block()

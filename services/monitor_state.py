@@ -4,12 +4,14 @@ from __future__ import annotations
 warrant their own Redis module: the message monitor (kind "message"), whose
 detection runs server-side in services/message_monitor.py but whose flag has
 always lived here, so the flag users already toggled on keeps working
-unchanged; and the server-side invoice REMINDER (kind "invoice_reminder", see
-services/invoice_reminder.py), whose own detection + state live elsewhere but
-which reuses this same enabled-flag store. The chat agent still needs a source
-of truth to answer "is this on?" honestly instead of guessing (see
-AllegroAgent._message_monitoring_status_block /
-_invoice_reminder_status_block, mirroring order_monitor.is_monitor_enabled).
+unchanged; and the two server-side REMINDERS — invoices (kind
+"invoice_reminder", see services/invoice_reminder.py) and unread buyer
+messages (kind "message_reminder", see services/message_reminder.py) — whose
+own detection + state live elsewhere but which reuse this same enabled-flag
+store. The chat agent still needs a source of truth to answer "is this on?"
+honestly instead of guessing (see
+AllegroAgent._message_monitoring_status_block / _invoice_reminder_status_block
+/ _message_reminder_status_block, mirroring order_monitor.is_monitor_enabled).
 
 The client-side invoice monitor (kind "invoice") that used to live here as
 well was removed along with the rest of automatic invoice CHECKING — see the

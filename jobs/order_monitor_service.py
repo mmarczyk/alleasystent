@@ -39,6 +39,7 @@ from services.order_monitor import run_once as run_order_monitor  # noqa: E402
 from services.return_complaint_monitor import run_once as run_returns_complaints_monitor  # noqa: E402
 from services.message_monitor import run_once as run_message_monitor  # noqa: E402
 from services.invoice_reminder import run_once as run_invoice_reminder  # noqa: E402
+from services.message_reminder import run_once as run_message_reminder  # noqa: E402
 
 
 async def _run_all() -> None:
@@ -60,6 +61,10 @@ async def _run_all() -> None:
         await run_invoice_reminder()
     except Exception:
         logger.exception("invoice reminder pass failed")
+    try:
+        await run_message_reminder()
+    except Exception:
+        logger.exception("message reminder pass failed")
 
 
 class Handler(BaseHTTPRequestHandler):
