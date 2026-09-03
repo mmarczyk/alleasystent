@@ -8,3 +8,15 @@ PyJWT>=2.9.0
 openai>=1.0.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
+
+# Importowane przez kod pod testem, nie przez same testy: push_service
+# (pywebpush), logowanie i analityka (google-auth) oraz cała warstwa stanu
+# (redis — monitoring, tokeny, historia rozmów). Bez nich część modułów nie
+# doimportowuje się w ogóle (ModuleNotFoundError), co przez długi czas
+# wyglądało jak "te testy zawsze są czerwone".
+#
+# Ten plik jest jedynym źródłem zależności dla CI (.github/workflows/tests.yml)
+# — zarówno tests/unit, jak i tests/tools chodzą na tym zestawie.
+redis[hiredis]>=5.0.0
+pywebpush>=2.0.0
+google-auth>=2.35.0
