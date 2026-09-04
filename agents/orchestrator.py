@@ -140,6 +140,14 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
     (["wiadomoś", "wiadomo", "message", "napisz do kupując", "wyślij do kupując",
       "kupując", "buyer", "odpowiedz na wiadomość"],
      "allegro_messaging"),
+    # Customer base — "czy mam klienta z takim nr telefonu +48 880 197 834".
+    # Checked after messaging so "co pisał klient w wiadomości" stays messaging;
+    # both labels reach the same AllegroAgent anyway (see handle()), so the
+    # label only decides which fast-path claims the query, not which agent
+    # answers it. Without an entry here a contact lookup names no keyword at
+    # all and pays for an LLM classification call to reach the same agent.
+    (["klient", "nr tel", "numer tel", "telefon", "kontrahent", "nabywc"],
+     "allegro_orders"),
     # Account / billing
     (["konto", "opłat", "prowizj", "statystyk", "rozliczen", "account",
       "fees", "billing", "limit sprzedaży"],

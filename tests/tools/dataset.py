@@ -81,10 +81,16 @@ def _delivery(
     tracking: str | None = None,
     pickup_point: str | None = None,
     recipient: str = "",
+    phone: str = "",
 ) -> dict:
     """`recipient` is "Imię Nazwisko" (or a company name) on delivery.address —
     the name get_buyers falls back to for a buyer who never asked for an
-    invoice, so it must be present on every order the way Allegro sends it."""
+    invoice, so it must be present on every order the way Allegro sends it.
+
+    `phone` is the delivery address' own number, which Allegro sends separately
+    from the buyer account's — find_buyer_by_contact searches both, so the
+    dataset carries orders with each shape (see CHECKOUT_FORMS).
+    """
     first, _, last = recipient.partition(" ")
     d: dict = {
         "method": {"id": method_id, "name": method_name},
@@ -97,6 +103,7 @@ def _delivery(
             "city": "Warszawa",
             "zipCode": "00-001",
             "countryCode": "PL",
+            "phoneNumber": phone,
         },
     }
     if tracking:
@@ -111,14 +118,15 @@ CHECKOUT_FORMS: list[dict] = [
         "id": ORD_1,
         "status": "READY_FOR_PROCESSING",
         "buyer": {"login": "anna.kowalska88", "email": "anna.kowalska88@allegromail.pl",
-                  "firstName": "Anna", "lastName": "Kowalska"},
+                  "firstName": "Anna", "lastName": "Kowalska",
+                  "phoneNumber": "+48 880 197 834"},
         "fulfillment": {"status": "NEW"},
         "payment": {"type": "ONLINE", "finishedAt": in_month(1.2)},
         "boughtAt": in_month(1.3),
         "summary": {"totalToPay": _price(429.98)},
         "delivery": _delivery("INPOST_LOCKER", "Allegro Paczkomaty InPost", 9.99,
                               hours_ahead(20), pickup_point="POZ01A — Poznań, ul. Głogowska 12",
-                              recipient="Anna Kowalska"),
+                              recipient="Anna Kowalska", phone="+48 880 197 834"),
         "lineItems": [
             _line_item("14587236901", "Ekspres do kawy DeLonghi Magnifica S ECAM", 1, 399.99),
             _line_item("14587236955", "Filtr wody do ekspresu DLSC002", 1, 30.00),
@@ -140,13 +148,15 @@ CHECKOUT_FORMS: list[dict] = [
         "id": ORD_2,
         "status": "READY_FOR_PROCESSING",
         "buyer": {"login": "marek_zielinski", "email": "marek.zielinski@allegromail.pl",
-                  "firstName": "Marek", "lastName": "Zieliński"},
+                  "firstName": "Marek", "lastName": "Zieliński",
+                  "phoneNumber": "512334776"},
         "fulfillment": {"status": "NEW"},
         "payment": {"type": "ONLINE", "finishedAt": in_month(2.4)},
         "boughtAt": in_month(2.5),
         "summary": {"totalToPay": _price(899.00)},
         # Deadline already blown → "⚠️ po terminie" marker in every order view.
-        "delivery": _delivery("DPD", "Kurier DPD", 14.99, hours_ago(6), recipient="Marek Zieliński"),
+        "delivery": _delivery("DPD", "Kurier DPD", 14.99, hours_ago(6), recipient="Marek Zieliński",
+                              phone="512-334-776"),
         "lineItems": [
             _line_item("14587301122", "Odkurzacz pionowy Dyson V12 Detect Slim", 1, 899.00),
         ],
@@ -172,7 +182,7 @@ CHECKOUT_FORMS: list[dict] = [
         "boughtAt": hours_ago(3.5),
         "summary": {"totalToPay": _price(137.70)},
         "delivery": _delivery("INPOST_COURIER", "Kurier InPost", 12.99, hours_ahead(44),
-                              recipient="Katarzyna Wójcik"),
+                              recipient="Katarzyna Wójcik", phone="+48 601 220 118"),
         "lineItems": [
             _line_item("14587355001", "Czajnik elektryczny Bosch TWK7203", 1, 109.00),
             _line_item("14587355044", "Zestaw filtrów Brita Maxtra+ 3 szt.", 1, 28.70),
@@ -182,13 +192,15 @@ CHECKOUT_FORMS: list[dict] = [
     {
         "id": ORD_4,
         "status": "READY_FOR_PROCESSING",
-        "buyer": {"login": "tomek.nowak", "email": "tomek.nowak@allegromail.pl"},
+        "buyer": {"login": "tomek.nowak", "email": "tomek.nowak@allegromail.pl",
+                  "phoneNumber": "+48 733 118 902"},
         "fulfillment": {"status": "READY_FOR_SHIPMENT"},
         "payment": {"type": "ONLINE", "finishedAt": in_month(3.1)},
         "boughtAt": in_month(3.2),
         "summary": {"totalToPay": _price(259.00)},
         "delivery": _delivery("DPD", "Kurier DPD", 14.99, hours_ahead(8),
-                              tracking="1234567890PL", recipient="Tomasz Nowak"),
+                              tracking="1234567890PL", recipient="Tomasz Nowak",
+                              phone="+48 733 118 902"),
         "lineItems": [
             _line_item("14587377310", "Blender kielichowy Philips HR2291", 1, 259.00),
         ],
@@ -197,7 +209,8 @@ CHECKOUT_FORMS: list[dict] = [
     {
         "id": ORD_5,
         "status": "READY_FOR_PROCESSING",
-        "buyer": {"login": "agnieszka.maj", "email": "agnieszka.maj@allegromail.pl"},
+        "buyer": {"login": "agnieszka.maj", "email": "agnieszka.maj@allegromail.pl",
+                  "phoneNumber": "+48 795 402 118"},
         "fulfillment": {"status": "READY_FOR_SHIPMENT"},
         "payment": {"type": "ONLINE", "finishedAt": in_month(4.0)},
         "boughtAt": in_month(4.1),
@@ -205,7 +218,7 @@ CHECKOUT_FORMS: list[dict] = [
         "delivery": _delivery("INPOST_LOCKER", "Allegro Paczkomaty InPost", 8.99,
                               hours_ahead(30), tracking="620012345678901234567890",
                               pickup_point="WRO24M — Wrocław, ul. Legnicka 58",
-                              recipient="Agnieszka Maj"),
+                              recipient="Agnieszka Maj", phone="+48 795 402 118"),
         "lineItems": [
             _line_item("14587355044", "Zestaw filtrów Brita Maxtra+ 3 szt.", 2, 28.70),
             _line_item("14587399881", "Ściereczki z mikrofibry 10 szt.", 1, 17.58),
@@ -215,13 +228,15 @@ CHECKOUT_FORMS: list[dict] = [
     {
         "id": ORD_6,
         "status": "READY_FOR_PROCESSING",
-        "buyer": {"login": "pawel.b", "email": "pawel.b@allegromail.pl"},
+        "buyer": {"login": "pawel.b", "email": "pawel.b@allegromail.pl",
+                  "phoneNumber": "+48 22 610 44 12"},
         "fulfillment": {"status": "SENT"},
         "payment": {"type": "ONLINE", "finishedAt": in_month(6.0)},
         "boughtAt": in_month(6.2),
         "summary": {"totalToPay": _price(1249.00)},
         "delivery": _delivery("DHL", "Kurier DHL", 16.99, in_month(5.0),
-                              tracking="JJD000390007312345678", recipient="Paweł Bąk"),
+                              tracking="JJD000390007312345678", recipient="Paweł Bąk",
+                              phone="+48 22 610 44 12"),
         "lineItems": [
             _line_item("14587401234", "Ekspres do kawy DeLonghi Magnifica S ECAM", 1, 1249.00),
         ],

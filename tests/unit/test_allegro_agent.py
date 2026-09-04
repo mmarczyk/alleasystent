@@ -1081,6 +1081,189 @@ class TestBuyersReport:
         assert "Statusu faktury nie udało się sprawdzić dla 1 zamówienia" in result
 
 
+class TestFindBuyerByContact:
+    """find_buyer_by_contact answers "czy mam takiego klienta?" — Allegro has
+    no customer index, so the lookup scans a period of orders and matches on
+    the contact details they carry (see AllegroAgent._find_buyer_by_contact)."""
+
+    @staticmethod
+    def _order(order_id, login, price, *, buyer_phone="", delivery_phone="",
+               email="", company="", nip="", first="", last="", recipient="",
+               paid_at="2026-03-04T10:00:00Z"):
+        from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine
+
+        recipient_first, _, recipient_last = recipient.partition(" ")
+        return AllegroOrder(
+            order_id=order_id,
+            buyer_login=login,
+            buyer_email=email or f"{login}@example.com",
+            buyer_phone=buyer_phone,
+            status="READY_FOR_PROCESSING",
+            fulfillment_status="SENT",
+            total_price=price,
+            currency="PLN",
+            created_at=paid_at,
+            paid_at=paid_at,
+            delivery={
+                "method": {"id": "dpd", "name": "Kurier DPD"},
+                "address": {
+                    "firstName": recipient_first,
+                    "lastName": recipient_last,
+                    "phoneNumber": delivery_phone,
+                },
+            },
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=1, price=price)],
+            invoice_buyer=AllegroInvoiceBuyer(
+                required=bool(company or nip or first),
+                company_name=company,
+                vat_id=nip,
+                first_name=first,
+                last_name=last,
+            ),
+        )
+
+    def _agent_with(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_all_paid_orders_in_period = AsyncMock(return_value=orders)
+        return agent
+
+    def _store(self):
+        return [
+            self._order("a1", "anna", 400.0, buyer_phone="+48 880 197 834",
+                        delivery_phone="+48 880 197 834", company="Kawa i Spółka",
+                        nip="779-244-55-88", recipient="Anna Kowalska",
+                        paid_at="2026-02-01T10:00:00Z"),
+            self._order("a2", "anna", 600.0, buyer_phone="880197834",
+                        company="Kawa i Spółka", nip="7792445588",
+                        recipient="Anna Kowalska", paid_at="2026-05-01T10:00:00Z"),
+            # The account carries no number at all — only the parcel does.
+            self._order("k1", "kasia", 137.7, delivery_phone="601-220-118",
+                        recipient="Katarzyna Wójcik", paid_at="2026-04-01T10:00:00Z"),
+            self._order("m1", "marek", 899.0, buyer_phone="512334776",
+                        first="Marek", last="Zieliński", recipient="Marek Zieliński",
+                        paid_at="2026-03-01T10:00:00Z"),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("typed", [
+        "+48 880 197 834", "880 197 834", "880-197-834", "880197834", "0048880197834",
+    ])
+    async def test_every_spelling_of_the_number_finds_the_same_customer(self, typed):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": typed})
+
+        assert result.startswith("**Tak —")
+        assert "Kawa i Spółka" in result
+        assert f"numer telefonu {typed}" in result
+
+    @pytest.mark.asyncio
+    async def test_the_delivery_address_phone_counts_too(self):
+        """The parcel often goes to someone other than the account holder, and
+        their number is the only one on the order."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "+48 601 220 118"})
+
+        assert "Katarzyna Wójcik" in result
+        assert "`kasia`" in result
+
+    @pytest.mark.asyncio
+    async def test_a_customers_orders_are_grouped_and_listed(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert "- Zamówienia: **2** na łącznie **1000,00 PLN**" in result
+        assert "- Ostatni zakup: 01.05.2026" in result
+        assert "`a1`" in result and "`a2`" in result
+        # One number, however differently the two orders spelled it — the most
+        # recent spelling, since grouping runs newest-first.
+        assert "- Telefon: 880197834\n" in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_number_is_an_explicit_no_naming_what_was_searched(self):
+        """"Brak wyników" reads as "you have no customers at all" — the answer
+        has to name the number AND the period it looked in."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "+48 500 100 200"})
+
+        assert result.startswith("**Nie — nie znalazłem klienta")
+        assert "numer telefonu +48 500 100 200" in result
+        assert "Przeszukałem **4** zamówienia z okresu" in result
+
+    @pytest.mark.asyncio
+    async def test_searches_two_years_back_by_default(self):
+        """A customer who last bought 14 months ago is still a customer, so the
+        default window is two years — not get_buyers' current calendar year."""
+        import re
+
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        date_from, date_to = re.search(
+            r"z okresu (\d{4}-\d{2}-\d{2}) – (\d{4}-\d{2}-\d{2})", result
+        ).groups()
+        months = (int(date_to[:4]) - int(date_from[:4])) * 12 + int(date_to[5:7]) - int(date_from[5:7])
+        assert months == 24
+        assert date_from.endswith("-01")
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_period_wins(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {
+            "phone": "880197834", "date_from_local": "2026-01-01", "date_to_local": "2026-06-30",
+        })
+
+        assert "z okresu 2026-01-01 – 2026-06-30" in result
+
+    @pytest.mark.asyncio
+    async def test_name_email_and_nip_search_the_same_base(self):
+        agent = self._agent_with(self._store())
+
+        by_name = await agent._dispatch("find_buyer_by_contact", {"name": "wojcik"})
+        by_email = await agent._dispatch("find_buyer_by_contact", {"email": "MAREK@example.com"})
+        by_nip = await agent._dispatch("find_buyer_by_contact", {"nip": "779-244-55-88"})
+
+        assert "Katarzyna Wójcik" in by_name          # diacritics folded both ways
+        assert "Marek Zieliński" in by_email          # case-insensitive
+        assert "Kawa i Spółka" in by_nip              # dashes ignored
+
+    @pytest.mark.asyncio
+    async def test_several_matches_are_all_reported(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {
+            "phone": "880197834", "name": "zieliński",
+        })
+
+        assert result.startswith("**Tak — numer telefonu 880197834 / nazwa „zieliński” "
+                                 "pasuje do 2 klientów.**")
+        assert "Kawa i Spółka" in result and "Marek Zieliński" in result
+
+    @pytest.mark.asyncio
+    async def test_no_criteria_asks_instead_of_listing_everyone(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {})
+
+        assert result.startswith("Podaj numer telefonu")
+        agent._allegro.get_all_paid_orders_in_period.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_too_short_a_number_is_not_a_lookup(self):
+        """Three digits would match half the store — that is not a "no", it is
+        a question that cannot be answered as asked."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "834"})
+
+        assert result.startswith("Podaj numer telefonu")
+
+
 class TestSalesSummaryMonthlyBreakdown:
     """A period longer than one calendar month gets a month-by-month section —
     "podsumuj sprzedaż z tego roku z podziałem na miesiące" is one call for the

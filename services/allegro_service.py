@@ -794,6 +794,7 @@ class AllegroService:
             order_id=data.get("id", ""),
             buyer_login=(data.get("buyer") or {}).get("login", ""),
             buyer_email=(data.get("buyer") or {}).get("email", ""),
+            buyer_phone=(data.get("buyer") or {}).get("phoneNumber", "") or "",
             status=data.get("status", ""),
             fulfillment_status=(data.get("fulfillment") or {}).get("status", ""),
             payment_status=(data.get("payment") or {}).get("type", ""),

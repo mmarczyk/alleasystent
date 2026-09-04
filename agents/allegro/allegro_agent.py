@@ -303,6 +303,16 @@ class AllegroAgent(BaseAgent):
         "tool then defaults to the current year. NEVER answer a buyer question with get_orders or "
         "get_sales_summary: neither groups anything by buyer, so the seller would be left counting "
         "rows themselves.\n"
+        "• ONE CUSTOMER LOOKED UP BY CONTACT DETAILS — a phone number, an e-mail, a person's or "
+        "company's name, a NIP: 'czy mam klienta z takim nr telefonu +48 880 197 834', 'kto to "
+        "jest 880197834', 'czy ten numer coś u mnie kupował', 'czy mam w bazie Jana Kowalskiego', "
+        "'czy kupował ode mnie ktoś z adresu jan@example.com', 'czy mam klienta z NIP 7792445588' "
+        "→ find_buyer_by_contact, passing the detail EXACTLY as the user wrote it (phone in any "
+        "format — it is normalized by the tool; never retype or 'fix' the digits). It searches the "
+        "last 24 months by default, so omit the dates unless the user names a period. NEVER answer "
+        "this with get_buyers (no phone/e-mail/name filter — it would reply with every customer of "
+        "the period) or with get_orders (its buyer_login is the Allegro LOGIN, not a phone or a "
+        "name).\n"
         "• ONE NAMED BUYER ACCOUNT rather than the buyer population — 'czy w tym roku kupował "
         "ode mnie ktoś z konta np1988', 'co kupił użytkownik anna.kowalska88', 'ile zamówień "
         "złożył kasia.w', 'pokaż zamówienia z konta X' → get_orders with buyer_login=<exactly "
@@ -1920,11 +1930,57 @@ class AllegroAgent(BaseAgent):
         return f"{address.get('firstName') or ''} {address.get('lastName') or ''}".strip()
 
     @classmethod
+    def _order_phones(cls, order: Any) -> list[str]:
+        """Every phone number an order carries, as Allegro wrote them: the
+        buyer's account phone and the delivery address phone.
+
+        Two numbers, because they are two different people often enough to
+        matter — a parcel sent to a partner, a workplace, a friend. A lookup
+        that only knew the account phone would answer "nie mam takiego
+        klienta" for someone whose number is right there on the delivery
+        address.
+        """
+        address = order.delivery.get("address") if isinstance(order.delivery, dict) else None
+        return cls._dedupe_phones([
+            getattr(order, "buyer_phone", "") or "",
+            (address or {}).get("phoneNumber", "") if isinstance(address, dict) else "",
+        ])
+
+    @staticmethod
+    def _dedupe_phones(raws: list[str]) -> list[str]:
+        """The distinct phone NUMBERS among `raws`, each kept in the first
+        spelling it appeared in.
+
+        Deduplicating on the raw string would list one number twice whenever
+        the account and the delivery address wrote it differently ('512334776'
+        and '512-334-776'), which reads as two contacts for one person.
+        """
+        from agents.allegro.allegro_tools import phone_digits
+
+        kept: list[str] = []
+        seen: set[str] = set()
+        for raw in raws:
+            raw = (raw or "").strip()
+            digits = phone_digits(raw)
+            if not digits or digits in seen:
+                continue
+            seen.add(digits)
+            kept.append(raw)
+        return kept
+
+    @classmethod
     def _aggregate_buyers(
         cls, orders: list[Any], invoice_flags: dict[str, bool | None]
     ) -> list[dict[str, Any]]:
         """Group orders into one entry per buyer, newest order first so the name
-        and NIP shown are the most recent ones that buyer gave."""
+        and NIP shown are the most recent ones that buyer gave.
+
+        Also collects each buyer's contact details and their orders themselves
+        — get_buyers renders neither (its table is one row per buyer), but
+        find_buyer_by_contact answers with exactly that, and one grouping
+        implementation for both keeps "who counts as the same customer" a
+        single decision (see _buyer_key).
+        """
         groups: dict[tuple[str, str], dict[str, Any]] = {}
         for order in sorted(orders, key=lambda o: (o.paid_at or o.created_at or ""), reverse=True):
             key = cls._buyer_key(order)
@@ -1936,12 +1992,23 @@ class AllegroAgent(BaseAgent):
                     "is_company": buyer.is_company,
                     "vat_id": buyer.vat_id,
                     "logins": [],
+                    "emails": [],
+                    "phones": [],
+                    "recipients": [],
+                    "order_list": [],
                     "orders": 0,
                     "value": 0.0,
                     "currency": order.currency,
                     "invoices": 0,
                     "last_bought": "",
                 }
+            if order.buyer_email and order.buyer_email not in group["emails"]:
+                group["emails"].append(order.buyer_email)
+            group["phones"] = cls._dedupe_phones(group["phones"] + cls._order_phones(order))
+            recipient = cls._delivery_recipient(order)
+            if recipient and recipient not in group["recipients"]:
+                group["recipients"].append(recipient)
+            group["order_list"].append(order)
             if not group["name"]:
                 # Newest-first iteration, so this is the most recent order that
                 # actually names the buyer: the invoice address if there is one,
@@ -2089,6 +2156,228 @@ class AllegroAgent(BaseAgent):
                 "— mogły nie trafić do zestawienia."
             )
         return "\n".join(["# Kupujący", "", *self._md_table(headers, rows, align=align), "", summary])
+
+    # ── Klient po danych kontaktowych ─────────────────────────────────────────
+    # "Czy mam klienta z takim nr telefonu +48 880 197 834?" — the phone rings,
+    # the seller wants to know who it is before picking up. Allegro has no
+    # customer index to query: the only record of a customer is their orders,
+    # so this scans a period of them and matches on the contact details the
+    # order carries (see _order_phones for the two places a phone hides).
+    #
+    # Two years by default, not get_buyers' current year: a customer who last
+    # bought 14 months ago is still a customer, and "nie mam takiego klienta"
+    # would be the wrong answer to the question actually asked. Every reply
+    # names the period it searched, so a narrower answer is never mistaken for
+    # an all-time one.
+    _CONTACT_SEARCH_MONTHS = 24
+    # Orders listed under one customer before the rest are summed up.
+    _CONTACT_ORDERS_CAP = 10
+    # Below this many digits a "number" matches far too much to be a lookup.
+    _MIN_PHONE_DIGITS = 6
+
+    _PL_FOLD = str.maketrans("ąćęłńóśźż", "acelnoszz")
+
+    @classmethod
+    def _period_or_last_months(cls, tool_input: dict, months: int) -> tuple[str, str, str]:
+        """UTC bounds + label for a period pair defaulting to the last `months`
+        months (from the 1st of the month that far back through today).
+
+        Same degrade-instead-of-raise contract as _period_or_current_year: an
+        unparseable date falls back to the default window rather than failing
+        the lookup, and the label printed in the reply always says which period
+        the seller actually got.
+        """
+        today = datetime.now(cls._WARSAW).date()
+        start_month = today.year * 12 + (today.month - 1) - months
+        default_from = f"{start_month // 12:04d}-{start_month % 12 + 1:02d}-01"
+        default_to = today.isoformat()
+        date_from_local = tool_input.get("date_from_local") or default_from
+        date_to_local = tool_input.get("date_to_local") or default_to
+        try:
+            date_from, date_to = cls._local_day_bounds_to_utc(date_from_local, date_to_local)
+        except (ValueError, TypeError):
+            logger.warning(
+                "_period_or_last_months: unparseable period %r – %r, using the last %d months",
+                date_from_local, date_to_local, months,
+            )
+            date_from_local, date_to_local = default_from, default_to
+            date_from, date_to = cls._local_day_bounds_to_utc(date_from_local, date_to_local)
+        return date_from, date_to, f"{date_from_local} – {date_to_local}"
+
+    @classmethod
+    def _fold(cls, text: str) -> str:
+        """Lowercased, diacritic-free, single-spaced — so 'Wójcik' is found by
+        'wojcik' and 'KAWA I  SPÓŁKA' by 'kawa i spolka'."""
+        return re.sub(r"\s+", " ", (text or "").strip().lower().translate(cls._PL_FOLD))
+
+    @classmethod
+    def _same_phone(cls, wanted_digits: str, raw: str) -> bool:
+        """Do these two numbers identify the same phone?
+
+        Compared on their trailing digits (up to nine, the length of a Polish
+        national number), which is what makes '+48 880 197 834' equal to
+        '880-197-834' and to '0048880197834'. A shorter query is treated as a
+        partial number and matched on what it does carry, never below
+        _MIN_PHONE_DIGITS.
+        """
+        from agents.allegro.allegro_tools import phone_digits
+
+        other = phone_digits(raw)
+        if not wanted_digits or not other:
+            return False
+        length = min(len(wanted_digits), len(other), 9)
+        return length >= cls._MIN_PHONE_DIGITS and wanted_digits[-length:] == other[-length:]
+
+    @classmethod
+    def _contact_criteria(cls, tool_input: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+        """(normalized criteria, Polish labels naming them) from the tool input.
+
+        Only the details the caller actually passed end up in either — a
+        lookup with no criterion at all is the caller's bug, and answered as
+        such rather than by listing every customer. The labels carry no
+        markdown of their own: they are quoted inside sentences that are
+        themselves bold, and nested '**' renders as literal asterisks.
+        """
+        from agents.allegro.allegro_tools import phone_digits
+
+        criteria: dict[str, str] = {}
+        labels: list[str] = []
+        phone = str(tool_input.get("phone") or "").strip()
+        if phone:
+            digits = phone_digits(phone)
+            if len(digits) >= cls._MIN_PHONE_DIGITS:
+                criteria["phone"] = digits
+                labels.append(f"numer telefonu {phone}")
+        email = str(tool_input.get("email") or "").strip().lower()
+        if email:
+            criteria["email"] = email
+            labels.append(f"adres e-mail {email}")
+        name = str(tool_input.get("name") or "").strip()
+        if name:
+            criteria["name"] = cls._fold(name)
+            labels.append(f"nazwa „{name}”")
+        nip = re.sub(r"\D", "", str(tool_input.get("nip") or ""))
+        if nip:
+            criteria["nip"] = nip
+            labels.append(f"NIP {nip}")
+        return criteria, labels
+
+    @classmethod
+    def _order_matches_contact(cls, order: Any, criteria: dict[str, str]) -> bool:
+        """Does this order belong to the customer being looked for?
+
+        Any single criterion is enough. The seller who asks "czy mam klienta
+        Jan Kowalski z numerem 880 197 834" is describing ONE person from two
+        half-remembered details, and Allegro rarely carries both — requiring
+        every criterion to match would answer "nie" about a customer whose
+        order is right there.
+        """
+        phone = criteria.get("phone")
+        if phone and any(cls._same_phone(phone, raw) for raw in cls._order_phones(order)):
+            return True
+        email = criteria.get("email")
+        if email and (order.buyer_email or "").strip().lower() == email:
+            return True
+        nip = criteria.get("nip")
+        if nip and re.sub(r"\D", "", order.invoice_buyer.vat_id or "") == nip:
+            return True
+        name = criteria.get("name")
+        if name:
+            buyer = order.invoice_buyer
+            for candidate in (
+                buyer.display_name,
+                buyer.company_name,
+                f"{buyer.first_name} {buyer.last_name}",
+                cls._delivery_recipient(order),
+            ):
+                if candidate and name in cls._fold(candidate):
+                    return True
+        return False
+
+    @classmethod
+    def _contact_buyer_block(cls, group: dict[str, Any]) -> str:
+        """One matched customer: who they are, how to reach them, and what they
+        bought."""
+        lines = [
+            f"**{group['name']}** — {'firma' if group['is_company'] else 'osoba prywatna'}",
+            f"- Telefon: {', '.join(group['phones']) or '—'}",
+            f"- E-mail: {', '.join(group['emails']) or '—'}",
+            f"- Login Allegro: {', '.join(f'`{login}`' for login in group['logins']) or '—'}",
+        ]
+        # The buyer is named off the invoice address, which for a company is the
+        # firm — but the person on the other end of that phone is whoever the
+        # parcels are addressed to, and "kto to jest?" is the whole question
+        # here. Shown only when it adds a name the row doesn't already carry.
+        others = [r for r in group["recipients"] if r != group["name"]]
+        if others:
+            lines.append(f"- Odbiorca przesyłek: {', '.join(others)}")
+        if group["vat_id"]:
+            lines.append(f"- NIP: {group['vat_id']}")
+        lines += [
+            f"- Zamówienia: **{group['orders']}** na łącznie "
+            f"**{cls._format_price(group['value'], group['currency'])}**",
+            f"- Ostatni zakup: {cls._format_dt_pl(group['last_bought'])[:10]}",
+        ]
+        shown = group["order_list"][: cls._CONTACT_ORDERS_CAP]
+        lines.append("- Historia zakupów:")
+        for order in shown:
+            products = ", ".join(li.offer_name for li in order.line_items[:2]) or "—"
+            lines.append(
+                f"  - `{order.order_id}` — {cls._format_dt_pl(order.paid_at or order.created_at)[:10]}, "
+                f"{cls._format_price(order.total_price, order.currency)}, {products}"
+            )
+        hidden = len(group["order_list"]) - len(shown)
+        if hidden:
+            lines.append(
+                f"  - …i {hidden} "
+                f"{cls._plural_pl(hidden, 'starsze zamówienie', 'starsze zamówienia', 'starszych zamówień')}"
+            )
+        return "\n".join(lines)
+
+    async def _find_buyer_by_contact(self, tool_input: dict[str, Any]) -> str:
+        """The finished find_buyer_by_contact answer: a yes/no first sentence,
+        then the matching customer(s), then the period that was searched."""
+        criteria, labels = self._contact_criteria(tool_input)
+        if not criteria:
+            return (
+                "Podaj numer telefonu, adres e-mail, nazwę (lub nazwisko) albo NIP klienta, "
+                "którego mam wyszukać — samo pytanie nie zawiera żadnej z tych danych."
+            )
+        criteria_label = " / ".join(labels)
+        date_from, date_to, period_label = self._period_or_last_months(
+            tool_input, self._CONTACT_SEARCH_MONTHS
+        )
+        orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
+        matched = [o for o in orders if self._order_matches_contact(o, criteria)]
+        logger.info(
+            "find_buyer_by_contact: %d orders in %s → %d matching (%s)",
+            len(orders), period_label, len(matched), sorted(criteria),
+        )
+        scanned = (
+            f"Przeszukałem **{len(orders)}** "
+            f"{self._plural_pl(len(orders), 'zamówienie', 'zamówienia', 'zamówień')} "
+            f"z okresu {period_label}."
+        )
+        if not matched:
+            return (
+                f"**Nie — nie znalazłem klienta, do którego pasuje {criteria_label}.** "
+                f"{scanned} Jeśli ten klient mógł kupować wcześniej, podaj okres do sprawdzenia "
+                "(np. „sprawdź od 2022 roku”)."
+            )
+        buyers = self._aggregate_buyers(matched, {})
+        buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)
+        # "pasuje do …" takes the genitive, which is the same form for every
+        # count ("do 2 klientów", "do 5 klientów") — the one phrasing that
+        # can't come out ungrammatical for a number nobody knows in advance.
+        if len(buyers) == 1:
+            # A company name ending in "sp. z o.o." already brings its own full
+            # stop; a second one reads as a typo.
+            name = buyers[0]["name"]
+            headline = f"**Tak — {criteria_label} pasuje do klienta: {name}{'' if name.endswith('.') else '.'}**"
+        else:
+            headline = f"**Tak — {criteria_label} pasuje do {len(buyers)} klientów.**"
+        blocks = [self._contact_buyer_block(group) for group in buyers]
+        return "\n\n".join([headline, *blocks, scanned])
 
     @classmethod
     def _sorted_by_date_desc(cls, items: list[dict], date_of) -> list[dict]:
@@ -3271,6 +3560,9 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_buyers":
             return await self._buyers_report(tool_input)
+
+        if tool_name == "find_buyer_by_contact":
+            return await self._find_buyer_by_contact(tool_input)
 
         if tool_name == "get_orders_pending_invoice":
             orders = await self._allegro.get_orders_needing_invoice(
