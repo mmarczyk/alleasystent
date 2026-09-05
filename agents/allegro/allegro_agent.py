@@ -2172,6 +2172,9 @@ class AllegroAgent(BaseAgent):
     _CONTACT_SEARCH_MONTHS = 24
     # Orders listed under one customer before the rest are summed up.
     _CONTACT_ORDERS_CAP = 10
+    # How many orders may be re-fetched one-by-one when the listing came back
+    # without phone numbers (see _orders_with_phones) — one GET each.
+    _PHONE_REFETCH_CAP = 50
     # Below this many digits a "number" matches far too much to be a lookup.
     _MIN_PHONE_DIGITS = 6
 
@@ -2334,6 +2337,36 @@ class AllegroAgent(BaseAgent):
             )
         return "\n".join(lines)
 
+    async def _orders_with_phones(self, orders: list[Any]) -> list[Any]:
+        """`orders` with the phone numbers filled in, re-fetching the most
+        recent ones from the single-order endpoint when the listing carried
+        none at all.
+
+        The seller's own summary of where the number lives is "zawsze w danych
+        wysyłki" — delivery.address.phoneNumber. That block comes back on the
+        LIST endpoint (get_buyers names people from it), but Allegro trims
+        optional fields there, and if phoneNumber is one of them then every
+        phone lookup would answer a flat, confident "nie mam takiego klienta".
+        So: when not one order in the period carried a phone, the field is
+        missing rather than empty, and the newest _PHONE_REFETCH_CAP orders are
+        asked for individually — one GET each, hence the cap. A listing that
+        already carries phones costs nothing here.
+        """
+        if not orders or any(self._order_phones(o) for o in orders):
+            return orders
+        newest = sorted(orders, key=lambda o: (o.paid_at or o.created_at or ""), reverse=True)
+        wanted = [o.order_id for o in newest[: self._PHONE_REFETCH_CAP]]
+        logger.info(
+            "find_buyer_by_contact: listing carried no phone numbers — re-fetching %d of %d orders",
+            len(wanted), len(orders),
+        )
+        try:
+            full = await self._allegro.fetch_orders_in_full(wanted)
+        except Exception as exc:  # noqa: BLE001 — the lookup still has the listing
+            logger.warning("find_buyer_by_contact: re-fetch failed, using the listing: %s", exc)
+            return orders
+        return [full.get(o.order_id, o) for o in orders]
+
     async def _find_buyer_by_contact(self, tool_input: dict[str, Any]) -> str:
         """The finished find_buyer_by_contact answer: a yes/no first sentence,
         then the matching customer(s), then the period that was searched."""
@@ -2348,6 +2381,8 @@ class AllegroAgent(BaseAgent):
             tool_input, self._CONTACT_SEARCH_MONTHS
         )
         orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
+        if criteria.get("phone"):
+            orders = await self._orders_with_phones(orders)
         matched = [o for o in orders if self._order_matches_contact(o, criteria)]
         logger.info(
             "find_buyer_by_contact: %d orders in %s → %d matching (%s)",
@@ -2358,11 +2393,29 @@ class AllegroAgent(BaseAgent):
             f"{self._plural_pl(len(orders), 'zamówienie', 'zamówienia', 'zamówień')} "
             f"z okresu {period_label}."
         )
+        # A phone search over orders that carry no phone AT ALL is not a "no" —
+        # it is a lookup that never ran, and "nie mam takiego klienta" would be
+        # a confident wrong answer. Distinguished only when nothing matched:
+        # a customer found by name or e-mail is an answer either way.
+        phone_blind = bool(criteria.get("phone")) and orders and not any(
+            self._order_phones(o) for o in orders
+        )
         if not matched:
+            if phone_blind and set(criteria) == {"phone"}:
+                return (
+                    "**Nie mogę tego sprawdzić** — Allegro nie zwróciło ani jednego numeru "
+                    f"telefonu przy tych zamówieniach, więc nie mam czego porównać z numerem "
+                    f"{tool_input.get('phone')}. {scanned} Podaj login Allegro albo adres e-mail "
+                    "tego klienta — po nich znajdę go na pewno."
+                )
+            blind_note = (
+                " Uwaga: przy żadnym z tych zamówień Allegro nie podało numeru telefonu, "
+                "więc po numerze nie dało się szukać — sprawdziłem pozostałe dane."
+            ) if phone_blind else ""
             return (
                 f"**Nie — nie znalazłem klienta, do którego pasuje {criteria_label}.** "
-                f"{scanned} Jeśli ten klient mógł kupować wcześniej, podaj okres do sprawdzenia "
-                "(np. „sprawdź od 2022 roku”)."
+                f"{scanned}{blind_note} Jeśli ten klient mógł kupować wcześniej, podaj okres "
+                "do sprawdzenia (np. „sprawdź od 2022 roku”)."
             )
         buyers = self._aggregate_buyers(matched, {})
         buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)

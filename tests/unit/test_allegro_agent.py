@@ -1254,6 +1254,71 @@ class TestFindBuyerByContact:
         agent._allegro.get_all_paid_orders_in_period.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_refetches_orders_when_the_listing_carried_no_phones(self):
+        """Allegro trims optional fields on the order LIST endpoint. If
+        phoneNumber is one of them, every phone lookup would answer a flat
+        "nie mam takiego klienta" — so a listing with no phones anywhere is
+        re-fetched order by order before concluding anything."""
+        listed = [
+            self._order("a1", "anna", 400.0, recipient="Anna Kowalska"),
+            self._order("k1", "kasia", 137.7, recipient="Katarzyna Wójcik"),
+        ]
+        agent = self._agent_with(listed)
+        agent._allegro.fetch_orders_in_full = AsyncMock(return_value={
+            "a1": self._order("a1", "anna", 400.0, delivery_phone="+48 880 197 834",
+                              recipient="Anna Kowalska"),
+        })
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert agent._allegro.fetch_orders_in_full.await_args.args[0] == ["a1", "k1"]
+        assert result.startswith("**Tak —")
+        assert "Anna Kowalska" in result
+
+    @pytest.mark.asyncio
+    async def test_no_phone_data_anywhere_is_not_answered_as_no(self):
+        """The lookup never ran — saying "nie" would be a confident wrong
+        answer about a customer who may well be in the base."""
+        agent = self._agent_with([self._order("a1", "anna", 400.0, recipient="Anna Kowalska")])
+        agent._allegro.fetch_orders_in_full = AsyncMock(return_value={})
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert result.startswith("**Nie mogę tego sprawdzić**")
+        assert "880197834" in result
+        assert "login Allegro" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_phone_data_does_not_silence_the_other_criteria(self):
+        agent = self._agent_with([self._order("a1", "anna", 400.0, recipient="Anna Kowalska")])
+        agent._allegro.fetch_orders_in_full = AsyncMock(return_value={})
+
+        result = await agent._dispatch("find_buyer_by_contact", {
+            "phone": "880197834", "name": "Nowak",
+        })
+
+        assert result.startswith("**Nie — nie znalazłem klienta")
+        assert "po numerze nie dało się szukać" in result
+
+    @pytest.mark.asyncio
+    async def test_a_listing_that_has_phones_is_never_refetched(self):
+        agent = self._agent_with(self._store())
+        agent._allegro.fetch_orders_in_full = AsyncMock()
+
+        await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        agent._allegro.fetch_orders_in_full.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_refetch_falls_back_to_the_listing(self):
+        agent = self._agent_with([self._order("a1", "anna", 400.0, recipient="Anna Kowalska")])
+        agent._allegro.fetch_orders_in_full = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert result.startswith("**Nie mogę tego sprawdzić**")
+
+    @pytest.mark.asyncio
     async def test_too_short_a_number_is_not_a_lookup(self):
         """Three digits would match half the store — that is not a "no", it is
         a question that cannot be answered as asked."""
