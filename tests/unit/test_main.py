@@ -325,10 +325,40 @@ class TestPushPending:
     def test_pending_returns_null_when_no_messages(self, client):
         from services.auth_service import create_session_token
         token = create_session_token({"sub": "user1", "name": "User"})
-        with patch("services.push_service.pop_pending_chats", new_callable=AsyncMock, return_value=[]):
+        with patch("services.push_service.pop_pending_chats_tagged", new_callable=AsyncMock, return_value=[]):
             resp = client.get("/push/pending", cookies={"session": token})
         assert resp.status_code == 200
         assert resp.json()["chatMessage"] is None
+
+
+class TestRefreshPendingChats:
+    """Queued messages are re-checked before delivery — a day-old invoice
+    reminder must not tell the seller to issue an invoice that now exists."""
+
+    @pytest.mark.asyncio
+    async def test_invoice_reminder_is_rechecked_and_can_be_dropped(self):
+        import main
+        from services.invoice_reminder import PENDING_CHAT_TAG
+
+        refresh = AsyncMock(return_value=None)
+        with patch("services.invoice_reminder.refresh_pending_message", refresh):
+            texts = await main._refresh_pending_chats(
+                "u1", [(PENDING_CHAT_TAG, "🧾 Masz 1 niewystawioną fakturę …")]
+            )
+        assert texts == []
+        refresh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_other_messages_pass_through_untouched(self):
+        import main
+
+        refresh = AsyncMock()
+        with patch("services.invoice_reminder.refresh_pending_message", refresh):
+            texts = await main._refresh_pending_chats(
+                "u1", [("message_reminder", "📬 Masz 2 nieprzeczytane wiadomości."), (None, "Cześć")]
+            )
+        assert texts == ["📬 Masz 2 nieprzeczytane wiadomości.", "Cześć"]
+        refresh.assert_not_awaited()
 
 
 class TestPendingChatRecordedInSession:

@@ -1096,6 +1096,11 @@ async def push_pending(request: Request, session_id: str | None = None):
     reminder) reaches the seller's chat, whether or not the app was running when
     it was written.
 
+    A queued message is re-checked against reality before it goes out (see
+    _refresh_pending_chats): it may have been written a day earlier, and an
+    invoice reminder for orders that have since been invoiced is dropped or
+    rewritten rather than shown as it was queued.
+
     `session_id` is the conversation the app is about to show them in. The
     delivered messages are recorded there as assistant turns, so the assistant
     can see what it said on its own initiative and the seller can just answer
@@ -1106,12 +1111,39 @@ async def push_pending(request: Request, session_id: str | None = None):
     returned a list still shows something rather than nothing.
     """
     from services.auth_service import get_current_user
-    from services.push_service import pop_pending_chats
+    from services.push_service import pop_pending_chats_tagged
     user = await get_current_user(request)
-    texts = await pop_pending_chats(user["sub"])
+    entries = await pop_pending_chats_tagged(user["sub"])
+    texts = await _refresh_pending_chats(user["sub"], entries)
     if texts and session_id:
         await _record_assistant_turns(user["sub"], session_id, texts)
     return {"chatMessages": texts, "chatMessage": texts[0] if texts else None}
+
+
+async def _refresh_pending_chats(user_sub: str, entries: list[tuple[str | None, str]]) -> list[str]:
+    """Bring queued assistant-initiated messages up to date before showing them.
+
+    A queued message was written whenever its monitor last ran and then waited
+    in Redis for the seller to open the app — up to a day. The invoice reminder
+    is the one where that staleness is actively wrong rather than merely old:
+    it states how many invoices are still to be issued, and the seller may have
+    issued them elsewhere in the meantime (Allegro's panel, another device),
+    which is exactly what "it says I have an invoice to issue but the order
+    already has one" looks like. So it gets a last-second re-check against
+    Allegro, and drops out entirely if nothing is pending any more.
+
+    Anything else in the queue is a plain event report and goes through as-is.
+    """
+    from services.invoice_reminder import PENDING_CHAT_TAG, refresh_pending_message
+
+    texts: list[str] = []
+    for tag, text in entries:
+        if tag == PENDING_CHAT_TAG:
+            text = await refresh_pending_message(user_sub, text)
+            if not text:
+                continue
+        texts.append(text)
+    return texts
 
 
 async def _record_assistant_turns(user_sub: str, session_id: str, texts: list[str]) -> None:

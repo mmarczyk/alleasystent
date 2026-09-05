@@ -217,28 +217,29 @@ def _format_order_ids(order_ids: list[str]) -> str:
     return shown
 
 
-async def _ask(user_id: str, order_ids: list[str], again: bool, awaiting_duration: bool) -> None:
+def _build_ask_text(order_ids: list[str], again: bool, awaiting_duration: bool) -> str:
     phrase = _pending_invoice_phrase(len(order_ids))
     ids_str = _format_order_ids(order_ids)
 
     if not again:
-        text = (
+        return (
             f"🧾 Masz {phrase} dla już wysłanych zamówień: {ids_str}.\n\n"
             "Wystawić je teraz?"
         )
-    elif awaiting_duration:
-        text = (
+    if awaiting_duration:
+        return (
             f"🧾 Ponownie Ci przypominam o {phrase} do wystawienia ({ids_str}) — "
             "na jak długo mam odłożyć to przypomnienie? Albo napisz „wystaw”, "
             "jeśli chcesz zrobić to teraz."
         )
-    else:
-        text = (
-            f"🧾 Ponownie Ci przypominam: nadal masz {phrase} dla wysłanych zamówień "
-            f"({ids_str}). Wystawić je teraz?"
-        )
+    return (
+        f"🧾 Ponownie Ci przypominam: nadal masz {phrase} dla wysłanych zamówień "
+        f"({ids_str}). Wystawić je teraz?"
+    )
 
-    await _notify(user_id, chat_text=text)
+
+async def _ask(user_id: str, order_ids: list[str], again: bool, awaiting_duration: bool) -> None:
+    await _notify(user_id, chat_text=_build_ask_text(order_ids, again, awaiting_duration))
 
 
 async def _notify(user_id: str, chat_text: str) -> None:
@@ -259,6 +260,78 @@ async def _notify(user_id: str, chat_text: str) -> None:
     from services.push_service import store_pending_chat
 
     await store_pending_chat(user_id, chat_text, dedupe_tag=_MONITOR_KIND)
+
+
+# ── Delivery-time re-check ───────────────────────────────────────────────────
+
+# The dedupe tag the reminder's queued chat messages carry, and the handle the
+# delivery path (main.push_pending) uses to route one back here for a re-check.
+PENDING_CHAT_TAG = _MONITOR_KIND
+
+
+async def refresh_pending_message(user_id: str, queued_text: str) -> str | None:
+    """Bring a queued reminder up to date the moment before the seller reads it.
+
+    The text of a reminder is a snapshot of what Allegro said when the cron pass
+    ran; it then sits in the pending-chat queue (services/push_service.py) for
+    up to 24h, until the seller next opens the app. Invoices issued in between —
+    in Allegro's own panel, by the accountant, from another device — do not
+    change the queued text, so the seller was being told to issue an invoice for
+    an order that already had one, and found it issued the moment they opened it.
+
+    So the queue is not the source of truth at delivery: Allegro is. Returns the
+    text to show (rewritten if the pending set shrank or grew since), or None if
+    nothing is pending any more and the message should simply be dropped.
+
+    Never lets a failed re-check swallow the reminder: the message has already
+    left the queue, so on any error the original text goes through unchanged
+    (worst case the seller sees what they would have seen before this existed).
+    """
+    from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
+
+    state = await get_pending_state(user_id)
+    if not state:
+        # A later cron pass already found nothing pending (or the seller turned
+        # the reminder off) and cleared the outstanding ask — this queued text
+        # is what it left behind.
+        logger.info("Invoice reminder: dropping queued message for user=%s — no open ask", user_id)
+        return None
+
+    try:
+        allegro = AllegroService.get_instance(user_id)
+        await allegro._load_tokens_from_redis()
+        if not allegro._tokens:
+            return queued_text
+        orders = await allegro.get_orders_needing_invoice(shipped_only=True)
+    except (AllegroAuthError, AllegroAPIError) as exc:
+        logger.warning("Invoice reminder: re-check failed for user=%s: %s", user_id, exc)
+        return queued_text
+    except Exception:
+        logger.exception("Invoice reminder: re-check failed for user=%s", user_id)
+        return queued_text
+
+    order_ids = [o.order_id for o in orders]
+    if not order_ids:
+        logger.info(
+            "Invoice reminder: dropping queued message for user=%s — every invoice "
+            "has been issued since it was written", user_id,
+        )
+        await _resolve_state(user_id, state)
+        return None
+
+    if set(order_ids) == set(state.get("order_ids") or []):
+        return queued_text
+
+    logger.info(
+        "Invoice reminder: rewriting queued message for user=%s — %d pending now, %d when queued",
+        user_id, len(order_ids), len(state.get("order_ids") or []),
+    )
+    await _update_pending_orders(user_id, state, order_ids)
+    return _build_ask_text(
+        order_ids,
+        again=state.get("reminder_count", 0) > 1,
+        awaiting_duration=state.get("status") == _STATUS_AWAITING_DURATION,
+    )
 
 
 def _format_duration(minutes: int) -> str:
@@ -593,6 +666,25 @@ async def _await_duration(user_id: str, state: dict) -> None:
         await _save_state(
             r, user_id, status=_STATUS_AWAITING_DURATION,
             order_ids=state.get("order_ids", []),
+            next_check_at=next_check_at,
+            interval_minutes=state.get("interval_minutes", _DEFAULT_INTERVAL_MINUTES),
+            reminder_count=state.get("reminder_count", 0),
+        )
+
+    await _with_redis(_do)
+
+
+async def _update_pending_orders(user_id: str, state: dict, order_ids: list[str]) -> None:
+    """Point the open ask at the orders that are ACTUALLY still pending, leaving
+    status, cadence and reminder count alone. Used by refresh_pending_message so
+    a reply ("wystaw") to a rewritten reminder acts on the set the seller was
+    shown, not the one the cron pass saw hours earlier."""
+    next_check_at = _parse_dt(state.get("next_check_at")) or datetime.now(_TZ)
+
+    async def _do(r):
+        await _save_state(
+            r, user_id, status=state.get("status", _STATUS_AWAITING_RESPONSE),
+            order_ids=order_ids,
             next_check_at=next_check_at,
             interval_minutes=state.get("interval_minutes", _DEFAULT_INTERVAL_MINUTES),
             reminder_count=state.get("reminder_count", 0),
