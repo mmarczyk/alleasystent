@@ -179,6 +179,72 @@ class TestNamedBuyerLogin:
         )
 
 
+class TestNamedPhoneNumber:
+    """A pasted phone number is the only routing signal in "sprawdź 880 197
+    834" — no stem in _LABEL_STEMS touches it — so the number itself has to
+    put the customer lookup on the table. The danger is everything else in a
+    store message that is also a long digit run: offer IDs, NIPs, REGONs,
+    tracking codes."""
+
+    @pytest.mark.parametrize("query,expected", [
+        ("Czy mam klienta z takim nr telefonu +48 880 197 834", "+48 880 197 834"),
+        ("czy mam klienta z takim nr telefonu +48 880 197 834?", "+48 880 197 834"),
+        ("kto to jest 880 197 834", "880 197 834"),
+        ("czy ten numer telefonu 880-197-834 coś u mnie kupował", "880-197-834"),
+        ("sprawdź numer 880197834", "880197834"),
+        ("klient dzwonił z 0048880197834", "0048880197834"),
+    ])
+    def test_finds_the_number(self, query, expected):
+        from agents.allegro.allegro_tools import named_phone_number
+        assert named_phone_number(query) == expected
+
+    @pytest.mark.parametrize("query", [
+        "zmień cenę oferty 14587236901",             # offer ID, 11 digits
+        "sprawdź przesyłkę 620012345678901234567890",  # tracking code
+        "wystaw fakturę dla NIP 7792445588",         # NIP, 10 digits
+        "REGON 123456789",                            # 9 digits, but not a phone
+        "zamówienie 0c4854a0-9646-11f1-8028-338c43adc37a",
+        "ile zamówień miałem w 2026 roku",
+        "jakie mam nowe zamówienia",
+    ])
+    def test_does_not_invent_one(self, query):
+        """A false positive would answer a question nobody asked ("nie masz
+        takiego klienta") about a number that was never a phone."""
+        from agents.allegro.allegro_tools import named_phone_number
+        assert named_phone_number(query) is None
+
+    @pytest.mark.parametrize("raw,digits", [
+        ("+48 880 197 834", "880197834"),
+        ("0048880197834", "880197834"),
+        ("880-197-834", "880197834"),
+        ("880197834", "880197834"),
+        ("48880197834", "880197834"),
+        ("+49 151 12345678", "4915112345678"),  # foreign: nothing to strip
+    ])
+    def test_phone_digits_normalizes_every_spelling_to_one(self, raw, digits):
+        from agents.allegro.allegro_tools import phone_digits
+        assert phone_digits(raw) == digits
+
+    def test_a_phone_number_makes_it_a_customer_question(self):
+        from agents.allegro.allegro_tools import matched_labels
+        assert matched_labels("sprawdź 880 197 834") == {"kupujacy"}
+
+    def test_the_tool_that_can_filter_by_it_is_offered(self):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        names = {
+            t["function"]["name"]
+            for t in select_tools_for_context("Czy mam klienta z takim nr telefonu +48 880 197 834")
+        }
+        assert "find_buyer_by_contact" in names
+
+    def test_order_questions_keep_their_own_label(self):
+        """The contact stems must not drag every order question into the buyer
+        topic — that would cost those queries the deterministic layer."""
+        from agents.allegro.allegro_tools import matched_labels
+        assert matched_labels("co klient odebrał") == {"zamowienia"}
+        assert matched_labels("jakie mam nowe zamówienia") == {"zamowienia"}
+
+
 class TestOrderListingConsistency:
     """The three order tools are three intent presets over ONE implementation
     (AllegroAgent._ORDERS_PRESETS) — these pin the parts of that contract that
@@ -276,6 +342,8 @@ class TestLabelPhraseCoverage:
         ("pokaż listę kupujących z tego roku", "get_buyers"),
         ("jakie firmy u mnie kupowały", "get_buyers"),
         ("ilu miałem kupujących w tym roku", "get_buyers"),
+        ("czy mam klienta z takim nr telefonu +48 880 197 834", "find_buyer_by_contact"),
+        ("czy kupował ode mnie ktoś z adresu jan@example.com", "find_buyer_by_contact"),
         ("jakie zamówienia czekają na fakturę", "get_orders_pending_invoice"),
         ("dane do faktury dla tego zamówienia", "get_order_invoice_data"),
         ("wystaw brakujące faktury za ten miesiąc", "preview_pending_invoices"),

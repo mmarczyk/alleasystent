@@ -66,8 +66,16 @@ class ToolHarness:
 
 
 @asynccontextmanager
-async def tool_harness(monitors: dict[str, bool] | None = None, empty: bool = False):
-    """Yield a ToolHarness with fake transports and monitoring flags installed."""
+async def tool_harness(
+    monitors: dict[str, bool] | None = None,
+    empty: bool = False,
+    trim_listed_phones: bool = False,
+):
+    """Yield a ToolHarness with fake transports and monitoring flags installed.
+
+    `trim_listed_phones` serves order LISTINGS without phone numbers (the
+    single-order endpoint keeps them) — see FakeAllegroAPI for why that shape
+    is worth being able to reproduce."""
     from config.settings import get_settings
     from services import monitor_state, order_monitor
     from services.allegro_service import AllegroService
@@ -77,7 +85,7 @@ async def tool_harness(monitors: dict[str, bool] | None = None, empty: bool = Fa
     settings = get_settings()
     flags = {**ALL_MONITORS_OFF, **(monitors or {})}
 
-    allegro_api = FakeAllegroAPI(empty=empty)
+    allegro_api = FakeAllegroAPI(empty=empty, trim_listed_phones=trim_listed_phones)
     infakt_api = FakeInfaktAPI()
 
     allegro = AllegroService(user_id=USER_ID)

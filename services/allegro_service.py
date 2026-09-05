@@ -794,6 +794,7 @@ class AllegroService:
             order_id=data.get("id", ""),
             buyer_login=(data.get("buyer") or {}).get("login", ""),
             buyer_email=(data.get("buyer") or {}).get("email", ""),
+            buyer_phone=(data.get("buyer") or {}).get("phoneNumber", "") or "",
             status=data.get("status", ""),
             fulfillment_status=(data.get("fulfillment") or {}).get("status", ""),
             payment_status=(data.get("payment") or {}).get("type", ""),
@@ -867,6 +868,34 @@ class AllegroService:
             pdf_bytes,
             "application/pdf",
         )
+
+    async def fetch_orders_in_full(self, order_ids: list[str]) -> dict[str, AllegroOrder]:
+        """order_id → the order as the SINGLE-order endpoint returns it, for the
+        ids that could be fetched.
+
+        The order LIST endpoint and /order/checkout-forms/{id} return the same
+        shape, but the list is where Allegro trims optional fields — the buyer's
+        and the delivery address' phone numbers among them. A feature that reads
+        one of those fields therefore cannot conclude "the order doesn't have
+        it" from a listing alone; it asks here for the orders it cares about.
+
+        Same bounded-concurrency, degrade-per-order contract as
+        invoices_issued_map: one failed fetch drops that order from the result
+        instead of sinking the caller, and get_order's cache means an order
+        already fetched in this session costs nothing.
+        """
+        semaphore = asyncio.Semaphore(_INVOICE_LOOKUP_CONCURRENCY)
+
+        async def fetch(order_id: str) -> tuple[str, AllegroOrder | None]:
+            async with semaphore:
+                try:
+                    return order_id, await self.get_order(order_id)
+                except Exception as exc:  # noqa: BLE001 — one order must not sink the caller
+                    logger.warning("fetch_orders_in_full: failed for %s: %s", order_id, exc)
+                    return order_id, None
+
+        fetched = await asyncio.gather(*[fetch(oid) for oid in order_ids])
+        return {oid: order for oid, order in fetched if order is not None}
 
     async def invoices_issued_map(self, order_ids: list[str]) -> dict[str, bool | None]:
         """order_id → True when a VAT invoice file is already attached to the

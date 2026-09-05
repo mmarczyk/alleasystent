@@ -773,6 +773,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "NOT get_sales_summary (that answers 'ile zarobiłem' — revenue, Allegro fees and "
                 "top products, and never names a buyer) and NOT get_orders (one bullet per order, "
                 "no per-buyer totals). "
+                "ONE CUSTOMER IDENTIFIED BY CONTACT DETAILS IS A DIFFERENT TOOL: this one has no "
+                "phone, e-mail, name or NIP filter, so 'czy mam klienta z takim nr telefonu "
+                "+48 880 197 834' or 'czy mam w bazie Jana Kowalskiego' must go to "
+                "find_buyer_by_contact — asked here, the detail is silently dropped and the reply "
+                "is the whole period's customer list. "
                 "ONE NAMED ACCOUNT IS THE OTHER WAY ROUND: this tool describes the buyer "
                 "POPULATION of a period and has NO buyer_login parameter, so a question about "
                 "ONE named account — 'czy w tym roku kupował ode mnie ktoś z konta np1988', "
@@ -846,6 +851,83 @@ ALLEGRO_TOOLS: list[dict] = [
                         "type": "integer",
                         "description": "Max buyers listed in the table (1–200).",
                         "default": 100,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_buyer_by_contact",
+            "description": (
+                "LOOK UP ONE CUSTOMER in the store's customer base by their CONTACT DETAILS — "
+                "phone number, e-mail, name/company or NIP — and answer whether that person has "
+                "ever bought anything, and if so what. "
+                "USE THIS whenever the question is 'do I know this contact?': 'czy mam klienta z "
+                "takim nr telefonu +48 880 197 834', 'czy ten numer telefonu coś u mnie kupował', "
+                "'kto to jest 880197834', 'sprawdź numer 880 197 834', 'czy mam w bazie klienta "
+                "Jan Kowalski', 'czy kupował ode mnie ktoś z adresu jan@example.com', 'czy mam "
+                "klienta z NIP 7792445588', 'co zamawiał klient o tym numerze'. A phone number in "
+                "the message is almost always this tool. "
+                "Pass ONLY the detail(s) the user actually gave, exactly as they wrote them — the "
+                "phone may be in any format ('+48 880 197 834', '880-197-834', '880197834'), it is "
+                "normalized here; never reformat it and never invent the missing digits of a "
+                "partial number. At least one of phone/email/name/nip is REQUIRED: if the user "
+                "named nobody at all, call ask_clarifying_question instead. "
+                "Returns, for each matching customer: their name, phone, e-mail, Allegro login, "
+                "how many orders they placed and for how much, when they last bought, and the "
+                "list of those orders. "
+                "NOT get_buyers (that lists the whole customer POPULATION of a period and cannot "
+                "filter by a phone, e-mail or name — asked this question it would answer with "
+                "every customer of the period, which reads like a real answer) and NOT get_orders "
+                "(its buyer_login filter is the Allegro LOGIN, not a phone, an e-mail or a "
+                "person's name). When the user names an Allegro LOGIN instead of contact details "
+                "('z konta np1988'), that IS get_orders with buyer_login."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {
+                        "type": "string",
+                        "description": (
+                            "The phone number to look for, exactly as the user wrote it — any "
+                            "format ('+48 880 197 834', '880-197-834', '880197834'). Matched "
+                            "against both the buyer's Allegro phone and the delivery address "
+                            "phone, ignoring spaces, dashes and the +48 country prefix."
+                        ),
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "The buyer's e-mail address to look for (exact, case-insensitive).",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "A buyer or company name to look for ('Jan Kowalski', 'Kawa i "
+                            "Spółka') — matched as a fragment of the invoice buyer's name, the "
+                            "company name or the parcel recipient's name, ignoring case."
+                        ),
+                    },
+                    "nip": {
+                        "type": "string",
+                        "description": "The company's NIP to look for; dashes and spaces are ignored.",
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": (
+                            "Start of the period to search, Warsaw-local 'YYYY-MM-DD'. Omit "
+                            "unless the user names a period — the search then covers the last "
+                            "24 months, which is what 'czy mam takiego klienta' means. Pass an "
+                            "explicitly earlier date only when the user asks to look further back."
+                        ),
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": (
+                            "End of the period to search, Warsaw-local 'YYYY-MM-DD' (inclusive). "
+                            "Defaults to today."
+                        ),
                     },
                 },
             },
@@ -1356,6 +1438,10 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_billing_summary": "table",
     "get_sales_summary": "dashboard",
     "get_buyers": "table",
+    # "chat" (not "table") — a contact lookup answers a yes/no question about
+    # ONE person, usually with a single match; a one-row table hidden behind
+    # the document viewer would bury the answer.
+    "find_buyer_by_contact": "chat",
     # Faktury
     "get_orders_pending_invoice": "chat",
     "get_order_invoice_data": "chat",
@@ -1436,6 +1522,7 @@ _TOOL_LABELS: dict[str, str] = {
     "get_sales_summary":               "finanse",
     # kupujacy
     "get_buyers":                      "kupujacy",
+    "find_buyer_by_contact":           "kupujacy",
     # faktury
     "get_orders_pending_invoice":      "faktury",
     "get_order_invoice_data":          "faktury",
@@ -1504,8 +1591,16 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
     # disable the deterministic layer for the order stage they name. A
     # klient-phrased buyer question simply matches no label and falls back to
     # the full tool list, where get_buyers is still there to be picked.
+    #
+    # The contact stems ("telefon", "mail", ...) are what routes "czy mam
+    # klienta z takim nr telefonu" to find_buyer_by_contact. They can co-fire
+    # with "zamowienia" on the rare order question that names a phone or an
+    # e-mail ("podaj numer telefonu do tego zamówienia"), which only costs
+    # that query the deterministic layer — the recall-over-precision trade
+    # this whole map is built on.
     "kupujacy":   ("kupuj", "kupowa", "nabywc", "kontrahent", "firm",
-                   "buyer", "customer", "nip"),
+                   "buyer", "customer", "nip",
+                   "telefon", "tel", "komork", "phone", "mail", "e-mail"),
     "zwroty":     ("zwrot", "reklamacj", "spor"),
     "monitoring": ("monitor", "powiad", "notyfikacj", "przypomn", "wlacz", "wylacz"),
 }
@@ -1580,6 +1675,66 @@ def named_buyer_login(text: str) -> str | None:
     return None
 
 
+# ── A phone number: "czy mam klienta z nr telefonu +48 880 197 834" ─────────
+# A phone number is the one contact detail a seller pastes in raw, with no word
+# around it that any stem above would catch ("sprawdź 880 197 834"), so the
+# NUMBER ITSELF has to route the query — exactly like named_buyer_login above.
+#
+# Precision matters more than recall here, because a store message is full of
+# other long digit runs: offer IDs (11 digits, e.g. 14587236901), NIPs (10),
+# REGONs (9!), tracking codes (20+), order UUIDs. So a candidate is only read as
+# a phone when it looks like one is written by a human:
+#   • an explicit +48 / 0048 country prefix, or
+#   • nine digits grouped with spaces or dashes ("880 197 834", "88-019-78-34"),
+#   • or nine bare digits WITH a phone word somewhere in the message.
+# A bare, unseparated, context-less digit run is never a phone here — that is
+# the offer-ID/REGON shape, and mistaking one for a phone would send a seller
+# a confident "nie masz takiego klienta" for a question they never asked.
+_PHONE_CONTEXT_RE = re.compile(r"telefon|\btel\b|\bnr\b|numer|komórk|komork|phone|dzwoni", re.IGNORECASE)
+# Preceded by one of these, nine digits are an identifier, not a phone.
+_NOT_A_PHONE_BEFORE_RE = re.compile(r"(?:nip|regon|krs|pesel|id|oferty?|oferta|zamówieni\w*|zamowieni\w*)\W*$", re.IGNORECASE)
+_PHONE_CANDIDATE_RE = re.compile(
+    r"(?<![\d/-])"                      # not in the middle of a longer number/date
+    r"(\+?\s?(?:48|0048)[\s-]?)?"       # optional country prefix
+    r"(\d(?:[\s-]?\d){8})"              # nine digits, optionally separated
+    r"(?![\d-])"                        # and no more digits after them
+)
+
+
+def phone_digits(raw: str) -> str:
+    """A phone number reduced to the digits that identify it: no spaces, no
+    dashes, no country prefix — '+48 880 197 834', '0048880197834' and
+    '880-197-834' all become '880197834'.
+
+    A number that isn't Polish keeps its own digits (nothing is stripped unless
+    what remains is a full nine-digit national number), so a foreign buyer's
+    phone still compares equal to itself.
+    """
+    digits = re.sub(r"\D", "", raw or "")
+    for prefix in ("0048", "48", "0"):
+        if digits.startswith(prefix) and len(digits) - len(prefix) == 9:
+            return digits[len(prefix):]
+    return digits
+
+
+def named_phone_number(text: str) -> str | None:
+    """The phone number `text` names, in its original spelling, or None.
+
+    Returns the number as the user typed it (so the reply can echo it back
+    unchanged); use phone_digits() for comparing.
+    """
+    has_context = bool(_PHONE_CONTEXT_RE.search(text))
+    for match in _PHONE_CANDIDATE_RE.finditer(text):
+        prefix, digits = match.group(1), match.group(2)
+        if _NOT_A_PHONE_BEFORE_RE.search(text[: match.start()]):
+            continue
+        separated = bool(re.search(r"[\s-]", digits))
+        if not (prefix or separated or has_context):
+            continue
+        return match.group(0).strip()
+    return None
+
+
 def matched_labels(text: str) -> set[str]:
     """Labels whose stems appear as a word-prefix anywhere in `text`."""
     words = _normalize(text).split()
@@ -1595,6 +1750,11 @@ def matched_labels(text: str) -> set[str]:
     # candidate too and the model picks between them on the descriptions.
     if named_buyer_login(text):
         found.add("zamowienia")
+    # A phone number is a CUSTOMER question however it is phrased — "sprawdź
+    # 880 197 834" carries no stem at all, and without this it would fall back
+    # to the full ~40-schema list with nothing pointing at the lookup tool.
+    if named_phone_number(text):
+        found.add("kupujacy")
     return found
 
 

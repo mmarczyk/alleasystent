@@ -230,6 +230,30 @@ CASES: list[Case] = [
          "Jakie firmy u mnie kupowały w tym roku?",
          ("Brak kupujących (firmy)",), empty=True,
          note="Pusty sklep — stan zerowy z nazwą filtra."),
+    Case("find_buyer_by_contact", "find_buyer_by_contact", {"phone": "+48 880 197 834"},
+         "Czy mam klienta z takim nr telefonu +48 880 197 834?",
+         ("**Tak —", "Kawa i Spółka", "- Telefon: +48 880 197 834", "Historia zakupów:",
+          "Przeszukałem"),
+         note="Wyszukanie klienta po numerze telefonu — odpowiedź „tak/nie”, dane "
+              "kontaktowe i historia zakupów. Numer dopasowywany bez względu na "
+              "spacje, myślniki i prefiks +48."),
+    Case("find_buyer_by_contact__delivery_phone", "find_buyer_by_contact",
+         {"phone": "601220118"},
+         "Kto to jest 601 220 118?",
+         ("**Tak —", "Katarzyna Wójcik", "601 220 118"),
+         note="Numer, którego nie ma na koncie kupującego — tylko na adresie "
+              "dostawy. Oba miejsca są przeszukiwane."),
+    Case("find_buyer_by_contact__unknown", "find_buyer_by_contact",
+         {"phone": "+48 500 100 200"},
+         "Czy mam klienta z numerem +48 500 100 200?",
+         ("**Nie — nie znalazłem klienta", "numer telefonu +48 500 100 200",
+          "Przeszukałem"),
+         note="Numer spoza bazy — jednoznaczne „nie” z nazwą szukanej danej i "
+              "okresem, który sprawdzono."),
+    Case("find_buyer_by_contact__nip", "find_buyer_by_contact", {"nip": "779-244-55-88"},
+         "Czy mam w bazie klienta o NIP 779-244-55-88?",
+         ("**Tak —", "Kawa i Spółka", "- NIP: 7792445588"),
+         note="Ta sama wyszukiwarka po NIP-ie — myślniki ignorowane."),
 
     # ── Faktury ──────────────────────────────────────────────────────────────
     Case("get_orders_pending_invoice", "get_orders_pending_invoice", {},

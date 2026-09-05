@@ -20,8 +20,14 @@ from tests.tools import dataset as ds
 class FakeAllegroAPI:
     """Routes Allegro REST calls against the synthetic dataset."""
 
-    def __init__(self, empty: bool = False):
+    def __init__(self, empty: bool = False, trim_listed_phones: bool = False):
         self.empty = empty
+        # Allegro trims optional fields on the order LIST endpoint; whether the
+        # phone numbers survive there is not something this project can pin
+        # down from the outside. Set this to serve a listing without them (the
+        # single-order endpoint still has them) and exercise the re-fetch in
+        # AllegroAgent._orders_with_phones.
+        self.trim_listed_phones = trim_listed_phones
         self.calls: list[tuple[str, str, dict[str, list[str]]]] = []
         # Mutated by POST/PUT handlers so a test can assert a write happened.
         self.writes: list[tuple[str, Any]] = []
@@ -40,6 +46,21 @@ class FakeAllegroAPI:
     def _one(q: dict[str, list[str]], key: str, default: Any = None) -> Any:
         vals = q.get(key)
         return vals[0] if vals else default
+
+    @staticmethod
+    def _without_phones(form: dict) -> dict:
+        """One checkout form with every phone number stripped, as a trimmed
+        listing would return it. Copied, never mutated in place — the dataset
+        is shared with every other case in the run."""
+        trimmed = dict(form)
+        trimmed["buyer"] = {k: v for k, v in (form.get("buyer") or {}).items() if k != "phoneNumber"}
+        delivery = form.get("delivery")
+        if isinstance(delivery, dict) and isinstance(delivery.get("address"), dict):
+            trimmed["delivery"] = {
+                **delivery,
+                "address": {k: v for k, v in delivery["address"].items() if k != "phoneNumber"},
+            }
+        return trimmed
 
     def _page(self, items: list[dict], q: dict[str, list[str]]) -> tuple[list[dict], int]:
         limit = int(self._one(q, "limit", 100))
@@ -92,6 +113,8 @@ class FakeAllegroAPI:
                     if ((f.get("fulfillment") or {}).get("status") in ("SENT", "PICKED_UP")) == want_sent
                 ]
             page, total = self._page(forms, q)
+            if self.trim_listed_phones:
+                page = [self._without_phones(f) for f in page]
             return self._json({"checkoutForms": page, "totalCount": total, "count": len(page)})
 
         if path.startswith("/order/checkout-forms/"):
