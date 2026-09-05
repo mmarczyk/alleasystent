@@ -342,6 +342,17 @@ class AllegroAgent(BaseAgent):
         "which get_orders can't do either — buyer_login is the Allegro login, not a company or "
         "person's name — in that case call ask_clarifying_question asking for the order_id or the "
         "buyer's Allegro login).\n"
+        "• ZYSK/MARŻA ON ONE ORDER WITH A PURCHASE COST THE USER GIVES — 'dla tego zamówienia "
+        "policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł', 'ile na tym zarobiłem przy "
+        "zakupie po 8 zł/szt', 'jaka marża, jak towar kosztował mnie 12 zł' → "
+        "calculate_order_profit with that order_id and unit_cost=<the number the user said> "
+        "(item_costs only when DIFFERENT products of the order got different costs). NEVER answer "
+        "this with get_order_details: it has no cost parameter, so the cost the user just named is "
+        "silently dropped and its 'Zysk netto' line — order value minus Allegro fees only — comes "
+        "back as if it were the answer. The order_id comes from the message or from earlier in the "
+        "conversation ('tego zamówienia' after you showed one) — reuse it. If the user asks about "
+        "profit but names NO cost anywhere in the conversation, call ask_clarifying_question for "
+        "the cost per unit — never assume one.\n"
         "• Whether/how many orders were PLACED in a specific TIME WINDOW ('czy dzisiaj po 8 rano były "
         "jakieś zamówienia', 'ile zamówień wpłynęło wczoraj', 'zamówienia złożone po godzinie X', "
         "'zamówienia z ostatniej godziny') → get_orders with bought_after_local/bought_before_local. "
@@ -2650,6 +2661,169 @@ class AllegroAgent(BaseAgent):
             "Wysyłka do KSeF jest asynchroniczna — ostateczny status sprawdź w panelu inFakt."
         )
 
+    # ── Zysk jednego zamówienia ──────────────────────────────────────────────
+    # The one number this app cannot derive from Allegro is the seller's own
+    # purchase cost — Allegro knows what the buyer paid and what it charged in
+    # fees, nothing about what the goods cost to buy (hence the explicit
+    # disclaimer under get_sales_summary's "Przychód po opłatach Allegro"). So
+    # the cost comes from the user's own message ("koszt 1 szt. na poziomie
+    # 8,10 zł") and this is the only place in the agent that multiplies it out:
+    # revenue − Allegro fees + credits − cost of goods, per order.
+
+    @classmethod
+    def _unit_cost_for(
+        cls, line: Any, item_costs: list[dict[str, Any]], default_cost: float | None,
+    ) -> float | None:
+        """Purchase cost of ONE unit of `line`, or None when the user named no
+        cost that covers it.
+
+        offer_id wins over offer_name — an ID is exact, while a name the user
+        typed is matched as a folded substring ("skarpety" → "Skarpety wełniane
+        3-pak") and could otherwise shadow a more precise entry. `default_cost`
+        (the tool's `unit_cost`) covers everything left over; with neither, the
+        caller asks instead of assuming a cost of zero, which would report the
+        whole order value as profit.
+        """
+        for spec in item_costs:
+            offer_id = str(spec.get("offer_id") or "").strip()
+            if offer_id and offer_id == str(line.offer_id):
+                return float(spec["unit_cost"])
+        wanted = cls._fold(line.offer_name)
+        for spec in item_costs:
+            name = cls._fold(str(spec.get("offer_name") or ""))
+            if name and name in wanted:
+                return float(spec["unit_cost"])
+        return default_cost
+
+    @staticmethod
+    def _cost_value(raw: Any) -> float | None:
+        """A cost the tool can multiply, or None. `bool` is excluded on purpose:
+        it passes isinstance(..., int), so a model answering `true` would be
+        silently costed at 1,00 zł per unit."""
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        return float(raw)
+
+    async def _order_profit(self, tool_input: dict[str, Any]) -> str:
+        order_id = tool_input["order_id"]
+        raw_costs = tool_input.get("item_costs") or []
+        item_costs = [
+            c for c in raw_costs
+            if isinstance(c, dict) and self._cost_value(c.get("unit_cost")) is not None
+        ]
+        default_cost = self._cost_value(tool_input.get("unit_cost"))
+        if default_cost is None and not item_costs:
+            # The model called the tool without the one thing only the user can
+            # supply. Ask rather than invent a cost — a made-up number here
+            # would come back as a precise-looking zysk figure.
+            return (
+                "Żeby policzyć zysk, potrzebuję kosztu zakupu towaru — podaj koszt 1 szt. "
+                "(np. „koszt 1 szt. to 8,10 zł”)."
+            )
+
+        order, billing_entries = await asyncio.gather(
+            self._allegro.get_order(order_id),
+            self._allegro.get_billing_entries_for_order(order_id),
+            return_exceptions=True,
+        )
+        if isinstance(order, BaseException):
+            raise order
+        # Unlike get_order_details, a failed billing fetch cannot be swallowed
+        # here: with no fees the profit comes out too high and still looks like
+        # a finished answer, so it is said out loud instead.
+        billing_error = self._billing_error_reason(billing_entries) if isinstance(billing_entries, BaseException) else None
+        if billing_error:
+            logger.warning("calculate_order_profit: billing fetch failed for %s: %s", order_id, billing_entries)
+            billing_entries = []
+
+        currency = order.currency
+        cost_lines: list[str] = []
+        cogs = 0.0
+        uncosted: list[str] = []
+        for li in order.line_items:
+            unit_cost = self._unit_cost_for(li, item_costs, default_cost)
+            if unit_cost is None:
+                uncosted.append(li.offer_name)
+                continue
+            line_cost = unit_cost * li.quantity
+            cogs += line_cost
+            cost_lines.append(
+                f"  - {li.offer_name}: {li.quantity} × {self._format_price(unit_cost, currency)} "
+                f"= {self._format_price(line_cost, currency)}"
+            )
+        if uncosted:
+            products = ", ".join(f"„{name}”" for name in uncosted)
+            return (
+                f"Nie mam kosztu zakupu dla: {products}. Podaj koszt 1 szt. dla "
+                f"{'tych pozycji' if len(uncosted) > 1 else 'tej pozycji'} (albo jeden koszt "
+                "wspólny dla całego zamówienia), to policzę zysk."
+            )
+
+        fee_by_type: dict[str, float] = defaultdict(float)
+        credit_by_type: dict[str, float] = defaultdict(float)
+        total_fees = 0.0
+        total_credits = 0.0
+        for e in billing_entries:
+            if self._is_balance_transfer_entry(e):
+                continue
+            amount = float((e.get("value") or {}).get("amount", 0) or 0)
+            desc = (e.get("type") or {}).get("description", "Inne")
+            if amount < 0:
+                total_fees += abs(amount)
+                fee_by_type[desc] += abs(amount)
+            elif amount > 0:
+                total_credits += amount
+                credit_by_type[desc] += amount
+
+        revenue = order.total_price
+        profit = revenue - total_fees + total_credits - cogs
+
+        cost_header = (
+            f"- Koszt zakupu towaru (Twoje założenie: {self._format_price(default_cost, currency)}/szt.):"
+            if default_cost is not None and not item_costs
+            else "- Koszt zakupu towaru (Twoje założenie):"
+        )
+        lines = [
+            f"- Zamówienie: `{order.order_id}`",
+            f"- Kupujący: {order.buyer_login}",
+            f"- Przychód (kwota od kupującego): {self._format_price(revenue, currency)}",
+            cost_header,
+            *cost_lines,
+            f"  - Razem koszt towaru: {self._format_price(cogs, currency)}",
+        ]
+        if billing_error:
+            lines.append(f"- Opłaty Allegro: ⚠️ nie udało się pobrać — {billing_error}")
+            lines.append("  - Poniższy wynik NIE uwzględnia prowizji ani opłat Allegro.")
+        elif total_fees or total_credits:
+            lines.append(f"- Opłaty Allegro: -{self._format_price(total_fees, currency)}")
+            lines += [
+                f"  - {desc}: -{self._format_price(amt, currency)}"
+                for desc, amt in sorted(fee_by_type.items(), key=lambda x: x[1], reverse=True)
+            ]
+            if total_credits:
+                lines.append(f"- Zwroty/korekty od Allegro: +{self._format_price(total_credits, currency)}")
+                lines += [
+                    f"  - {desc}: +{self._format_price(amt, currency)}"
+                    for desc, amt in sorted(credit_by_type.items(), key=lambda x: x[1], reverse=True)
+                ]
+        else:
+            lines.append("- Opłaty Allegro: brak wpisów rozliczeniowych dla tego zamówienia (0,00 PLN)")
+
+        formula = (
+            f"{self._format_price(revenue, currency)} − {self._format_price(total_fees, currency)} "
+            + (f"+ {self._format_price(total_credits, currency)} " if total_credits else "")
+            + f"− {self._format_price(cogs, currency)} = {self._format_price(profit, currency)}"
+        )
+        margin = f" (marża {profit / revenue * 100:.1f}% przychodu)".replace(".", ",") if revenue else ""
+        lines.append(f"- **Zysk: {self._format_price(profit, currency)}**{margin}")
+        lines.append(f"- Wyliczenie: {formula}")
+        lines.append(
+            "- Uwaga: przychód to kwota zapłacona przez kupującego (razem z dostawą), "
+            "a koszt towaru pochodzi z Twojego założenia — poza opłatami Allegro wynik nie "
+            "obejmuje kosztów własnych (opakowanie, wysyłka poza Allegro, praca)."
+        )
+        return "\n".join(lines)
+
     # ── Order listing: one implementation behind three tools ─────────────────
     # get_new_orders / get_orders / get_orders_delivery exist as separate tool
     # schemas only so the model can route intents against named presets (see
@@ -2935,6 +3109,9 @@ class AllegroAgent(BaseAgent):
                 lines.append("- Rozliczenie:")
                 lines.extend(billing_lines)
             return "\n".join(lines)
+
+        if tool_name == "calculate_order_profit":
+            return await self._order_profit(tool_input)
 
         if tool_name == "get_order_invoice_data":
             inv = await self._allegro.get_order_invoice_data(tool_input["order_id"])

@@ -703,6 +703,162 @@ class TestGetOrderDetailsDispatch:
             assert expected_substr in result, result
 
 
+class TestCalculateOrderProfit:
+    """calculate_order_profit is the only place the seller's own purchase cost
+    enters the app — Allegro knows the order value and its fees, never what the
+    goods cost to buy, so the cost comes from the user's message and this tool
+    multiplies it out: revenue − fees + credits − cost of goods."""
+
+    def _make_order(self, **overrides):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        defaults = dict(
+            order_id="abc-123",
+            buyer_login="jan_kowalski",
+            status="BOUGHT",
+            fulfillment_status="READY_FOR_PROCESSING",
+            total_price=100.00,
+            currency="PLN",
+            line_items=[
+                AllegroOrderLine(offer_id="111", offer_name="Włóczka merino", quantity=5, price=18.00),
+            ],
+        )
+        defaults.update(overrides)
+        return AllegroOrder(**defaults)
+
+    def _agent(self, order, billing_entries=None, billing_exc=None):
+        agent = _make_agent()
+        agent._allegro.get_order = AsyncMock(return_value=order)
+        agent._allegro.get_billing_entries_for_order = AsyncMock(
+            side_effect=billing_exc, return_value=billing_entries or [],
+        )
+        return agent
+
+    @staticmethod
+    def _fee(amount: str, desc: str = "Prowizja od sprzedaży"):
+        return {
+            "value": {"amount": amount},
+            "type": {"description": desc},
+            "occurredAt": "2026-08-27T00:00:00Z",
+        }
+
+    @pytest.mark.asyncio
+    async def test_profit_is_revenue_minus_fees_minus_cost_of_goods(self):
+        agent = self._agent(self._make_order(), billing_entries=[self._fee("-9.00")])
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        # 100.00 − 9.00 fees − 5 × 8.10 = 50.50
+        assert "- Przychód (kwota od kupującego): 100,00 PLN" in result
+        assert "  - Włóczka merino: 5 × 8,10 PLN = 40,50 PLN" in result
+        assert "  - Razem koszt towaru: 40,50 PLN" in result
+        assert "- Opłaty Allegro: -9,00 PLN" in result
+        assert "**Zysk: 50,50 PLN**" in result
+        assert "marża 50,5% przychodu" in result
+
+    @pytest.mark.asyncio
+    async def test_credits_are_added_back(self):
+        agent = self._agent(
+            self._make_order(),
+            billing_entries=[self._fee("-9.00"), self._fee("4.00", "Zwrot prowizji")],
+        )
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        assert "- Zwroty/korekty od Allegro: +4,00 PLN" in result
+        assert "**Zysk: 54,50 PLN**" in result
+
+    @pytest.mark.asyncio
+    async def test_balance_transfer_entries_are_not_counted_twice(self):
+        """PAD entries record Allegro sweeping money to settle the account
+        balance — the fee they settle is already its own entry."""
+        agent = self._agent(
+            self._make_order(),
+            billing_entries=[
+                self._fee("-9.00"),
+                {"value": {"amount": "-9.00"}, "type": {"id": "PAD", "description": "Pobranie opłat z wpływów"}},
+            ],
+        )
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        assert "- Opłaty Allegro: -9,00 PLN" in result
+        assert "**Zysk: 50,50 PLN**" in result
+
+    @pytest.mark.asyncio
+    async def test_per_product_costs_by_offer_id_and_name(self):
+        from models.allegro import AllegroOrderLine
+        order = self._make_order(
+            total_price=200.00,
+            line_items=[
+                AllegroOrderLine(offer_id="111", offer_name="Włóczka merino", quantity=2, price=50.00),
+                AllegroOrderLine(offer_id="222", offer_name="Druty bambusowe 4mm", quantity=1, price=100.00),
+            ],
+        )
+        agent = self._agent(order)
+
+        result = await agent._dispatch("calculate_order_profit", {
+            "order_id": "abc-123",
+            "item_costs": [
+                {"offer_id": "111", "unit_cost": 8.1},
+                {"offer_name": "druty", "unit_cost": 30},
+            ],
+        })
+
+        assert "  - Włóczka merino: 2 × 8,10 PLN = 16,20 PLN" in result
+        assert "  - Druty bambusowe 4mm: 1 × 30,00 PLN = 30,00 PLN" in result
+        assert "  - Razem koszt towaru: 46,20 PLN" in result
+        assert "**Zysk: 153,80 PLN**" in result
+
+    @pytest.mark.asyncio
+    async def test_no_cost_given_asks_instead_of_assuming_zero(self):
+        agent = self._agent(self._make_order())
+
+        result = await agent._dispatch("calculate_order_profit", {"order_id": "abc-123"})
+
+        assert "koszt" in result.lower()
+        assert "Zysk:" not in result
+        agent._allegro.get_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_item_costs_not_covering_every_product_asks_for_the_rest(self):
+        from models.allegro import AllegroOrderLine
+        order = self._make_order(line_items=[
+            AllegroOrderLine(offer_id="111", offer_name="Włóczka merino", quantity=1, price=50.00),
+            AllegroOrderLine(offer_id="222", offer_name="Druty bambusowe 4mm", quantity=1, price=50.00),
+        ])
+        agent = self._agent(order)
+
+        result = await agent._dispatch("calculate_order_profit", {
+            "order_id": "abc-123",
+            "item_costs": [{"offer_id": "111", "unit_cost": 8.1}],
+        })
+
+        assert "Druty bambusowe 4mm" in result
+        assert "Zysk:" not in result
+
+    @pytest.mark.asyncio
+    async def test_failed_billing_fetch_is_said_out_loud(self):
+        """Silently dropping the fees would report a too-high profit that still
+        reads like a finished answer."""
+        from services.allegro_service import AllegroAPIError
+
+        agent = self._agent(self._make_order(), billing_exc=AllegroAPIError(429, "too many requests"))
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        assert "⚠️" in result
+        assert "NIE uwzględnia" in result
+        assert "**Zysk: 59,50 PLN**" in result
+
+
 class TestOrdersDueToday:
     """get_orders_due_today is the deadline view: what still has to be handed
     to the carrier by the end of today. Unlike the other order presets it is

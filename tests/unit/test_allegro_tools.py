@@ -123,6 +123,33 @@ class TestMatchedLabels:
         from agents.allegro.allegro_tools import matched_labels
         assert "zamowienia" in matched_labels("show me my new orders")
 
+    @pytest.mark.parametrize("query", [
+        "Dla tego zamówienia policz zysk zakładając koszt 1szt na poziomie 8.1zl",
+        "ile na tym zarobiłem przy zakupie po 8 zł za sztukę",
+        "jaka marża na tym zamówieniu, jak towar kosztował mnie 12 zł",
+    ])
+    def test_profit_question_keeps_the_profit_tool_in_the_candidate_list(self, query):
+        """calculate_order_profit carries the "finanse" label, so it has to
+        survive the Layer-1 filter for every way a seller asks about the money
+        made on one order — including a follow-up that names no order at all."""
+        from agents.allegro.allegro_tools import matched_labels, tools_for_labels
+        names = {t["function"]["name"] for t in tools_for_labels(matched_labels(query))}
+        assert "calculate_order_profit" in names
+
+    def test_profit_question_is_never_resolved_deterministically(self):
+        """The deterministic layer extracts no costs and knows no order_id — it
+        must hand a profit question to the LLM rather than serve some order
+        listing as if it answered it."""
+        from agents.allegro.allegro_tools import matched_labels
+        from agents.allegro.deterministic_dispatch import resolve_deterministic
+
+        for query in (
+            "Dla tego zamówienia policz zysk zakładając koszt 1szt na poziomie 8.1zl",
+            "policz zysk z ostatniego zamówienia przy koszcie 8,1 zł/szt",
+            "ile zarobiłem na tym zamówieniu przy koszcie 8 zł",
+        ):
+            assert resolve_deterministic(query, matched_labels(query)) is None, query
+
 
 class TestNamedBuyerLogin:
     """"z konta np1988" names SOMEONE ELSE'S account — the buyer's login, which
