@@ -60,9 +60,17 @@ def user_id_of(allegro) -> str:
     return getattr(allegro, "_user_id", None) or "default"
 
 
+# Who says this order has an invoice: this assistant issued one, or the seller
+# told us in the chat that one already exists. Both stop the reminder; they are
+# worded differently everywhere the difference matters, because only the first
+# one is something we can point at.
+SOURCE_ASSISTANT = "assistant"
+SOURCE_SELLER = "seller"
+
+
 async def record_issued(
     user_id: str, order_id: str, *, invoice_uuid: str, number: str = "",
-    attached: bool = False, note: str = "",
+    attached: bool = False, note: str = "", source: str = SOURCE_ASSISTANT,
 ) -> None:
     """Write down that an invoice for this order exists in inFakt.
 
@@ -76,6 +84,7 @@ async def record_issued(
         "number": number,
         "attached": attached,
         "note": note,
+        "source": source,
         "at": time.time(),
     }
 
@@ -96,6 +105,20 @@ async def mark_attached(user_id: str, order_id: str, *, number: str = "") -> Non
         invoice_uuid=existing.get("invoice_uuid", ""),
         number=number or existing.get("number", ""),
         attached=True,
+    )
+
+
+async def record_confirmed_by_seller(user_id: str, order_id: str) -> None:
+    """Write down that the SELLER says this order already has its invoice.
+
+    Their word, not Allegro's — but a seller looking at the order knows better
+    than an API that only sees attached PDFs, and being told to issue an invoice
+    they can see is what makes the reminder useless. The claim is recorded as
+    theirs (source=seller) so nothing later presents it as an invoice we issued.
+    """
+    await record_issued(
+        user_id, order_id, invoice_uuid="", attached=False, source=SOURCE_SELLER,
+        note="sprzedawca potwierdził w czacie, że faktura już istnieje",
     )
 
 

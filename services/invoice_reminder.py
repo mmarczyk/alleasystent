@@ -463,6 +463,9 @@ async def handle_reply(
     if action == "issue":
         return await _issue_all(user_id, state)
 
+    if action == "already_issued":
+        return await _accept_already_issued(user_id, state)
+
     if action == "decline":
         await set_monitor_enabled(user_id, False)
         return (
@@ -500,6 +503,37 @@ async def _issue_all(user_id: str, state: dict) -> str:
     return f"Wystawiam {_count_phrase(len(order_ids))}:\n\n" + "\n\n---\n\n".join(results)
 
 
+async def _accept_already_issued(user_id: str, state: dict) -> str:
+    """The seller says the invoice for these orders already exists.
+
+    Allegro only reports invoices whose PDF is attached to the order, so it can
+    keep calling an order uninvoiced long after the seller has dealt with it —
+    and then this reminder asks about it again every two hours, with no way to
+    say "it's done" short of turning all reminders off. Their answer is written
+    to the ledger (as theirs — services/invoice_ledger.record_confirmed_by_seller)
+    and those orders stop coming back.
+
+    Nothing is issued here, and nothing about the order is changed in Allegro:
+    the only effect is that this reminder stops claiming the invoice is missing.
+    """
+    from services import invoice_ledger
+
+    order_ids = state.get("order_ids", [])
+    for order_id in order_ids:
+        await invoice_ledger.record_confirmed_by_seller(user_id, order_id)
+    await _resolve_state(user_id, state)
+
+    if not order_ids:
+        return "Ok, w takim razie nie mam o co pytać — przestaję przypominać."
+    return (
+        f"Ok, zapisałem, że faktury dla {_format_order_ids(order_ids)} są już wystawione — "
+        "nie będę o nie więcej przypominać.\n\n"
+        "Allegro nadal widzi te zamówienia jako bez faktury (widzi tylko faktury dołączone "
+        "do zamówienia jako PDF), więc jeśli któraś jednak nie trafiła do zamówienia, "
+        "napisz „dołącz fakturę do zamówienia `<id>`”."
+    )
+
+
 # ── Reply classification (small dedicated LLM call, same shape as the
 # orchestrator's own context classifier — see agents/orchestrator.py) ────────
 
@@ -533,11 +567,17 @@ SNOOZE_UNSPECIFIED
 DECLINE
   — sprzedawca chce WYŁĄCZYĆ te automatyczne przypomnienia w ogóle (np. "przestań
     pytać", "wyłącz to", "nie chcę tych przypomnień", "daj mi spokój").
+ALREADY_ISSUED
+  — sprzedawca mówi, że faktura dla TYCH zamówień JUŻ istnieje / już ją wystawił lub
+    dołączył (np. "przecież ją wystawiłem", "ta faktura już jest", "faktura jest już
+    dodana do zamówienia", "już to zrobiłem"). To NIE jest prośba o wystawienie —
+    tu nie wolno niczego wystawiać.
 UNRELATED
   — wiadomość NIE jest odpowiedzią na to przypomnienie, tylko dotyczy czegoś zupełnie
     innego (nowe, niepowiązane pytanie/polecenie).
 
-Odpowiedz TYLKO jednym z: ISSUE / SNOOZE:<liczba> / SNOOZE_UNSPECIFIED / DECLINE / UNRELATED.
+Odpowiedz TYLKO jednym z: ISSUE / SNOOZE:<liczba> / SNOOZE_UNSPECIFIED / DECLINE /
+ALREADY_ISSUED / UNRELATED.
 """.strip()
 
 # Second layer under _reminder_owns_reply: even when the reminder may claim
@@ -613,6 +653,8 @@ async def _classify_reply(
 
 
 def _parse_classification(raw: str) -> tuple[str, int]:
+    if raw.startswith("ALREADY_ISSUED"):
+        return "already_issued", 0
     if raw.startswith("ISSUE"):
         return "issue", 0
     if raw.startswith("DECLINE"):

@@ -3295,7 +3295,7 @@ class AllegroAgent(BaseAgent):
             header = f"**Zamówień bez faktury: {not_issued}**"
             if issued:
                 header += (
-                    f" (+{len(issued)} z fakturą wystawioną w inFakt, ale niedołączoną "
+                    f" (+{len(issued)}, dla których faktura już istnieje, ale nie jest dołączona "
                     "do zamówienia w Allegro — napisz „dołącz fakturę do zamówienia `<id>`”)"
                 )
             header += "\n"
@@ -3303,7 +3303,12 @@ class AllegroAgent(BaseAgent):
             for o, inv in zip(orders, inv_results):
                 items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
                 record = issued.get(o.order_id)
-                if record:
+                if record and record.get("source") == invoice_ledger.SOURCE_SELLER:
+                    invoice_line = (
+                        "**Faktura: potwierdziłeś w czacie, że już istnieje** — Allegro jej nie "
+                        "widzi, bo nie ma jej dołączonej do zamówienia jako PDF"
+                    )
+                elif record:
                     invoice_line = (
                         f"**Faktura: wystawiona w inFakt ({record.get('number') or record.get('invoice_uuid') or 'brak numeru'}), "
                         "NIE dołączona do zamówienia w Allegro** — nie wystawiaj jej drugi raz"

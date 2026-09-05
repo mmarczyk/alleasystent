@@ -524,3 +524,56 @@ class TestSkipsOrdersAlreadyInvoiced:
         )
         left = await invoice_reminder._drop_already_issued("u1", self._orders("o1"))
         assert [o.order_id for o in left] == ["o1"]
+
+
+class TestSellerSaysItIsAlreadyIssued:
+    """Allegro reports an invoice only once its PDF is attached to the order, so
+    it can call an order uninvoiced long after the seller dealt with it. Without
+    a way to say "it's done", the only exit from the nagging was turning every
+    invoice reminder off."""
+
+    def test_classification_is_parsed(self):
+        from services.invoice_reminder import _parse_classification
+
+        assert _parse_classification("ALREADY_ISSUED") == ("already_issued", 0)
+
+    def test_is_not_confused_with_an_issue_command(self):
+        from services.invoice_reminder import _parse_classification
+
+        assert _parse_classification("ISSUE") == ("issue", 0)
+        assert _parse_classification("ALREADY_ISSUED")[0] != "issue"
+
+    @pytest.mark.asyncio
+    async def test_records_each_order_as_the_sellers_word_and_issues_nothing(self, monkeypatch):
+        from services import invoice_ledger, invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1", "o2"], "interval_minutes": 120}
+        confirm = AsyncMock()
+        issue = AsyncMock()
+        monkeypatch.setattr(invoice_ledger, "record_confirmed_by_seller", confirm)
+        monkeypatch.setattr(invoice_reminder, "_issue_all", issue)
+        monkeypatch.setattr(invoice_reminder, "_resolve_state", AsyncMock())
+        monkeypatch.setattr(invoice_reminder, "get_pending_state", AsyncMock(return_value=state))
+        monkeypatch.setattr(
+            invoice_reminder, "_classify_reply", AsyncMock(return_value=("already_issued", 0))
+        )
+
+        out = await invoice_reminder.handle_reply(
+            "user1", "przecież ta faktura już jest dodana do zamówienia", None
+        )
+
+        assert [c.args[1] for c in confirm.await_args_list] == ["o1", "o2"]
+        issue.assert_not_awaited()
+        assert "nie będę o nie więcej przypominać" in out
+
+    @pytest.mark.asyncio
+    async def test_those_orders_stop_being_reminded_about(self, monkeypatch):
+        from services import invoice_ledger, invoice_reminder
+
+        monkeypatch.setattr(
+            invoice_ledger, "get_records",
+            AsyncMock(return_value={"o1": {"source": "seller", "attached": False}}),
+        )
+        orders = [type("O", (), {"order_id": oid})() for oid in ("o1", "o2")]
+        left = await invoice_reminder._drop_already_issued("user1", orders)
+        assert [o.order_id for o in left] == ["o2"]
