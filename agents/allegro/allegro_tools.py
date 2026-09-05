@@ -249,6 +249,73 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "calculate_order_profit",
+            "description": (
+                "Profit of ONE order for a cost of goods THE USER states in the conversation: "
+                "order value − Allegro's fees for that order + its credits − (purchase cost per "
+                "unit × quantity) for every item. "
+                "USE THIS whenever a question about one order names a purchase cost: 'dla tego "
+                "zamówienia policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł', 'ile na tym "
+                "zarobiłem, jeśli kupiłem po 8 zł za sztukę', 'jaka marża przy koszcie 12 zł/szt'. "
+                "get_order_details CANNOT answer it — it knows nothing about purchase costs, and "
+                "its 'Zysk netto' line is only the order value minus Allegro fees, so answering "
+                "with it silently ignores the cost the user just gave. get_sales_summary is for "
+                "whole PERIODS and has neither an order_id nor a cost parameter. "
+                "The order_id may come from the user's message or from earlier in this "
+                "conversation ('dla TEGO zamówienia' right after one was listed or described) — "
+                "reuse it, never ask for an ID that is already in context. "
+                "NEVER invent the cost: if no purchase cost was given anywhere in the "
+                "conversation, call ask_clarifying_question and ask for it instead of guessing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
+                    "unit_cost": {
+                        "type": "number",
+                        "description": (
+                            "Purchase cost of ONE unit, in PLN, exactly as the user stated it "
+                            "('koszt 1 szt. na poziomie 8,10 zł' → 8.1). Applied to every item of "
+                            "the order that item_costs does not cover — pass it alone whenever a "
+                            "single cost applies to the whole order."
+                        ),
+                    },
+                    "item_costs": {
+                        "type": "array",
+                        "description": (
+                            "Per-product unit costs — only when the user gave DIFFERENT costs for "
+                            "different products of the same order. Omit entirely otherwise."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "offer_id": {
+                                    "type": "string",
+                                    "description": "Allegro offer ID this cost applies to, if known.",
+                                },
+                                "offer_name": {
+                                    "type": "string",
+                                    "description": (
+                                        "Product name (or a distinctive part of it) this cost "
+                                        "applies to — used when no offer_id is known."
+                                    ),
+                                },
+                                "unit_cost": {
+                                    "type": "number",
+                                    "description": "Purchase cost of ONE unit of this product, in PLN.",
+                                },
+                            },
+                            "required": ["unit_cost"],
+                        },
+                    },
+                },
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_active_offers",
             "description": (
                 "List ALL active Allegro offers (paginated, no limit), plus any ended offer that "
@@ -1414,6 +1481,9 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # answer to a question the user just asked; wrapping them in a document
     # artifact hid them behind a "zobacz pełną odpowiedź" click for no gain.
     "get_order_details": "chat",
+    # Same reasoning as get_order_details: one order's profit calculation is a
+    # short, factual answer to the question just asked, not a document.
+    "calculate_order_profit": "chat",
     "get_orders_delivery": "chat",
     "get_orders_due_today": "chat",
     # Oferty
@@ -1520,6 +1590,12 @@ _TOOL_LABELS: dict[str, str] = {
     # finanse
     "get_billing_summary":             "finanse",
     "get_sales_summary":               "finanse",
+    # "finanse", not "zamowienia", even though it takes an order_id: what makes
+    # a query reach for it is the MONEY vocabulary ("zysk", "koszt", "marża"),
+    # and a follow-up often names no order at all ("a jaki zysk przy 8 zł za
+    # sztukę?" right after the order was shown) — under the "zamowienia" label
+    # that phrasing would drop the tool from the candidate list entirely.
+    "calculate_order_profit":          "finanse",
     # kupujacy
     "get_buyers":                      "kupujacy",
     "find_buyer_by_contact":           "kupujacy",
@@ -1578,7 +1654,13 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
     "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj"),
     "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),
-    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz", "bilans"),
+    # "marz" is the margin vocabulary calculate_order_profit answers to
+    # ("marża", "marżę", "marzy mi się" is not a store question). It also
+    # prefixes the month "marzec" — a cheap miss: such a query keeps every
+    # label it already had, it only loses the deterministic layer, which is
+    # exactly the recall-over-precision trade this map is built on.
+    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz",
+                   "bilans", "marz", "rentown", "narzut"),
     "faktury":    ("faktur", "nip", "ksef", "vat"),
     # A buyer question names the person, not the order: "lista kupujących",
     # "jakie firmy u mnie kupowały", "zestawienie kontrahentów". "nip"/"firm"
