@@ -96,11 +96,18 @@ def _decode_pending_chat(raw: str) -> tuple[str | None, str]:
     return None, raw
 
 
-async def pop_pending_chats(user_id: str) -> list[str]:
-    """Drain and return every queued chat message, oldest first.
+async def pop_pending_chats_tagged(user_id: str) -> list[tuple[str | None, str]]:
+    """Drain and return every queued chat message as (dedupe_tag, text), oldest first.
 
     Drained in one MULTI/EXEC so two devices (or a poll racing a page load)
     can't each take half of the queue and show the seller a partial thread.
+
+    The tag comes out with the text because a queued message can be STALE by
+    the time it is drained: it was written whenever the monitor last ran and
+    then waited (up to _PENDING_CHAT_TTL) for the seller to open the app. The
+    tag is what lets the delivery path hand a message back to the monitor that
+    wrote it for a last-second re-check — see main.push_pending and
+    services.invoice_reminder.refresh_pending_message.
     """
     from config.settings import get_settings
     settings = get_settings()
@@ -114,9 +121,15 @@ async def pop_pending_chats(user_id: str) -> list[str]:
             pipe.lrange(key, 0, -1)
             pipe.delete(key)
             entries, _ = await pipe.execute()
-        return [text for text in (_decode_pending_chat(e)[1] for e in entries or []) if text]
+        decoded = [_decode_pending_chat(e) for e in entries or []]
+        return [(tag, text) for tag, text in decoded if text]
     finally:
         await r.aclose()
+
+
+async def pop_pending_chats(user_id: str) -> list[str]:
+    """Drain and return every queued chat message, oldest first."""
+    return [text for _tag, text in await pop_pending_chats_tagged(user_id)]
 
 
 async def add_notification(user_id: str, title: str, body: str, url: str = "/", prompt: str | None = None) -> dict | None:
