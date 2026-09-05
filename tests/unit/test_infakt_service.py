@@ -169,3 +169,106 @@ class TestIssueInvoiceForOrderMessages:
 
         assert "NIE wystawiaj jej ponownie" in out
         assert "❌" not in out
+
+
+class TestIssuingAlsoAttaches:
+    """Issuing used to stop at inFakt, so Allegro still reported the order as
+    having no invoice and the reminder (services/invoice_reminder.py), which
+    asks Allegro exactly that, nagged about the same order every two hours for
+    ever — its own "wystaw" could never satisfy its own condition."""
+
+    @staticmethod
+    def _allegro():
+        from unittest.mock import AsyncMock
+
+        allegro = AsyncMock()
+        allegro._user_id = "u1"
+        allegro.get_order.return_value = type(
+            "O", (), {"invoice_required": True, "buyer_login": "kupujacy"}
+        )()
+        allegro.get_order_invoices.return_value = []
+        allegro.get_order_invoice_data.return_value = {"company_name": "Firma sp. z o.o."}
+        allegro.create_order_invoice_record.return_value = "allegro-inv-1"
+        return allegro
+
+    @staticmethod
+    def _infakt():
+        from unittest.mock import AsyncMock
+
+        infakt = AsyncMock()
+        infakt.create_invoice.return_value = {"invoice_uuid": "inv-9"}
+        infakt.get_share_link.return_value = "https://app.infakt.pl/share/inv-9"
+        infakt.get_invoice.return_value = {"number": "FV/1/2026"}
+        infakt.get_invoice_pdf.return_value = b"%PDF-1.4 tiny"
+        return infakt
+
+    async def test_invoice_is_attached_to_the_allegro_order(self):
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+
+        allegro, infakt = self._allegro(), self._infakt()
+        record = AsyncMock()
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.record_issued", record):
+            out = await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+        allegro.create_order_invoice_record.assert_awaited_once_with("ORD-1", "FV/1/2026", "faktura-FV/1/2026.pdf")
+        allegro.upload_order_invoice_file.assert_awaited_once()
+        assert "Dołączona do zamówienia w Allegro" in out
+        assert record.await_args.kwargs["attached"] is True
+
+    async def test_failed_attachment_is_reported_and_recorded_not_swallowed(self):
+        """The invoice exists — saying "not issued" next time would push the
+        seller into issuing a second, irreversible one."""
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+        from services.allegro_service import AllegroAPIError
+
+        allegro, infakt = self._allegro(), self._infakt()
+        allegro.create_order_invoice_record.side_effect = AllegroAPIError(403, "Forbidden")
+        record = AsyncMock()
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.record_issued", record):
+            out = await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+        assert "Nie udało się dołączyć" in out
+        assert "nie wystawiaj jej ponownie" in out.lower()
+        assert record.await_args.kwargs["attached"] is False
+        assert record.await_args.kwargs["invoice_uuid"] == "inv-9"
+
+    async def test_oversized_pdf_is_caught_before_the_record_is_created(self):
+        """The POST would otherwise leave an empty invoice record on the order."""
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+        from services.allegro_service import INVOICE_FILE_MAX_BYTES
+
+        allegro, infakt = self._allegro(), self._infakt()
+        infakt.get_invoice_pdf.return_value = b"x" * (INVOICE_FILE_MAX_BYTES + 1)
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.record_issued", AsyncMock()):
+            out = await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+        allegro.create_order_invoice_record.assert_not_awaited()
+        assert "Nie udało się dołączyć" in out
+
+    async def test_a_timed_out_issuance_is_recorded_so_it_is_not_nagged_again(self):
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+
+        allegro, infakt = self._allegro(), self._infakt()
+        infakt.create_invoice.side_effect = TimeoutError("still pending")
+        record = AsyncMock()
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.record_issued", record):
+            await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+        record.assert_awaited_once()
+        assert record.await_args.kwargs["attached"] is False

@@ -170,6 +170,8 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
         logger.warning("Invoice reminder: Allegro API error user=%s: %s", user_id, exc)
         return
 
+    orders = await _drop_already_issued(user_id, orders)
+
     if not orders:
         # Nothing pending (possibly resolved since the last ask) — go quiet
         # until the next scheduled check.
@@ -198,6 +200,36 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
         next_check_at=now + timedelta(minutes=interval),
         interval_minutes=interval, reminder_count=new_reminder_count,
     )
+
+
+async def _drop_already_issued(user_id: str, orders: list) -> list:
+    """Remove orders this assistant has already issued an invoice for.
+
+    Allegro only knows about an invoice once its PDF is attached to the order,
+    so an invoice that exists in inFakt but whose attachment failed is invisible
+    to get_orders_needing_invoice — and this reminder would ask for it again
+    every two hours, for ever, with "wystaw" as the only offered answer. Issuing
+    a second real VAT invoice for one order is not undoable, so a known issuance
+    always wins over Allegro's silence; the attachment problem is reported where
+    it happens (services/infakt_service.issue_invoice_for_order) and shown by the
+    pending-invoice listing, not retold here as "not issued yet".
+    """
+    from services import invoice_ledger
+
+    if not orders:
+        return orders
+    try:
+        known = await invoice_ledger.get_records(user_id, [o.order_id for o in orders])
+    except Exception:  # noqa: BLE001 — a ledger blip must not silence the reminder
+        logger.exception("Invoice reminder: ledger lookup failed for user=%s", user_id)
+        return orders
+    if not known:
+        return orders
+    logger.info(
+        "Invoice reminder: user=%s skipping %d order(s) already invoiced: %s",
+        user_id, len(known), ", ".join(sorted(known)),
+    )
+    return [o for o in orders if o.order_id not in known]
 
 
 # ── Messaging ────────────────────────────────────────────────────────────────
@@ -310,6 +342,7 @@ async def refresh_pending_message(user_id: str, queued_text: str) -> str | None:
         logger.exception("Invoice reminder: re-check failed for user=%s", user_id)
         return queued_text
 
+    orders = await _drop_already_issued(user_id, orders)
     order_ids = [o.order_id for o in orders]
     if not order_ids:
         logger.info(

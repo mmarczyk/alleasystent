@@ -49,6 +49,21 @@ class InfaktAPIError(Exception):
         super().__init__(f"inFakt API error {status_code}: {detail}")
 
 
+class InvoiceTooLargeError(Exception):
+    """The invoice PDF is bigger than Allegro accepts for an order attachment.
+
+    Checked before the two-step upload starts rather than letting the PUT fail:
+    the POST would already have registered an invoice record on the order, and a
+    retry then has to work around that empty record.
+    """
+
+    def __init__(self, size_bytes: int, limit_bytes: int, number: str = ""):
+        self.size_bytes = size_bytes
+        self.limit_bytes = limit_bytes
+        self.number = number
+        super().__init__(f"invoice PDF is {size_bytes} bytes, Allegro accepts {limit_bytes}")
+
+
 class InfaktTaskError(Exception):
     """Raised when an async invoice-creation task finishes with a failure code."""
 
@@ -288,8 +303,48 @@ def _delivery_service(cost: float, is_production: bool) -> dict[str, Any]:
 # both issue one concrete order at a time through this same path, see the
 # module docstring above for why bulk issuance stays preview-only.
 
+async def attach_invoice_to_order(allegro, order_id: str, invoice_uuid: str) -> str:
+    """Fetch an inFakt invoice's PDF and attach it to the Allegro order.
+
+    The mechanics of Allegro's two-step attachment in one place, shared by the
+    chat tool (AllegroAgent._attach_invoice_to_allegro_order) and by
+    issue_invoice_for_order below, which now always finishes the job itself.
+    Returns the human invoice number (may be empty). Raises InfaktAPIError,
+    InvoiceTooLargeError or AllegroAPIError — callers word the failure.
+    """
+    from services.allegro_service import INVOICE_FILE_MAX_BYTES
+
+    infakt = InfaktService.get_instance()
+    invoice = await infakt.get_invoice(invoice_uuid)
+    pdf_bytes = await infakt.get_invoice_pdf(invoice_uuid)
+
+    number = invoice.get("number", "") or ""
+    if len(pdf_bytes) > INVOICE_FILE_MAX_BYTES:
+        raise InvoiceTooLargeError(len(pdf_bytes), INVOICE_FILE_MAX_BYTES, number)
+
+    filename = f"faktura-{number or invoice_uuid}.pdf"
+    allegro_invoice_id = await allegro.create_order_invoice_record(order_id, number, filename)
+    await allegro.upload_order_invoice_file(order_id, allegro_invoice_id, pdf_bytes)
+    return number
+
+
 async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -> str:
-    """Create ONE real VAT invoice in inFakt for a single named Allegro order."""
+    """Create ONE real VAT invoice in inFakt for a single named Allegro order —
+    and attach it to the order, which is the half that actually finishes the job.
+
+    Issuing used to stop at inFakt. Allegro then still reported the order as
+    having no invoice, so the invoice reminder (services/invoice_reminder.py),
+    which asks Allegro exactly that, nagged about the same order every two hours
+    for ever: its own "wystaw" action could never satisfy its own condition, and
+    the seller — who could see the invoice — was told over and over to issue it.
+    So the attachment happens here, and either way the issuance is written to
+    services/invoice_ledger.py so no later pass can call this order uninvoiced.
+    """
+    from services import invoice_ledger
+    from services.allegro_service import AllegroAPIError
+
+    user_id = invoice_ledger.user_id_of(allegro)
+
     order = await allegro.get_order(order_id)
     if not order.invoice_required:
         return f"Zamówienie `{order_id}`: kupujący nie poprosił o fakturę VAT — nic nie wystawiono."
@@ -304,20 +359,17 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         infakt = InfaktService.get_instance()
         status = await infakt.create_invoice(payload)
         invoice_uuid = status["invoice_uuid"]
-        link = await infakt.get_share_link(invoice_uuid)
-        buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
-        return (
-            f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt: {link}\n"
-            f"ID faktury w inFakt: `{invoice_uuid}`\n"
-            f"Nabywca: {buyer_kind}.\n"
-            "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do Allegro / KSeF)."
-        )
     except TimeoutError as exc:
         # The task was accepted by inFakt and simply hasn't finished within the
         # polling window — the invoice may still appear a moment later, so this
         # must not read as "nothing happened, try again": a blind retry would
-        # create a second invoice for the same order.
+        # create a second invoice for the same order. Recorded for the same
+        # reason: the reminder must not be the thing that prompts that retry.
         logger.error("issue_invoice_for_order: order %s still pending: %s", order_id, exc)
+        await invoice_ledger.record_issued(
+            user_id, order_id, invoice_uuid="", attached=False,
+            note="inFakt nie potwierdził wystawienia w czasie oczekiwania",
+        )
         return (
             f"⏳ inFakt przyjął zlecenie faktury dla zamówienia `{order_id}`, ale nie potwierdził "
             "jej wystawienia w czasie oczekiwania. Faktura prawdopodobnie i tak się utworzy — "
@@ -328,3 +380,41 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
     except (InfaktAPIError, InfaktTaskError) as exc:
         logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
         return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
+
+    buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
+    try:
+        link = await infakt.get_share_link(invoice_uuid)
+        link_line = f": {link}"
+    except InfaktAPIError as exc:
+        # A missing preview link is not worth failing an issued invoice over.
+        logger.warning("issue_invoice_for_order: share link failed for %s: %s", invoice_uuid, exc)
+        link_line = " (nie udało się wygenerować linku podglądu)"
+
+    head = (
+        f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt{link_line}\n"
+        f"ID faktury w inFakt: `{invoice_uuid}`\n"
+        f"Nabywca: {buyer_kind}."
+    )
+
+    try:
+        number = await attach_invoice_to_order(allegro, order_id, invoice_uuid)
+    except (InfaktAPIError, InvoiceTooLargeError, AllegroAPIError) as exc:
+        logger.error("issue_invoice_for_order: attach to order %s failed: %s", order_id, exc)
+        await invoice_ledger.record_issued(
+            user_id, order_id, invoice_uuid=invoice_uuid, attached=False, note=str(exc),
+        )
+        return (
+            f"{head}\n"
+            f"⚠️ Nie udało się dołączyć jej do zamówienia w Allegro: {exc}\n"
+            "Faktura JEST wystawiona — nie wystawiaj jej ponownie. Napisz „dołącz fakturę do "
+            f"zamówienia `{order_id}`”, kiedy przyczyna zniknie."
+        )
+
+    await invoice_ledger.record_issued(
+        user_id, order_id, invoice_uuid=invoice_uuid, number=number, attached=True,
+    )
+    return (
+        f"{head}\n"
+        f"📎 Dołączona do zamówienia w Allegro — kupujący zobaczy ją na stronie zamówienia.\n"
+        "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do KSeF)."
+    )

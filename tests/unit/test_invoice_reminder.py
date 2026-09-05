@@ -481,3 +481,46 @@ class TestRefreshPendingMessage:
 
         text = "🧾 Masz 1 niewystawioną fakturę …"
         assert await invoice_reminder.refresh_pending_message("user1", text) == text
+
+
+class TestSkipsOrdersAlreadyInvoiced:
+    """Allegro calls an order uninvoiced until the invoice PDF is attached to
+    it. An invoice issued in inFakt whose attachment failed is therefore
+    invisible there — and the reminder used to ask for it again every two
+    hours, with "wystaw" (a second, irreversible VAT invoice) as the only
+    offered answer."""
+
+    @staticmethod
+    def _orders(*order_ids):
+        return [type("O", (), {"order_id": oid})() for oid in order_ids]
+
+    @pytest.mark.asyncio
+    async def test_orders_with_a_ledger_record_are_dropped(self, monkeypatch):
+        from services import invoice_ledger, invoice_reminder
+
+        monkeypatch.setattr(
+            invoice_ledger, "get_records",
+            AsyncMock(return_value={"o2": {"invoice_uuid": "inv-9", "attached": False}}),
+        )
+        left = await invoice_reminder._drop_already_issued("u1", self._orders("o1", "o2"))
+        assert [o.order_id for o in left] == ["o1"]
+
+    @pytest.mark.asyncio
+    async def test_nothing_recorded_leaves_the_list_alone(self, monkeypatch):
+        from services import invoice_ledger, invoice_reminder
+
+        monkeypatch.setattr(invoice_ledger, "get_records", AsyncMock(return_value={}))
+        left = await invoice_reminder._drop_already_issued("u1", self._orders("o1", "o2"))
+        assert [o.order_id for o in left] == ["o1", "o2"]
+
+    @pytest.mark.asyncio
+    async def test_a_ledger_failure_never_silences_the_reminder(self, monkeypatch):
+        """Skipping is the safe side for double-issuance, but a broken ledger
+        must not become a reason to stop reminding at all."""
+        from services import invoice_ledger, invoice_reminder
+
+        monkeypatch.setattr(
+            invoice_ledger, "get_records", AsyncMock(side_effect=RuntimeError("redis down"))
+        )
+        left = await invoice_reminder._drop_already_issued("u1", self._orders("o1"))
+        assert [o.order_id for o in left] == ["o1"]
