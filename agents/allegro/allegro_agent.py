@@ -3283,10 +3283,10 @@ class AllegroAgent(BaseAgent):
                 *[self._allegro.get_order_invoice_data(o.order_id) for o in orders],
                 return_exceptions=True,
             )
-            # Allegro calls an order uninvoiced until the PDF is attached to it,
-            # so an invoice issued in inFakt whose attachment failed shows up
-            # here as "niewystawiona" — the same false alarm the reminder used to
-            # repeat. Say what actually happened instead, and what to do about it.
+            # The list itself is Allegro's live answer. The ledger only adds
+            # what Allegro cannot know: that we already issued an invoice for
+            # this order in inFakt and failed to attach it. Saying so beats
+            # calling it "niewystawiona" and inviting a duplicate.
             from services import invoice_ledger
             issued = await invoice_ledger.get_records(
                 invoice_ledger.user_id_of(self._allegro), [o.order_id for o in orders]
@@ -3303,12 +3303,7 @@ class AllegroAgent(BaseAgent):
             for o, inv in zip(orders, inv_results):
                 items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
                 record = issued.get(o.order_id)
-                if record and record.get("source") == invoice_ledger.SOURCE_SELLER:
-                    invoice_line = (
-                        "**Faktura: potwierdziłeś w czacie, że już istnieje** — Allegro jej nie "
-                        "widzi, bo nie ma jej dołączonej do zamówienia jako PDF"
-                    )
-                elif record:
+                if record:
                     invoice_line = (
                         f"**Faktura: wystawiona w inFakt ({record.get('number') or record.get('invoice_uuid') or 'brak numeru'}), "
                         "NIE dołączona do zamówienia w Allegro** — nie wystawiaj jej drugi raz"

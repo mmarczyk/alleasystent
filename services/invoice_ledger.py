@@ -1,27 +1,22 @@
 from __future__ import annotations
 
 """
-Per-order record of the VAT invoices this assistant has issued.
+Per-order record of the VAT invoices this assistant has issued in inFakt.
 
-Allegro is the source of truth for "does this order have an invoice?" — but
-only for invoices whose PDF actually reached the order
-(GET /order/checkout-forms/{id}/invoices, see
-services/allegro_service.get_order_invoices). An invoice that exists in inFakt
-but never got attached is invisible there, and the invoice reminder
-(services/invoice_reminder.py) reads that invisibility as "still to issue" and
-nags about it every two hours, for ever.
+NOT a cache of "does this order have an invoice" — that question is only ever
+answered by asking Allegro (services/allegro_service.get_order_invoices), every
+time, because an invoice can be attached to an order by anyone at any moment and
+the seller is the one looking at it. Nothing here is allowed to stand in for
+that answer or to silence the invoice reminder.
 
-That is not hypothetical: issuing and attaching are two separate steps against
-two separate APIs, and the second one can fail on its own (Allegro 403 for a
-token without allegro:api:orders:write, a PDF over Allegro's size limit, inFakt
-not returning the file). Without a memory of the first step the seller is told
-to issue an invoice that already exists — and issuing it again would create a
-second, real, numbered VAT invoice for the same order, which cannot be undone.
-
-So every issuance is written down here, attached or not, and the reminder
-skips orders it finds in this ledger. Attachment failures are surfaced when
-they happen (and by the pending-invoice listing) instead of being retold as
-"you have an invoice to issue".
+What it is for is the other direction: issuing and attaching are two calls
+against two different APIs, and the second one fails on its own (a token without
+allegro:api:orders:write comes back 403, a PDF can be over Allegro's size
+limit). When that happens a real, numbered VAT invoice exists in inFakt while
+Allegro still reports the order as uninvoiced — correctly. Without a memory of
+the first call, the next "wystaw" would create a SECOND invoice for that order,
+which cannot be undone. So an issuance is written here, and the issuing path
+attaches the invoice it already has instead of making another one.
 """
 
 import json
@@ -60,31 +55,22 @@ def user_id_of(allegro) -> str:
     return getattr(allegro, "_user_id", None) or "default"
 
 
-# Who says this order has an invoice: this assistant issued one, or the seller
-# told us in the chat that one already exists. Both stop the reminder; they are
-# worded differently everywhere the difference matters, because only the first
-# one is something we can point at.
-SOURCE_ASSISTANT = "assistant"
-SOURCE_SELLER = "seller"
-
-
 async def record_issued(
     user_id: str, order_id: str, *, invoice_uuid: str, number: str = "",
-    attached: bool = False, note: str = "", source: str = SOURCE_ASSISTANT,
+    attached: bool = False, note: str = "",
 ) -> None:
     """Write down that an invoice for this order exists in inFakt.
 
-    Called even when the attachment to Allegro failed, and even when inFakt
-    accepted the job without confirming it in time: in both cases an invoice
-    very probably exists, and a reminder that keeps saying "not issued" is what
-    pushes a seller into issuing it twice.
+    Recorded even when the attachment to Allegro failed, and even when inFakt
+    accepted the job without confirming it in time: in both cases a real invoice
+    very probably exists, and the next "wystaw" must finish that one rather than
+    create a second.
     """
     payload = {
         "invoice_uuid": invoice_uuid,
         "number": number,
         "attached": attached,
         "note": note,
-        "source": source,
         "at": time.time(),
     }
 
@@ -105,20 +91,6 @@ async def mark_attached(user_id: str, order_id: str, *, number: str = "") -> Non
         invoice_uuid=existing.get("invoice_uuid", ""),
         number=number or existing.get("number", ""),
         attached=True,
-    )
-
-
-async def record_confirmed_by_seller(user_id: str, order_id: str) -> None:
-    """Write down that the SELLER says this order already has its invoice.
-
-    Their word, not Allegro's — but a seller looking at the order knows better
-    than an API that only sees attached PDFs, and being told to issue an invoice
-    they can see is what makes the reminder useless. The claim is recorded as
-    theirs (source=seller) so nothing later presents it as an invoice we issued.
-    """
-    await record_issued(
-        user_id, order_id, invoice_uuid="", attached=False, source=SOURCE_SELLER,
-        note="sprzedawca potwierdził w czacie, że faktura już istnieje",
     )
 
 

@@ -52,6 +52,10 @@ _WORK_START_HOUR = 7
 _WORK_END_HOUR = 20  # exclusive — last check can fire at 19:xx
 
 _DEFAULT_INTERVAL_MINUTES = 120
+# How long the reminder stays quiet after the seller says an invoice is already
+# there and Allegro disagrees. Long enough not to argue with them every two
+# hours, short enough that a genuinely missing invoice still comes back.
+_RECHECK_SNOOZE_MINUTES = 60 * 24
 _MIN_SNOOZE_MINUTES = 5
 _MAX_SNOOZE_MINUTES = 60 * 24 * 14  # 2 weeks — sanity cap on a misparsed duration
 
@@ -170,8 +174,6 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
         logger.warning("Invoice reminder: Allegro API error user=%s: %s", user_id, exc)
         return
 
-    orders = await _drop_already_issued(user_id, orders)
-
     if not orders:
         # Nothing pending (possibly resolved since the last ask) — go quiet
         # until the next scheduled check.
@@ -200,36 +202,6 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
         next_check_at=now + timedelta(minutes=interval),
         interval_minutes=interval, reminder_count=new_reminder_count,
     )
-
-
-async def _drop_already_issued(user_id: str, orders: list) -> list:
-    """Remove orders this assistant has already issued an invoice for.
-
-    Allegro only knows about an invoice once its PDF is attached to the order,
-    so an invoice that exists in inFakt but whose attachment failed is invisible
-    to get_orders_needing_invoice — and this reminder would ask for it again
-    every two hours, for ever, with "wystaw" as the only offered answer. Issuing
-    a second real VAT invoice for one order is not undoable, so a known issuance
-    always wins over Allegro's silence; the attachment problem is reported where
-    it happens (services/infakt_service.issue_invoice_for_order) and shown by the
-    pending-invoice listing, not retold here as "not issued yet".
-    """
-    from services import invoice_ledger
-
-    if not orders:
-        return orders
-    try:
-        known = await invoice_ledger.get_records(user_id, [o.order_id for o in orders])
-    except Exception:  # noqa: BLE001 — a ledger blip must not silence the reminder
-        logger.exception("Invoice reminder: ledger lookup failed for user=%s", user_id)
-        return orders
-    if not known:
-        return orders
-    logger.info(
-        "Invoice reminder: user=%s skipping %d order(s) already invoiced: %s",
-        user_id, len(known), ", ".join(sorted(known)),
-    )
-    return [o for o in orders if o.order_id not in known]
 
 
 # ── Messaging ────────────────────────────────────────────────────────────────
@@ -342,7 +314,6 @@ async def refresh_pending_message(user_id: str, queued_text: str) -> str | None:
         logger.exception("Invoice reminder: re-check failed for user=%s", user_id)
         return queued_text
 
-    orders = await _drop_already_issued(user_id, orders)
     order_ids = [o.order_id for o in orders]
     if not order_ids:
         logger.info(
@@ -504,33 +475,44 @@ async def _issue_all(user_id: str, state: dict) -> str:
 
 
 async def _accept_already_issued(user_id: str, state: dict) -> str:
-    """The seller says the invoice for these orders already exists.
+    """The seller says the invoice already exists — so go and look, right now.
 
-    Allegro only reports invoices whose PDF is attached to the order, so it can
-    keep calling an order uninvoiced long after the seller has dealt with it —
-    and then this reminder asks about it again every two hours, with no way to
-    say "it's done" short of turning all reminders off. Their answer is written
-    to the ledger (as theirs — services/invoice_ledger.record_confirmed_by_seller)
-    and those orders stop coming back.
-
-    Nothing is issued here, and nothing about the order is changed in Allegro:
-    the only effect is that this reminder stops claiming the invoice is missing.
+    The answer is never taken on trust and never written down as a fact of our
+    own: this reminder is only ever as right as Allegro, so the seller saying
+    "it's already there" is a reason to ask Allegro again immediately instead of
+    at the next scheduled pass. If Allegro agrees, the reminder goes quiet by
+    itself; if it doesn't, the seller gets told exactly what is missing — the
+    invoice PDF on the order — rather than being nagged to issue a second one.
     """
-    from services import invoice_ledger
+    from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
 
-    order_ids = state.get("order_ids", [])
-    for order_id in order_ids:
-        await invoice_ledger.record_confirmed_by_seller(user_id, order_id)
-    await _resolve_state(user_id, state)
+    asked_about = state.get("order_ids", [])
+    try:
+        allegro = AllegroService.get_instance(user_id)
+        await allegro._load_tokens_from_redis()
+        orders = await allegro.get_orders_needing_invoice(shipped_only=True)
+    except (AllegroAuthError, AllegroAPIError) as exc:
+        logger.warning("Invoice reminder: re-check on request failed user=%s: %s", user_id, exc)
+        return (
+            "Nie udało mi się teraz zapytać Allegro o te faktury — sprawdzę ponownie przy "
+            f"następnym przebiegu. (Szczegóły: {exc})"
+        )
 
-    if not order_ids:
-        return "Ok, w takim razie nie mam o co pytać — przestaję przypominać."
+    still_missing = [o.order_id for o in orders if o.order_id in asked_about]
+    if not still_missing:
+        await _resolve_state(user_id, state)
+        return (
+            "Sprawdziłem w Allegro — masz rację, faktury są na miejscu. "
+            "Przestaję o nie przypominać."
+        )
+
+    await _set_snooze(user_id, state, _RECHECK_SNOOZE_MINUTES)
     return (
-        f"Ok, zapisałem, że faktury dla {_format_order_ids(order_ids)} są już wystawione — "
-        "nie będę o nie więcej przypominać.\n\n"
-        "Allegro nadal widzi te zamówienia jako bez faktury (widzi tylko faktury dołączone "
-        "do zamówienia jako PDF), więc jeśli któraś jednak nie trafiła do zamówienia, "
-        "napisz „dołącz fakturę do zamówienia `<id>`”."
+        f"Sprawdziłem w Allegro i dla {_format_order_ids(still_missing)} nadal nie widzi faktury. "
+        "Allegro pokazuje tylko faktury dołączone do zamówienia jako PDF — sama faktura "
+        "w inFakt czy w Twojej księgowości mu nie wystarczy.\n\n"
+        "Napisz „dołącz fakturę do zamówienia `<id>`”, jeśli mam spróbować ją tam wysłać. "
+        f"Nie będę o to pytać przez {_format_duration(_RECHECK_SNOOZE_MINUTES)}."
     )
 
 

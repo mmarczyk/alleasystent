@@ -108,7 +108,6 @@ class TestAllegroServiceParsing:
             from services.allegro_service import _TTLCache
             svc._order_cache = _TTLCache(ttl=300.0)
             svc._orders_list_cache = _TTLCache(ttl=60.0)
-            svc._invoice_cache = _TTLCache(ttl=120.0)
             svc._all_offers_cache = _TTLCache(ttl=300.0)
             return svc
 
@@ -191,3 +190,30 @@ class TestAllegroServiceParsing:
             svc = AllegroService.__new__(AllegroService)
             svc._user_id = "myuser"
             assert AllegroService._redis_tokens_key.fget(svc) == "allegro:tokens:myuser"
+
+
+class TestInvoiceStatusIsNeverCached:
+    """Whether an order already has its invoice decides whether the seller is
+    told they still owe one, and it changes the moment anybody attaches it — in
+    the panel, from another device, by the accountant. A cached answer here is
+    the assistant insisting an invoice is missing while the seller looks at it
+    on the order, so this question always goes to Allegro."""
+
+    @pytest.mark.asyncio
+    async def test_every_call_asks_allegro_again(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from services.allegro_service import AllegroService
+
+        svc = AllegroService.__new__(AllegroService)
+        svc._get = AsyncMock(side_effect=[{"invoices": []}, {"invoices": [{"id": "inv-1"}]}])
+
+        assert await svc.get_order_invoices("ord-1") == []
+        # Somebody attaches the invoice in Allegro's panel here.
+        assert await svc.get_order_invoices("ord-1") == [{"id": "inv-1"}]
+        assert svc._get.await_count == 2
+
+    def test_no_invoice_cache_attribute_survives(self, monkeypatch):
+        from services.allegro_service import AllegroService
+
+        assert not hasattr(AllegroService, "_invoice_cache")

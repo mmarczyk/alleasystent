@@ -328,6 +328,53 @@ async def attach_invoice_to_order(allegro, order_id: str, invoice_uuid: str) -> 
     return number
 
 
+def _attach_failure_reason(allegro, exc: Exception) -> str:
+    """Why the attachment failed, naming the missing Allegro permission when
+    that is what it was — the 403 the seller otherwise has to guess at before
+    going and attaching the PDF by hand."""
+    from services.allegro_service import SCOPE_ORDERS_WRITE
+
+    status = getattr(exc, "status_code", None)
+    if status in (401, 403) and allegro.has_scope(SCOPE_ORDERS_WRITE) is False:
+        return (
+            f"token Allegro nie ma uprawnienia `{SCOPE_ORDERS_WRITE}`, więc nie mogę dodać "
+            "pliku do zamówienia. Włącz je dla aplikacji na https://apps.developer.allegro.pl "
+            "(zakładka „Uprawnienia”) i zaloguj się ponownie przez /allegro/login — token "
+            "dostaje uprawnienia w chwili logowania. Do tego czasu dołącz fakturę ręcznie "
+            "w panelu Allegro."
+        )
+    if status in (401, 403):
+        return f"Allegro odmówiło dodania pliku do zamówienia ({exc})"
+    return str(exc)
+
+
+async def _finish_earlier_issuance(allegro, user_id: str, order_id: str, known: dict) -> str:
+    """Attach an invoice we issued earlier instead of issuing a second one."""
+    from services import invoice_ledger
+    from services.allegro_service import AllegroAPIError
+
+    invoice_uuid = known["invoice_uuid"]
+    label = known.get("number") or invoice_uuid
+    try:
+        number = await attach_invoice_to_order(allegro, order_id, invoice_uuid)
+    except (InfaktAPIError, InvoiceTooLargeError, AllegroAPIError) as exc:
+        logger.error("issue_invoice_for_order: re-attach to order %s failed: %s", order_id, exc)
+        return (
+            f"⚠️ Faktura {label} dla zamówienia `{order_id}` została już wcześniej wystawiona "
+            "w inFakt — nie wystawiam drugiej. Nadal nie mogę dołączyć jej do zamówienia: "
+            f"{_attach_failure_reason(allegro, exc)}"
+        )
+
+    await invoice_ledger.record_issued(
+        user_id, order_id, invoice_uuid=invoice_uuid, number=number or known.get("number", ""),
+        attached=True,
+    )
+    return (
+        f"📎 Faktura {number or label} była już wystawiona w inFakt — nie wystawiałem drugiej, "
+        f"tylko dołączyłem tę do zamówienia `{order_id}` w Allegro."
+    )
+
+
 async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -> str:
     """Create ONE real VAT invoice in inFakt for a single named Allegro order —
     and attach it to the order, which is the half that actually finishes the job.
@@ -352,6 +399,14 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
     existing = await allegro.get_order_invoices(order_id)
     if existing:
         return f"Zamówienie `{order_id}`: faktura już istnieje w Allegro — nie wystawiono kolejnej."
+
+    # Allegro saying "no invoice" is not the same as "we never issued one": the
+    # attachment is a second call that can fail on its own, and a second real
+    # VAT invoice for one order cannot be taken back. So a previous issuance is
+    # finished, not repeated.
+    known = await invoice_ledger.get_record(user_id, order_id)
+    if known and known.get("invoice_uuid"):
+        return await _finish_earlier_issuance(allegro, user_id, order_id, known)
 
     try:
         address = await allegro.get_order_invoice_data(order_id)
@@ -405,9 +460,10 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         )
         return (
             f"{head}\n"
-            f"⚠️ Nie udało się dołączyć jej do zamówienia w Allegro: {exc}\n"
-            "Faktura JEST wystawiona — nie wystawiaj jej ponownie. Napisz „dołącz fakturę do "
-            f"zamówienia `{order_id}`”, kiedy przyczyna zniknie."
+            f"⚠️ Nie udało się dołączyć jej do zamówienia w Allegro: {_attach_failure_reason(allegro, exc)}\n"
+            "Faktura JEST wystawiona — nie wystawiaj jej ponownie. Dopóki nie będzie dołączona "
+            "do zamówienia, Allegro widzi je jako bez faktury (i tak samo widzę je ja). "
+            f"Napisz „dołącz fakturę do zamówienia `{order_id}`”, kiedy przyczyna zniknie."
         )
 
     await invoice_ledger.record_issued(

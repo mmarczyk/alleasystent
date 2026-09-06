@@ -272,3 +272,93 @@ class TestIssuingAlsoAttaches:
 
         record.assert_awaited_once()
         assert record.await_args.kwargs["attached"] is False
+
+
+class TestNeverIssuesTwiceForOneOrder:
+    """Allegro reporting "no invoice" is the truth about the ORDER, not about
+    inFakt: when the attachment failed (a token without orders:write comes back
+    403), a real numbered invoice exists while Allegro correctly still says the
+    order has none. Issuing again would create a second one, which cannot be
+    undone — so the earlier one gets finished instead."""
+
+    @staticmethod
+    def _allegro(has_scope=True):
+        from unittest.mock import AsyncMock, MagicMock
+
+        allegro = AsyncMock()
+        allegro._user_id = "u1"
+        allegro.has_scope = MagicMock(return_value=has_scope)
+        allegro.get_order.return_value = type(
+            "O", (), {"invoice_required": True, "buyer_login": "kupujacy"}
+        )()
+        allegro.get_order_invoices.return_value = []
+        allegro.get_order_invoice_data.return_value = {"company_name": "Firma"}
+        allegro.create_order_invoice_record.return_value = "allegro-inv-1"
+        return allegro
+
+    @staticmethod
+    def _infakt():
+        from unittest.mock import AsyncMock
+
+        infakt = AsyncMock()
+        infakt.create_invoice.return_value = {"invoice_uuid": "inv-NEW"}
+        infakt.get_share_link.return_value = "https://app.infakt.pl/share/inv-NEW"
+        infakt.get_invoice.return_value = {"number": "FV/1/2026"}
+        infakt.get_invoice_pdf.return_value = b"%PDF-1.4 tiny"
+        return infakt
+
+    async def test_a_known_issuance_is_attached_not_reissued(self):
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+
+        allegro, infakt = self._allegro(), self._infakt()
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.get_record",
+                   AsyncMock(return_value={"invoice_uuid": "inv-OLD", "number": "FV/9/2026"})), \
+             patch("services.invoice_ledger.record_issued", AsyncMock()):
+            out = await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+        infakt.create_invoice.assert_not_awaited()
+        infakt.get_invoice_pdf.assert_awaited_once_with("inv-OLD")
+        allegro.upload_order_invoice_file.assert_awaited_once()
+        assert "nie wystawiałem drugiej" in out
+
+    async def test_a_still_failing_reattach_does_not_reissue_either(self):
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+        from services.allegro_service import AllegroAPIError
+
+        allegro, infakt = self._allegro(has_scope=False), self._infakt()
+        allegro.create_order_invoice_record.side_effect = AllegroAPIError(403, "Forbidden")
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.get_record",
+                   AsyncMock(return_value={"invoice_uuid": "inv-OLD", "number": "FV/9/2026"})), \
+             patch("services.invoice_ledger.record_issued", AsyncMock()):
+            out = await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+        infakt.create_invoice.assert_not_awaited()
+        assert "nie wystawiam drugiej" in out
+
+    async def test_a_403_names_the_missing_permission(self):
+        """The seller otherwise has to guess why it failed before going and
+        attaching the PDF by hand."""
+        from unittest.mock import AsyncMock, patch
+
+        import services.infakt_service as infakt_service
+        from services.allegro_service import AllegroAPIError
+
+        allegro, infakt = self._allegro(has_scope=False), self._infakt()
+        allegro.create_order_invoice_record.side_effect = AllegroAPIError(403, "Forbidden")
+        with patch.object(infakt_service, "build_invoice_payload", return_value={}), \
+             patch.object(infakt_service.InfaktService, "get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.get_record", AsyncMock(return_value=None)), \
+             patch("services.invoice_ledger.record_issued", AsyncMock()):
+            out = await infakt_service.issue_invoice_for_order(allegro, "ORD-1", is_production=False)
+
+        assert "allegro:api:orders:write" in out
+        assert "apps.developer.allegro.pl" in out
+        assert "nie wystawiaj jej ponownie" in out.lower()
