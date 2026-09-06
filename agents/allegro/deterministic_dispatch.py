@@ -170,6 +170,53 @@ def _order_stage(query: str) -> str | None:
     return next(iter(hits)) if len(hits) == 1 else None
 
 
+# ── zamowienia: the follow-up question about ONE already-shown order ───────
+# Every matcher below resolves a LISTING of orders, and 'ile' in a listing
+# question counts orders ("ile mam nowych zamówień"). But the very same two
+# words open a question about the CONTENTS of one order the assistant just
+# showed — "ile w tym zamówieniu jest sztuk" — where 'ile' counts items
+# inside it. To a stem matcher the two are indistinguishable ('ile' + the
+# 'zamów' stem in both), so the count-only branch used to serve the second
+# one an order COUNT ("Masz 22 nowe zamówienia"), passed straight through to
+# the seller as the finished answer (see _PASSTHROUGH_TOOLS in
+# allegro_agent.py — no interpret call gets a chance to notice the mismatch).
+#
+# This layer can never serve such a follow-up: it needs get_order_details
+# with a UUID that only the conversation history holds, and the matchers here
+# see the current query alone. So both of its signals are a bail, handing the
+# turn to the LLM — which does get the history, and is told to reuse the
+# order it already named (see AllegroAgent.system_prompt).
+
+# 1. Anaphora: a demonstrative pointing back at one order ('w tym zamówieniu',
+#    'tego ostatniego zamówienia'), or a bare pronoun standing in for it
+#    ('ile jest w nim sztuk'). The demonstrative must sit next to the order
+#    noun — a lone 'w tym' is period vocabulary ('w tym miesiącu'), which the
+#    matchers already bail on for their own reasons.
+_ORDER_ANAPHORA_RE = re.compile(
+    r"\bt(?:ym|ego|emu|o|amtym|amtego)\s+"
+    r"(?:(?:ostatni\w+|samym|samego|wspomnian\w+|pokazan\w+|powy[żz]sz\w+)\s+)?zam[óo]wieni\w*|"
+    r"\bw\s+(?:nim|niej)\b|\bz\s+(?:niego|niej)\b",
+    re.IGNORECASE,
+)
+
+# 2. The unit being counted: a seller asking about parcels to hand over says
+#    'ile paczek' (kept in _ORDERS_COUNT_TOPIC_RE on purpose), but 'sztuk',
+#    'pozycji', 'produktów' name what sits INSIDE an order, never orders
+#    themselves — so on an order-labelled turn they are always the contents
+#    question.
+_ORDER_CONTENTS_UNIT_RE = re.compile(
+    r"\bsztuk\w*\b|\bszt\.?\b|motk[óo]w|\bpozycj\w*|produkt[óo]w|towar[óo]w|przedmiot[óo]w",
+    re.IGNORECASE,
+)
+
+
+def refers_to_one_known_order(query: str) -> bool:
+    """True when an order question is really about ONE order already on
+    screen — see the comment above for why that is this layer's bail and not
+    its match."""
+    return bool(_ORDER_ANAPHORA_RE.search(query) or _ORDER_CONTENTS_UNIT_RE.search(query))
+
+
 # Any of these means the query wants more than a bare listing — a specific
 # order's details/status/cost (get_order_details, usually chained off a
 # listing call this layer can't perform) or a date range (get_orders).
@@ -500,6 +547,12 @@ def resolve_deterministic(query: str, labels: set[str]) -> tuple[str, dict] | No
     if len(labels) != 1:
         return None
     label = next(iter(labels))
+    # Checked once for the whole label rather than inside each order matcher:
+    # a follow-up about one already-shown order is unservable HERE whichever
+    # listing preset the wording would otherwise resolve to, and a matcher
+    # added later inherits the bail instead of having to repeat it.
+    if label == "zamowienia" and refers_to_one_known_order(query):
+        return None
     for tool_name, matcher in _LABEL_MATCHERS.get(label, []):
         result = matcher(query)
         if result is not None:

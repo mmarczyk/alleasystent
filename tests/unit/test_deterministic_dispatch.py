@@ -362,6 +362,41 @@ class TestFindBuyerByContact:
         assert resolved is None or resolved[0] != "find_buyer_by_contact"
 
 
+class TestFollowUpAboutOneKnownOrder:
+    """A question about the CONTENTS of one order the assistant just showed
+    reads exactly like a listing count to a stem matcher ('ile' + 'zamów'),
+    and used to be answered with the number of NEW ORDERS — passed straight
+    through to the seller as the finished answer. Both signals now bail."""
+
+    @pytest.mark.parametrize("query", [
+        # anafora — wskazanie na jedno, już pokazane zamówienie
+        "ile w tym zamówieniu jest sztuk",
+        "W tym ostatnio zamówieniu powyżej 2000 ile jest sztuk",
+        "ile pozycji w tym zamówieniu",
+        "ile motków w tamtym zamówieniu",
+        "co jest w tym zamówieniu",
+        "ile produktów zawiera to zamówienie",
+        # jednostka liczona = zawartość zamówienia, nie liczba zamówień
+        "ile sztuk mam w nowych zamówieniach",
+        "ile szt. jest w zamówieniach do wysłania",
+    ])
+    def test_bails_to_the_llm(self, query):
+        assert _resolve(query) is None
+
+    @pytest.mark.parametrize("query", [
+        # zwykłe pytania o LISTĘ zamówień — guard nie może ich dotknąć;
+        # 'paczek'/'przesyłek' to jednostki wysyłkowe, nie zawartość zamówienia
+        "ile mam nowych zamówień",
+        "jakie mam nowe zamówienia",
+        "ile paczek do nadania",
+        "ile przesyłek czeka na kuriera",
+        "ile zamówień muszę wysłać dzisiaj",
+        "zamówienia do wysłania",
+    ])
+    def test_listing_questions_still_resolve(self, query):
+        assert _resolve(query) is not None
+
+
 class TestMultiTopicAndUnrelatedQueries:
     def test_multi_topic_query_never_dispatches(self):
         assert _resolve("nowe zamówienia i moje konto") is None
