@@ -703,6 +703,162 @@ class TestGetOrderDetailsDispatch:
             assert expected_substr in result, result
 
 
+class TestCalculateOrderProfit:
+    """calculate_order_profit is the only place the seller's own purchase cost
+    enters the app — Allegro knows the order value and its fees, never what the
+    goods cost to buy, so the cost comes from the user's message and this tool
+    multiplies it out: revenue − fees + credits − cost of goods."""
+
+    def _make_order(self, **overrides):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        defaults = dict(
+            order_id="abc-123",
+            buyer_login="jan_kowalski",
+            status="BOUGHT",
+            fulfillment_status="READY_FOR_PROCESSING",
+            total_price=100.00,
+            currency="PLN",
+            line_items=[
+                AllegroOrderLine(offer_id="111", offer_name="Włóczka merino", quantity=5, price=18.00),
+            ],
+        )
+        defaults.update(overrides)
+        return AllegroOrder(**defaults)
+
+    def _agent(self, order, billing_entries=None, billing_exc=None):
+        agent = _make_agent()
+        agent._allegro.get_order = AsyncMock(return_value=order)
+        agent._allegro.get_billing_entries_for_order = AsyncMock(
+            side_effect=billing_exc, return_value=billing_entries or [],
+        )
+        return agent
+
+    @staticmethod
+    def _fee(amount: str, desc: str = "Prowizja od sprzedaży"):
+        return {
+            "value": {"amount": amount},
+            "type": {"description": desc},
+            "occurredAt": "2026-08-27T00:00:00Z",
+        }
+
+    @pytest.mark.asyncio
+    async def test_profit_is_revenue_minus_fees_minus_cost_of_goods(self):
+        agent = self._agent(self._make_order(), billing_entries=[self._fee("-9.00")])
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        # 100.00 − 9.00 fees − 5 × 8.10 = 50.50
+        assert "- Przychód (kwota od kupującego): 100,00 PLN" in result
+        assert "  - Włóczka merino: 5 × 8,10 PLN = 40,50 PLN" in result
+        assert "  - Razem koszt towaru: 40,50 PLN" in result
+        assert "- Opłaty Allegro: -9,00 PLN" in result
+        assert "**Zysk: 50,50 PLN**" in result
+        assert "marża 50,5% przychodu" in result
+
+    @pytest.mark.asyncio
+    async def test_credits_are_added_back(self):
+        agent = self._agent(
+            self._make_order(),
+            billing_entries=[self._fee("-9.00"), self._fee("4.00", "Zwrot prowizji")],
+        )
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        assert "- Zwroty/korekty od Allegro: +4,00 PLN" in result
+        assert "**Zysk: 54,50 PLN**" in result
+
+    @pytest.mark.asyncio
+    async def test_balance_transfer_entries_are_not_counted_twice(self):
+        """PAD entries record Allegro sweeping money to settle the account
+        balance — the fee they settle is already its own entry."""
+        agent = self._agent(
+            self._make_order(),
+            billing_entries=[
+                self._fee("-9.00"),
+                {"value": {"amount": "-9.00"}, "type": {"id": "PAD", "description": "Pobranie opłat z wpływów"}},
+            ],
+        )
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        assert "- Opłaty Allegro: -9,00 PLN" in result
+        assert "**Zysk: 50,50 PLN**" in result
+
+    @pytest.mark.asyncio
+    async def test_per_product_costs_by_offer_id_and_name(self):
+        from models.allegro import AllegroOrderLine
+        order = self._make_order(
+            total_price=200.00,
+            line_items=[
+                AllegroOrderLine(offer_id="111", offer_name="Włóczka merino", quantity=2, price=50.00),
+                AllegroOrderLine(offer_id="222", offer_name="Druty bambusowe 4mm", quantity=1, price=100.00),
+            ],
+        )
+        agent = self._agent(order)
+
+        result = await agent._dispatch("calculate_order_profit", {
+            "order_id": "abc-123",
+            "item_costs": [
+                {"offer_id": "111", "unit_cost": 8.1},
+                {"offer_name": "druty", "unit_cost": 30},
+            ],
+        })
+
+        assert "  - Włóczka merino: 2 × 8,10 PLN = 16,20 PLN" in result
+        assert "  - Druty bambusowe 4mm: 1 × 30,00 PLN = 30,00 PLN" in result
+        assert "  - Razem koszt towaru: 46,20 PLN" in result
+        assert "**Zysk: 153,80 PLN**" in result
+
+    @pytest.mark.asyncio
+    async def test_no_cost_given_asks_instead_of_assuming_zero(self):
+        agent = self._agent(self._make_order())
+
+        result = await agent._dispatch("calculate_order_profit", {"order_id": "abc-123"})
+
+        assert "koszt" in result.lower()
+        assert "Zysk:" not in result
+        agent._allegro.get_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_item_costs_not_covering_every_product_asks_for_the_rest(self):
+        from models.allegro import AllegroOrderLine
+        order = self._make_order(line_items=[
+            AllegroOrderLine(offer_id="111", offer_name="Włóczka merino", quantity=1, price=50.00),
+            AllegroOrderLine(offer_id="222", offer_name="Druty bambusowe 4mm", quantity=1, price=50.00),
+        ])
+        agent = self._agent(order)
+
+        result = await agent._dispatch("calculate_order_profit", {
+            "order_id": "abc-123",
+            "item_costs": [{"offer_id": "111", "unit_cost": 8.1}],
+        })
+
+        assert "Druty bambusowe 4mm" in result
+        assert "Zysk:" not in result
+
+    @pytest.mark.asyncio
+    async def test_failed_billing_fetch_is_said_out_loud(self):
+        """Silently dropping the fees would report a too-high profit that still
+        reads like a finished answer."""
+        from services.allegro_service import AllegroAPIError
+
+        agent = self._agent(self._make_order(), billing_exc=AllegroAPIError(429, "too many requests"))
+
+        result = await agent._dispatch(
+            "calculate_order_profit", {"order_id": "abc-123", "unit_cost": 8.1},
+        )
+
+        assert "⚠️" in result
+        assert "NIE uwzględnia" in result
+        assert "**Zysk: 59,50 PLN**" in result
+
+
 class TestOrdersDueToday:
     """get_orders_due_today is the deadline view: what still has to be handed
     to the carrier by the end of today. Unlike the other order presets it is
@@ -1079,6 +1235,254 @@ class TestBuyersReport:
         )
 
         assert "Statusu faktury nie udało się sprawdzić dla 1 zamówienia" in result
+
+
+class TestFindBuyerByContact:
+    """find_buyer_by_contact answers "czy mam takiego klienta?" — Allegro has
+    no customer index, so the lookup scans a period of orders and matches on
+    the contact details they carry (see AllegroAgent._find_buyer_by_contact)."""
+
+    @staticmethod
+    def _order(order_id, login, price, *, buyer_phone="", delivery_phone="",
+               email="", company="", nip="", first="", last="", recipient="",
+               paid_at="2026-03-04T10:00:00Z"):
+        from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine
+
+        recipient_first, _, recipient_last = recipient.partition(" ")
+        return AllegroOrder(
+            order_id=order_id,
+            buyer_login=login,
+            buyer_email=email or f"{login}@example.com",
+            buyer_phone=buyer_phone,
+            status="READY_FOR_PROCESSING",
+            fulfillment_status="SENT",
+            total_price=price,
+            currency="PLN",
+            created_at=paid_at,
+            paid_at=paid_at,
+            delivery={
+                "method": {"id": "dpd", "name": "Kurier DPD"},
+                "address": {
+                    "firstName": recipient_first,
+                    "lastName": recipient_last,
+                    "phoneNumber": delivery_phone,
+                },
+            },
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=1, price=price)],
+            invoice_buyer=AllegroInvoiceBuyer(
+                required=bool(company or nip or first),
+                company_name=company,
+                vat_id=nip,
+                first_name=first,
+                last_name=last,
+            ),
+        )
+
+    def _agent_with(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_all_paid_orders_in_period = AsyncMock(return_value=orders)
+        return agent
+
+    def _store(self):
+        return [
+            self._order("a1", "anna", 400.0, buyer_phone="+48 880 197 834",
+                        delivery_phone="+48 880 197 834", company="Kawa i Spółka",
+                        nip="779-244-55-88", recipient="Anna Kowalska",
+                        paid_at="2026-02-01T10:00:00Z"),
+            self._order("a2", "anna", 600.0, buyer_phone="880197834",
+                        company="Kawa i Spółka", nip="7792445588",
+                        recipient="Anna Kowalska", paid_at="2026-05-01T10:00:00Z"),
+            # The account carries no number at all — only the parcel does.
+            self._order("k1", "kasia", 137.7, delivery_phone="601-220-118",
+                        recipient="Katarzyna Wójcik", paid_at="2026-04-01T10:00:00Z"),
+            self._order("m1", "marek", 899.0, buyer_phone="512334776",
+                        first="Marek", last="Zieliński", recipient="Marek Zieliński",
+                        paid_at="2026-03-01T10:00:00Z"),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("typed", [
+        "+48 880 197 834", "880 197 834", "880-197-834", "880197834", "0048880197834",
+    ])
+    async def test_every_spelling_of_the_number_finds_the_same_customer(self, typed):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": typed})
+
+        assert result.startswith("**Tak —")
+        assert "Kawa i Spółka" in result
+        assert f"numer telefonu {typed}" in result
+
+    @pytest.mark.asyncio
+    async def test_the_delivery_address_phone_counts_too(self):
+        """The parcel often goes to someone other than the account holder, and
+        their number is the only one on the order."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "+48 601 220 118"})
+
+        assert "Katarzyna Wójcik" in result
+        assert "`kasia`" in result
+
+    @pytest.mark.asyncio
+    async def test_a_customers_orders_are_grouped_and_listed(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert "- Zamówienia: **2** na łącznie **1000,00 PLN**" in result
+        assert "- Ostatni zakup: 01.05.2026" in result
+        assert "`a1`" in result and "`a2`" in result
+        # One number, however differently the two orders spelled it — the most
+        # recent spelling, since grouping runs newest-first.
+        assert "- Telefon: 880197834\n" in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_number_is_an_explicit_no_naming_what_was_searched(self):
+        """"Brak wyników" reads as "you have no customers at all" — the answer
+        has to name the number AND the period it looked in."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "+48 500 100 200"})
+
+        assert result.startswith("**Nie — nie znalazłem klienta")
+        assert "numer telefonu +48 500 100 200" in result
+        assert "Przeszukałem **4** zamówienia z okresu" in result
+
+    @pytest.mark.asyncio
+    async def test_searches_two_years_back_by_default(self):
+        """A customer who last bought 14 months ago is still a customer, so the
+        default window is two years — not get_buyers' current calendar year."""
+        import re
+
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        date_from, date_to = re.search(
+            r"z okresu (\d{4}-\d{2}-\d{2}) – (\d{4}-\d{2}-\d{2})", result
+        ).groups()
+        months = (int(date_to[:4]) - int(date_from[:4])) * 12 + int(date_to[5:7]) - int(date_from[5:7])
+        assert months == 24
+        assert date_from.endswith("-01")
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_period_wins(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {
+            "phone": "880197834", "date_from_local": "2026-01-01", "date_to_local": "2026-06-30",
+        })
+
+        assert "z okresu 2026-01-01 – 2026-06-30" in result
+
+    @pytest.mark.asyncio
+    async def test_name_email_and_nip_search_the_same_base(self):
+        agent = self._agent_with(self._store())
+
+        by_name = await agent._dispatch("find_buyer_by_contact", {"name": "wojcik"})
+        by_email = await agent._dispatch("find_buyer_by_contact", {"email": "MAREK@example.com"})
+        by_nip = await agent._dispatch("find_buyer_by_contact", {"nip": "779-244-55-88"})
+
+        assert "Katarzyna Wójcik" in by_name          # diacritics folded both ways
+        assert "Marek Zieliński" in by_email          # case-insensitive
+        assert "Kawa i Spółka" in by_nip              # dashes ignored
+
+    @pytest.mark.asyncio
+    async def test_several_matches_are_all_reported(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {
+            "phone": "880197834", "name": "zieliński",
+        })
+
+        assert result.startswith("**Tak — numer telefonu 880197834 / nazwa „zieliński” "
+                                 "pasuje do 2 klientów.**")
+        assert "Kawa i Spółka" in result and "Marek Zieliński" in result
+
+    @pytest.mark.asyncio
+    async def test_no_criteria_asks_instead_of_listing_everyone(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {})
+
+        assert result.startswith("Podaj numer telefonu")
+        agent._allegro.get_all_paid_orders_in_period.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refetches_orders_when_the_listing_carried_no_phones(self):
+        """Allegro trims optional fields on the order LIST endpoint. If
+        phoneNumber is one of them, every phone lookup would answer a flat
+        "nie mam takiego klienta" — so a listing with no phones anywhere is
+        re-fetched order by order before concluding anything."""
+        listed = [
+            self._order("a1", "anna", 400.0, recipient="Anna Kowalska"),
+            self._order("k1", "kasia", 137.7, recipient="Katarzyna Wójcik"),
+        ]
+        agent = self._agent_with(listed)
+        agent._allegro.fetch_orders_in_full = AsyncMock(return_value={
+            "a1": self._order("a1", "anna", 400.0, delivery_phone="+48 880 197 834",
+                              recipient="Anna Kowalska"),
+        })
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert agent._allegro.fetch_orders_in_full.await_args.args[0] == ["a1", "k1"]
+        assert result.startswith("**Tak —")
+        assert "Anna Kowalska" in result
+
+    @pytest.mark.asyncio
+    async def test_no_phone_data_anywhere_is_not_answered_as_no(self):
+        """The lookup never ran — saying "nie" would be a confident wrong
+        answer about a customer who may well be in the base."""
+        agent = self._agent_with([self._order("a1", "anna", 400.0, recipient="Anna Kowalska")])
+        agent._allegro.fetch_orders_in_full = AsyncMock(return_value={})
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert result.startswith("**Nie mogę tego sprawdzić**")
+        assert "880197834" in result
+        assert "login Allegro" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_phone_data_does_not_silence_the_other_criteria(self):
+        agent = self._agent_with([self._order("a1", "anna", 400.0, recipient="Anna Kowalska")])
+        agent._allegro.fetch_orders_in_full = AsyncMock(return_value={})
+
+        result = await agent._dispatch("find_buyer_by_contact", {
+            "phone": "880197834", "name": "Nowak",
+        })
+
+        assert result.startswith("**Nie — nie znalazłem klienta")
+        assert "po numerze nie dało się szukać" in result
+
+    @pytest.mark.asyncio
+    async def test_a_listing_that_has_phones_is_never_refetched(self):
+        agent = self._agent_with(self._store())
+        agent._allegro.fetch_orders_in_full = AsyncMock()
+
+        await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        agent._allegro.fetch_orders_in_full.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_refetch_falls_back_to_the_listing(self):
+        agent = self._agent_with([self._order("a1", "anna", 400.0, recipient="Anna Kowalska")])
+        agent._allegro.fetch_orders_in_full = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "880197834"})
+
+        assert result.startswith("**Nie mogę tego sprawdzić**")
+
+    @pytest.mark.asyncio
+    async def test_too_short_a_number_is_not_a_lookup(self):
+        """Three digits would match half the store — that is not a "no", it is
+        a question that cannot be answered as asked."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("find_buyer_by_contact", {"phone": "834"})
+
+        assert result.startswith("Podaj numer telefonu")
 
 
 class TestSalesSummaryMonthlyBreakdown:

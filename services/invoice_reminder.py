@@ -28,6 +28,12 @@ answers a DIFFERENT open question back to normal routing untouched
 (_reminder_owns_reply). Without that, a "tak" meant for the assistant's own
 question issued real, irreversible VAT invoices.
 
+The same applies to messages the reminder legitimately owns: a message that
+only ASKS about the pending invoices ("Pokaż mi faktury do wystawienia") is
+never consent to issue them. That is decided in code, not by the classifier
+(_is_read_only_query), because the classifier read exactly that message as
+ISSUE and two real invoices went out.
+
 The reminder's TEXT is a separate matter: it is recorded as an assistant turn
 in whichever conversation it finally gets delivered to (see
 main.py._record_assistant_turns), so the assistant can see what it said and
@@ -86,6 +92,55 @@ _OWN_ASK_RE = re.compile(
 # The only thing that lets a reply be read as an invoice reply when the
 # assistant's last question was about something else entirely.
 _INVOICE_TOPIC_RE = re.compile(r"faktur", re.IGNORECASE)
+
+# ── Read-only queries never issue anything ───────────────────────────────────
+#
+# Naming invoices is what lets a message be claimed by the reminder at all
+# (_INVOICE_TOPIC_RE above), and "faktury do wystawienia" names them. But
+# "Pokaż mi faktury do wystawienia" ASKS TO SEE the pending ones — it is not
+# consent to issue them. The classifier read it as ISSUE and the reminder
+# issued 2 real VAT invoices, which cannot be taken back.
+#
+# So the LLM does not get to decide this one: a message that reads as a
+# question or a request to display is never an issue command, whatever the
+# classifier would have said. It falls through to normal routing instead,
+# where the Allegro agent answers it by LISTING the invoices — which is what
+# the seller asked for.
+_READ_ONLY_RE = re.compile(
+    r"poka[żz]|wy[śs]wietl|wypisz|wylistuj|zobacz|podejrzyj|przejrzyj|"
+    r"sprawd[źz]|\bspis\b|\blist[aęey]\b|zestawienie|podgl[ąa]d|"
+    r"\bjakie\b|\bkt[óo]re\b|\bile\b|\bczy\s+mam\b|\bco\s+mam\b",
+    re.IGNORECASE,
+)
+
+# The imperative forms that really do order the invoices issued. Deliberately
+# anchored on whole words: "faktury do WYSTAWIENIA" is a description of what is
+# pending, not a command, so only "wystaw"/"wystawcie"/"wystawiaj"/"fakturuj"
+# count. A message carrying one of these outranks the read-only wording above
+# ("sprawdź i wystaw je"), because the seller did ask for the write.
+_ISSUE_COMMAND_RE = re.compile(
+    r"\bwystaw\b|\bwystawcie\b|\bwystawmy\b|\bwystawia[jm]\b|\b(?:za)?fakturuj",
+    re.IGNORECASE,
+)
+
+
+def _is_read_only_query(text: str) -> bool:
+    """Whether this message asks ABOUT the pending invoices rather than asking
+    for them to be issued. Such a message must never reach _issue_all.
+
+    Two shapes count, both only when no explicit issue command is present:
+      - it asks to see/check/list them ("pokaż mi faktury do wystawienia",
+        "ile mam niewystawionych faktur", "jakie faktury czekają");
+      - it is a question about invoices at all ("a te faktury do wystawienia?").
+        A question mark alone is not enough — "2 godziny?" answering the
+        reminder's own "na jak długo?" must still snooze — so this is scoped to
+        messages that name invoices.
+    """
+    if _ISSUE_COMMAND_RE.search(text):
+        return False
+    if _READ_ONLY_RE.search(text):
+        return True
+    return "?" in text and bool(_INVOICE_TOPIC_RE.search(text))
 
 
 def _valid_redis_url(url: str | None) -> bool:
@@ -426,6 +481,18 @@ async def handle_reply(
         )
         return None
 
+    # Asking to SEE the pending invoices is not asking for them to be issued.
+    # Decided here rather than by the classifier because the classifier got
+    # exactly this wrong ("Pokaż mi faktury do wystawienia" → ISSUE → 2 real
+    # VAT invoices). Normal routing takes it from here and lists them.
+    if _is_read_only_query(text):
+        logger.info(
+            "Invoice reminder: user=%s asked to SEE the pending invoices — "
+            "left to normal routing, nothing issued",
+            user_id,
+        )
+        return None
+
     action, minutes = await _classify_reply(text, state, last_assistant_text)
 
     if action == "unrelated":
@@ -556,7 +623,15 @@ ALREADY_ISSUED
     tu nie wolno niczego wystawiać.
 UNRELATED
   — wiadomość NIE jest odpowiedzią na to przypomnienie, tylko dotyczy czegoś zupełnie
-    innego (nowe, niepowiązane pytanie/polecenie).
+    innego (nowe, niepowiązane pytanie/polecenie),
+  — ALBO sprzedawca PYTA o te faktury / chce je tylko ZOBACZYĆ, a nie wystawić
+    (np. "pokaż mi faktury do wystawienia", "jakie faktury czekają?", "ile ich jest?",
+    "sprawdź, czy czegoś nie brakuje"). Prośba o pokazanie listy NIGDY nie jest
+    zgodą na wystawienie faktur — to zawsze UNRELATED, nigdy ISSUE.
+
+ISSUE wybieraj TYLKO wtedy, gdy sprzedawca wyraźnie POLECA wystawić faktury teraz.
+W razie jakiejkolwiek wątpliwości odpowiedz UNRELATED — wystawionej faktury VAT nie
+da się cofnąć.
 
 Odpowiedz TYLKO jednym z: ISSUE / SNOOZE:<liczba> / SNOOZE_UNSPECIFIED / DECLINE /
 ALREADY_ISSUED / UNRELATED.

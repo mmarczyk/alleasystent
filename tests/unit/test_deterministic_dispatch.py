@@ -325,6 +325,43 @@ class TestNamedBuyerAccount:
         assert _resolve("co mam do wysłania") == ("get_orders_delivery", {})
 
 
+class TestFindBuyerByContact:
+    """"Czy mam klienta z takim nr telefonu +48 880 197 834" — the one argument
+    the tool needs is written out in the query, and named_phone_number reads it
+    off far more reliably than a model retypes nine digits."""
+
+    @pytest.mark.parametrize("query,phone", [
+        ("Czy mam klienta z takim nr telefonu +48 880 197 834", "+48 880 197 834"),
+        ("czy mam klienta z takim nr telefonu +48 880 197 834?", "+48 880 197 834"),
+        ("kto to jest 880 197 834", "880 197 834"),
+        ("sprawdź numer 880197834", "880197834"),
+        ("czy ten numer telefonu 880-197-834 coś u mnie kupował", "880-197-834"),
+    ])
+    def test_resolves_the_phone_lookup(self, query, phone):
+        assert _resolve(query) == ("find_buyer_by_contact", {"phone": phone})
+
+    @pytest.mark.parametrize("query", [
+        # A period needs a clock this layer doesn't have.
+        "czy klient 880 197 834 kupował coś w tym miesiącu",
+        # The whole customer population, not one contact.
+        "lista klientów z numerami telefonów",
+        # Another tool's job entirely.
+        "napisz do klienta 880 197 834",
+        "wystaw fakturę dla klienta 880 197 834",
+    ])
+    def test_bails_to_the_llm(self, query):
+        assert _resolve(query) is None
+
+    @pytest.mark.parametrize("query", [
+        "zmień cenę oferty 14587236901",
+        "sprawdź przesyłkę 620012345678901234567890",
+        "wystaw fakturę dla NIP 7792445588",
+    ])
+    def test_other_long_numbers_are_never_read_as_a_phone(self, query):
+        resolved = _resolve(query)
+        assert resolved is None or resolved[0] != "find_buyer_by_contact"
+
+
 class TestMultiTopicAndUnrelatedQueries:
     def test_multi_topic_query_never_dispatches(self):
         assert _resolve("nowe zamówienia i moje konto") is None

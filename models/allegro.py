@@ -100,6 +100,12 @@ class AllegroOrder(BaseModel):
     order_id: str
     buyer_login: str
     buyer_email: str = ""
+    # `buyer.phoneNumber` from the checkout form — the phone the buyer gave on
+    # their Allegro account. The parcel's recipient can be someone else with a
+    # different number (`delivery.address.phoneNumber`, kept inside `delivery`
+    # below), so a lookup by phone has to try both — see
+    # AllegroAgent._order_phones.
+    buyer_phone: str = ""
     status: str
     payment_status: str = ""
     total_price: float = 0.0

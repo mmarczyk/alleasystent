@@ -123,6 +123,33 @@ class TestMatchedLabels:
         from agents.allegro.allegro_tools import matched_labels
         assert "zamowienia" in matched_labels("show me my new orders")
 
+    @pytest.mark.parametrize("query", [
+        "Dla tego zamówienia policz zysk zakładając koszt 1szt na poziomie 8.1zl",
+        "ile na tym zarobiłem przy zakupie po 8 zł za sztukę",
+        "jaka marża na tym zamówieniu, jak towar kosztował mnie 12 zł",
+    ])
+    def test_profit_question_keeps_the_profit_tool_in_the_candidate_list(self, query):
+        """calculate_order_profit carries the "finanse" label, so it has to
+        survive the Layer-1 filter for every way a seller asks about the money
+        made on one order — including a follow-up that names no order at all."""
+        from agents.allegro.allegro_tools import matched_labels, tools_for_labels
+        names = {t["function"]["name"] for t in tools_for_labels(matched_labels(query))}
+        assert "calculate_order_profit" in names
+
+    def test_profit_question_is_never_resolved_deterministically(self):
+        """The deterministic layer extracts no costs and knows no order_id — it
+        must hand a profit question to the LLM rather than serve some order
+        listing as if it answered it."""
+        from agents.allegro.allegro_tools import matched_labels
+        from agents.allegro.deterministic_dispatch import resolve_deterministic
+
+        for query in (
+            "Dla tego zamówienia policz zysk zakładając koszt 1szt na poziomie 8.1zl",
+            "policz zysk z ostatniego zamówienia przy koszcie 8,1 zł/szt",
+            "ile zarobiłem na tym zamówieniu przy koszcie 8 zł",
+        ):
+            assert resolve_deterministic(query, matched_labels(query)) is None, query
+
 
 class TestNamedBuyerLogin:
     """"z konta np1988" names SOMEONE ELSE'S account — the buyer's login, which
@@ -177,6 +204,72 @@ class TestNamedBuyerLogin:
             for t in select_tools_for_context("czy kupował ode mnie ktoś z konta np1988")
             if t["function"]["name"] == "get_orders"
         )
+
+
+class TestNamedPhoneNumber:
+    """A pasted phone number is the only routing signal in "sprawdź 880 197
+    834" — no stem in _LABEL_STEMS touches it — so the number itself has to
+    put the customer lookup on the table. The danger is everything else in a
+    store message that is also a long digit run: offer IDs, NIPs, REGONs,
+    tracking codes."""
+
+    @pytest.mark.parametrize("query,expected", [
+        ("Czy mam klienta z takim nr telefonu +48 880 197 834", "+48 880 197 834"),
+        ("czy mam klienta z takim nr telefonu +48 880 197 834?", "+48 880 197 834"),
+        ("kto to jest 880 197 834", "880 197 834"),
+        ("czy ten numer telefonu 880-197-834 coś u mnie kupował", "880-197-834"),
+        ("sprawdź numer 880197834", "880197834"),
+        ("klient dzwonił z 0048880197834", "0048880197834"),
+    ])
+    def test_finds_the_number(self, query, expected):
+        from agents.allegro.allegro_tools import named_phone_number
+        assert named_phone_number(query) == expected
+
+    @pytest.mark.parametrize("query", [
+        "zmień cenę oferty 14587236901",             # offer ID, 11 digits
+        "sprawdź przesyłkę 620012345678901234567890",  # tracking code
+        "wystaw fakturę dla NIP 7792445588",         # NIP, 10 digits
+        "REGON 123456789",                            # 9 digits, but not a phone
+        "zamówienie 0c4854a0-9646-11f1-8028-338c43adc37a",
+        "ile zamówień miałem w 2026 roku",
+        "jakie mam nowe zamówienia",
+    ])
+    def test_does_not_invent_one(self, query):
+        """A false positive would answer a question nobody asked ("nie masz
+        takiego klienta") about a number that was never a phone."""
+        from agents.allegro.allegro_tools import named_phone_number
+        assert named_phone_number(query) is None
+
+    @pytest.mark.parametrize("raw,digits", [
+        ("+48 880 197 834", "880197834"),
+        ("0048880197834", "880197834"),
+        ("880-197-834", "880197834"),
+        ("880197834", "880197834"),
+        ("48880197834", "880197834"),
+        ("+49 151 12345678", "4915112345678"),  # foreign: nothing to strip
+    ])
+    def test_phone_digits_normalizes_every_spelling_to_one(self, raw, digits):
+        from agents.allegro.allegro_tools import phone_digits
+        assert phone_digits(raw) == digits
+
+    def test_a_phone_number_makes_it_a_customer_question(self):
+        from agents.allegro.allegro_tools import matched_labels
+        assert matched_labels("sprawdź 880 197 834") == {"kupujacy"}
+
+    def test_the_tool_that_can_filter_by_it_is_offered(self):
+        from agents.allegro.allegro_tools import select_tools_for_context
+        names = {
+            t["function"]["name"]
+            for t in select_tools_for_context("Czy mam klienta z takim nr telefonu +48 880 197 834")
+        }
+        assert "find_buyer_by_contact" in names
+
+    def test_order_questions_keep_their_own_label(self):
+        """The contact stems must not drag every order question into the buyer
+        topic — that would cost those queries the deterministic layer."""
+        from agents.allegro.allegro_tools import matched_labels
+        assert matched_labels("co klient odebrał") == {"zamowienia"}
+        assert matched_labels("jakie mam nowe zamówienia") == {"zamowienia"}
 
 
 class TestOrderListingConsistency:
@@ -276,6 +369,8 @@ class TestLabelPhraseCoverage:
         ("pokaż listę kupujących z tego roku", "get_buyers"),
         ("jakie firmy u mnie kupowały", "get_buyers"),
         ("ilu miałem kupujących w tym roku", "get_buyers"),
+        ("czy mam klienta z takim nr telefonu +48 880 197 834", "find_buyer_by_contact"),
+        ("czy kupował ode mnie ktoś z adresu jan@example.com", "find_buyer_by_contact"),
         ("jakie zamówienia czekają na fakturę", "get_orders_pending_invoice"),
         ("dane do faktury dla tego zamówienia", "get_order_invoice_data"),
         ("wystaw brakujące faktury za ten miesiąc", "preview_pending_invoices"),

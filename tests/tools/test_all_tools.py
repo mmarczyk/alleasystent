@@ -132,6 +132,25 @@ async def test_payment_period_filter_keeps_the_buyer_login():
     assert all(q["lineItems.boughtAt.gte"][0] < "2026-01-01" for q in order_calls), order_calls
 
 
+async def test_phone_lookup_survives_a_listing_without_phone_numbers():
+    """Allegro trims optional fields on the order LIST endpoint. If the phone
+    numbers are among them, every "czy mam klienta z tym numerem" would come
+    back as a confident "nie" — so the lookup re-fetches the orders one by one
+    (real AllegroService, real parsing) before concluding anything."""
+    from tests.tools.harness import tool_harness
+
+    async with tool_harness(trim_listed_phones=True) as h:
+        out = await h.run("find_buyer_by_contact", {"phone": "+48 880 197 834"})
+        detail_calls = [
+            p for m, p, q in h.allegro_api.calls
+            if p.startswith("/order/checkout-forms/") and not p.endswith("/invoices")
+        ]
+
+    assert out.startswith("**Tak —"), out
+    assert "Kawa i Spółka" in out
+    assert detail_calls, "the listing had no phones and nothing was re-fetched"
+
+
 async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
     """A task that is already done must cost exactly one status call and no
     up-front poll_interval wait."""

@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from agents.allegro.allegro_tools import named_buyer_login
+from agents.allegro.allegro_tools import named_buyer_login, named_phone_number
 
 # ── Shared building blocks ──────────────────────────────────────────────────
 _COUNT_QUESTION_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
@@ -370,6 +370,30 @@ def _match_get_new_complaints(query: str) -> dict | None:
     return {}
 
 
+# ── kupujacy: find_buyer_by_contact (a phone number in the query) ──────────
+# The one argument this tool needs for the question it exists for — "czy mam
+# klienta z takim nr telefonu +48 880 197 834" — is written out in the query
+# itself, and named_phone_number extracts it far more reliably than a model
+# retypes a nine-digit number. The narrowness is in that extractor (see its
+# comment for why an offer ID or a NIP never reads as a phone); here it is
+# enough to bail on the two things this layer never resolves: a period, and a
+# question that also asks for something else about the customer.
+_BUYER_CONTACT_BAIL_RE = re.compile(
+    r"lista|zestawienie|wszystk\w*\s+(klient|kupuj)|"       # the whole population — get_buyers
+    r"napisz|wy[śs]lij|odpisz|faktur",                       # a different tool's job
+    re.IGNORECASE,
+)
+
+
+def _match_find_buyer_by_contact(query: str) -> dict | None:
+    phone = named_phone_number(query)
+    if phone is None:
+        return None
+    if _BUYER_CONTACT_BAIL_RE.search(query) or _PERIOD_RE.search(query):
+        return None
+    return {"phone": phone}
+
+
 # ── monitoring: 8 zero-argument UI-action toggles ───────────────────────────
 _ENABLE_RE = re.compile(
     r"w[łl][aą]cz|zacznij|chc[eę]\s+(dostawać|otrzymywać)|w[łl][aą]czy[cć]|powiadamiaj|informuj\s+mnie",
@@ -445,6 +469,7 @@ _LABEL_MATCHERS: dict[str, list[tuple[str, Callable[[str], dict | None]]]] = {
         ("get_new_returns", _match_get_new_returns),
         ("get_new_complaints", _match_get_new_complaints),
     ],
+    "kupujacy": [("find_buyer_by_contact", _match_find_buyer_by_contact)],
 }
 
 

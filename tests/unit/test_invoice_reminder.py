@@ -393,6 +393,95 @@ class TestHandleReplyRespectsOtherQuestions:
         mock_classify.assert_awaited_once_with("wystaw faktury", state, self.OTHER_ASK)
 
 
+class TestReadOnlyQueriesNeverIssue:
+    """A message that only asks to SEE the pending invoices must never issue
+    them. This was a real, critical bug: the seller wrote "Pokaż mi faktury do
+    wystawienia", the classifier called it ISSUE, and the reminder answered
+    "Wystawiam 2 faktur:" — two irreversible VAT invoices for a question."""
+
+    QUERIES = [
+        "Pokaż mi faktury do wystawienia",
+        "pokaz faktury do wystawienia",
+        "wyświetl niewystawione faktury",
+        "jakie mam faktury do wystawienia?",
+        "które faktury czekają na wystawienie",
+        "ile mam niewystawionych faktur",
+        "sprawdź faktury do wystawienia",
+        "lista faktur do wystawienia",
+        "czy mam jakieś faktury do wystawienia",
+        "a te faktury do wystawienia?",
+    ]
+
+    COMMANDS = [
+        "tak",
+        "wystaw",
+        "wystaw je teraz",
+        "ok, wystaw te faktury",
+        "dawaj",
+        "sprawdź i wystaw je",           # names both — the write wins, it was asked for
+        "2 godziny",                     # duration reply must still reach the classifier
+    ]
+
+    def test_queries_are_read_only(self):
+        from services.invoice_reminder import _is_read_only_query
+        for text in self.QUERIES:
+            assert _is_read_only_query(text) is True, text
+
+    def test_commands_are_not_read_only(self):
+        from services.invoice_reminder import _is_read_only_query
+        for text in self.COMMANDS:
+            assert _is_read_only_query(text) is False, text
+
+    @pytest.mark.asyncio
+    async def test_show_me_the_invoices_issues_nothing(self):
+        """Even with the reminder wide open and the classifier saying ISSUE."""
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1", "o2"]}
+        mock_issue_all = AsyncMock(return_value="Wystawiam 2 faktur:")
+        mock_classify = AsyncMock(return_value=("issue", 0))
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", mock_classify), \
+             patch.object(invoice_reminder, "_issue_all", mock_issue_all):
+            result = await invoice_reminder.handle_reply(
+                "user1", "Pokaż mi faktury do wystawienia", None,
+            )
+
+        assert result is None                 # falls through — the agent lists them
+        mock_issue_all.assert_not_awaited()   # nothing was issued
+        mock_classify.assert_not_awaited()    # not even classified
+
+    @pytest.mark.asyncio
+    async def test_show_me_after_the_reminders_own_ask_still_issues_nothing(self):
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1", "o2"]}
+        mock_issue_all = AsyncMock(return_value="Wystawiam 2 faktur:")
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", AsyncMock(return_value=("issue", 0))), \
+             patch.object(invoice_reminder, "_issue_all", mock_issue_all):
+            result = await invoice_reminder.handle_reply(
+                "user1", "pokaż je najpierw",
+                "🧾 Masz 2 niewystawionych faktur dla już wysłanych zamówień: `o1`, `o2`.\n\nWystawić je teraz?",
+            )
+
+        assert result is None
+        mock_issue_all.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_issue_command_is_untouched(self):
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"]}
+        mock_issue_all = AsyncMock(return_value="wystawione")
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", AsyncMock(return_value=("issue", 0))), \
+             patch.object(invoice_reminder, "_issue_all", mock_issue_all):
+            result = await invoice_reminder.handle_reply("user1", "ok, wystaw te faktury", None)
+        assert result == "wystawione"
+        mock_issue_all.assert_awaited_once_with("user1", state)
+
+
 class TestRefreshPendingMessage:
     """A queued reminder waits in Redis until the seller opens the app — up to a
     day — so what it says about "invoices still to issue" can be plain wrong by
