@@ -1405,38 +1405,54 @@ const WebPush = (() => {
     }
   }
 
+  // Page-level Notification — instant, but only reaches THIS device and only
+  // while the page is still alive. Used as the fallback when Web Push isn't
+  // available; see sendNotification() for why it is never combined with push.
+  function _showLocalNotification(title, cleanBody, prompt) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    try {
+      const n = new Notification(title, {
+        body: cleanBody,
+        icon: 'icons/icon-192.svg',
+        tag: 'alleasystent-monitor',
+      });
+      // Tapping the notification jumps straight into the chat question, same as the
+      // OS-level push click handled by sw.js's notificationclick.
+      if (prompt) n.onclick = () => { window.focus(); Chat.send(prompt); n.close(); };
+    } catch {}
+  }
+
   // persist=true also stores this as an entry in the Notifications inbox (bell
   // icon panel) server-side, instead of injecting anything into the chat.
   async function sendNotification(title, body, persist, url, prompt) {
     const cleanBody = String(body).replace(/[#*`_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
 
-    // Direct Notification — instant, for the current device (desktop/Android tab)
-    if ('Notification' in window && Notification.permission === 'granted') {
-      try {
-        const n = new Notification(title, {
-          body: cleanBody,
-          icon: 'icons/icon-192.svg',
-          tag: 'alleasystent-monitor',  // same tag so SW push replaces it silently
-        });
-        // Tapping the notification jumps straight into the chat question, same as the
-        // OS-level push click handled by sw.js's notificationclick.
-        if (prompt) n.onclick = () => { window.focus(); Chat.send(prompt); n.close(); };
-      } catch {}
-    }
-
-    // Web Push — fans out to all subscribed devices (iOS PWA, other desktops, background tabs)
-    // The SW shows a notification with the same tag, replacing the direct one on this device
+    // Web Push takes priority: the server fans the push out to every subscribed
+    // device, and the SW's push handler shows it on THIS device too. Firing a
+    // page-level `new Notification()` alongside it is what made the seller see
+    // the same notification twice after leaving the app — the shared
+    // 'alleasystent-monitor' tag does NOT collapse them, because a
+    // page-created (non-persistent) notification and a SW-created (persistent)
+    // one live in separate notification lists and never replace each other.
+    // So: push when we can, local notification only as the fallback.
     if (localStorage.getItem(SUB_KEY)) {
       const payload = { title, body: cleanBody, url: url ?? '/' };
       if (persist) payload.notify = true;
       if (prompt) payload.prompt = prompt;
-      fetch(Settings.api('/push/notify'), {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', ...Auth.headers() },
-        body: JSON.stringify(payload),
-      }).catch(() => {});
+      try {
+        const res = await fetch(Settings.api('/push/notify'), {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', ...Auth.headers() },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) return;  // the SW will show it — showing a second one here is the bug
+      } catch {}
+      // The request never reached the server (offline, backend down), so no push
+      // is coming: fall through and notify locally rather than staying silent.
     }
+
+    _showLocalNotification(title, cleanBody, prompt);
   }
 
   async function checkPending(sessionId) {
