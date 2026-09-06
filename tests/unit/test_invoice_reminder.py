@@ -570,3 +570,111 @@ class TestRefreshPendingMessage:
 
         text = "🧾 Masz 1 niewystawioną fakturę …"
         assert await invoice_reminder.refresh_pending_message("user1", text) == text
+
+
+class TestSellerSaysItIsAlreadyIssued:
+    """Allegro is the only thing that decides whether an invoice is missing, so
+    "przecież ta faktura już jest" is not something to write down and believe —
+    it is a reason to go and ask Allegro again, right now."""
+
+    def test_classification_is_parsed(self):
+        from services.invoice_reminder import _parse_classification
+
+        assert _parse_classification("ALREADY_ISSUED") == ("already_issued", 0)
+
+    def test_is_not_confused_with_an_issue_command(self):
+        from services.invoice_reminder import _parse_classification
+
+        assert _parse_classification("ISSUE") == ("issue", 0)
+        assert _parse_classification("ALREADY_ISSUED")[0] != "issue"
+
+    @staticmethod
+    def _allegro_returning(order_ids):
+        allegro = AsyncMock()
+        allegro._load_tokens_from_redis = AsyncMock()
+        allegro.get_orders_needing_invoice = AsyncMock(
+            return_value=[type("O", (), {"order_id": oid})() for oid in order_ids]
+        )
+        return allegro
+
+    @pytest.mark.asyncio
+    async def test_allegro_agreeing_stops_the_reminder_and_issues_nothing(self, monkeypatch):
+        from services import allegro_service, invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"], "interval_minutes": 120}
+        resolve, issue = AsyncMock(), AsyncMock()
+        monkeypatch.setattr(invoice_reminder, "_resolve_state", resolve)
+        monkeypatch.setattr(invoice_reminder, "_issue_all", issue)
+        monkeypatch.setattr(invoice_reminder, "get_pending_state", AsyncMock(return_value=state))
+        monkeypatch.setattr(
+            invoice_reminder, "_classify_reply", AsyncMock(return_value=("already_issued", 0))
+        )
+        monkeypatch.setattr(
+            allegro_service.AllegroService, "get_instance",
+            lambda user_id: self._allegro_returning([]),
+        )
+
+        out = await invoice_reminder.handle_reply("user1", "przecież ta faktura już jest", None)
+
+        assert "masz rację" in out.lower()
+        resolve.assert_awaited_once()
+        issue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_allegro_disagreeing_says_what_is_missing_and_goes_quiet(self, monkeypatch):
+        """Never "you're wrong, shall I issue another?" — the invoice may well
+        exist; what Allegro lacks is the PDF on the order."""
+        from services import allegro_service, invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"], "interval_minutes": 120}
+        snooze, issue = AsyncMock(), AsyncMock()
+        monkeypatch.setattr(invoice_reminder, "_set_snooze", snooze)
+        monkeypatch.setattr(invoice_reminder, "_issue_all", issue)
+        monkeypatch.setattr(invoice_reminder, "get_pending_state", AsyncMock(return_value=state))
+        monkeypatch.setattr(
+            invoice_reminder, "_classify_reply", AsyncMock(return_value=("already_issued", 0))
+        )
+        monkeypatch.setattr(
+            allegro_service.AllegroService, "get_instance",
+            lambda user_id: self._allegro_returning(["o1"]),
+        )
+
+        out = await invoice_reminder.handle_reply("user1", "ta faktura już jest", None)
+
+        assert "dołącz fakturę do zamówienia" in out
+        assert "o1" in out
+        issue.assert_not_awaited()
+        assert snooze.await_args[0][2] == invoice_reminder._RECHECK_SNOOZE_MINUTES
+
+    @pytest.mark.asyncio
+    async def test_a_failed_recheck_says_so_instead_of_deciding(self, monkeypatch):
+        from services import allegro_service, invoice_reminder
+        from services.allegro_service import AllegroAPIError
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"], "interval_minutes": 120}
+        allegro = AsyncMock()
+        allegro._load_tokens_from_redis = AsyncMock()
+        allegro.get_orders_needing_invoice = AsyncMock(side_effect=AllegroAPIError(500, "boom"))
+        monkeypatch.setattr(invoice_reminder, "get_pending_state", AsyncMock(return_value=state))
+        monkeypatch.setattr(
+            invoice_reminder, "_classify_reply", AsyncMock(return_value=("already_issued", 0))
+        )
+        monkeypatch.setattr(
+            allegro_service.AllegroService, "get_instance", lambda user_id: allegro
+        )
+
+        out = await invoice_reminder.handle_reply("user1", "faktura już jest", None)
+        assert "Nie udało mi się" in out
+
+
+class TestRemindingIsAllegrosCallAlone:
+    """The reminder must never suppress itself from internal state — an invoice
+    can be attached to an order by anyone at any moment, and only Allegro knows."""
+
+    def test_the_reminder_does_not_consult_the_issuance_ledger(self):
+        import inspect
+
+        from services import invoice_reminder
+
+        source = inspect.getsource(invoice_reminder)
+        assert "invoice_ledger" not in source

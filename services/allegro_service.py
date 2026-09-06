@@ -328,8 +328,6 @@ class AllegroService:
             )
         # Single order details (buyer, items, price) — static once placed, 5 min TTL
         self._order_cache: _TTLCache = _TTLCache(ttl=300.0)
-        # Invoice status per order — 2 min TTL
-        self._invoice_cache: _TTLCache = _TTLCache(ttl=120.0)
         # Full offer catalogue — 5 min TTL (stock/prices change infrequently)
         self._all_offers_cache: _TTLCache = _TTLCache(ttl=300.0)
 
@@ -833,14 +831,18 @@ class AllegroService:
         }
 
     async def get_order_invoices(self, order_id: str) -> list[dict[str, Any]]:
-        cached = self._invoice_cache.get(order_id)
-        if cached is not None:
-            logger.debug("invoice cache hit: %s", order_id)
-            return cached
+        """Invoices attached to the order, asked of Allegro every single time.
+
+        Deliberately NOT cached. This one answer decides whether the seller is
+        told they still owe an invoice, and it changes the moment an invoice is
+        attached — by us, in Allegro's own panel, or by their accountant. A
+        cached "no invoice here" is not a stale number in a report, it is the
+        assistant insisting an invoice is missing while the seller is looking at
+        it on the order. Allegro is the only source of truth for this, and it is
+        cheap enough to ask.
+        """
         data = await self._get(f"/order/checkout-forms/{order_id}/invoices")
-        invoices = data.get("invoices", [])
-        self._invoice_cache.set(order_id, invoices)
-        return invoices
+        return data.get("invoices", [])
 
     async def create_order_invoice_record(self, order_id: str, invoice_number: str, filename: str) -> str:
         """POST .../invoices — register invoice metadata on the order, return Allegro's invoice id.
@@ -852,7 +854,6 @@ class AllegroService:
         if invoice_number:
             body["invoiceNumber"] = invoice_number
         data = await self._post(f"/order/checkout-forms/{order_id}/invoices", body)
-        self._invoice_cache.invalidate(order_id)
         return data["id"]
 
     async def upload_order_invoice_file(self, order_id: str, allegro_invoice_id: str, pdf_bytes: bytes) -> None:
@@ -967,10 +968,18 @@ class AllegroService:
         if shipped_only:
             candidates = [o for o in candidates if o.fulfillment_status in ("SENT", "PICKED_UP")]
 
-        # Keep only those without any uploaded invoice — fetch all in parallel
-        invoice_lists = await asyncio.gather(*[
-            self.get_order_invoices(o.order_id) for o in candidates
-        ])
+        # Keep only those without any uploaded invoice. Asked of Allegro live,
+        # never from a cache (see get_order_invoices), at bounded concurrency so
+        # a busy month doesn't fire hundreds of requests at once and earn a 429.
+        # A failed lookup is deliberately allowed to propagate: the caller going
+        # quiet is right, counting the order as uninvoiced would not be.
+        semaphore = asyncio.Semaphore(_INVOICE_LOOKUP_CONCURRENCY)
+
+        async def invoices_of(order_id: str) -> list[dict[str, Any]]:
+            async with semaphore:
+                return await self.get_order_invoices(order_id)
+
+        invoice_lists = await asyncio.gather(*[invoices_of(o.order_id) for o in candidates])
         return [o for o, invs in zip(candidates, invoice_lists) if not invs]
 
     # ── Offers ────────────────────────────────────────────────────────────────

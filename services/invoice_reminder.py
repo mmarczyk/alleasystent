@@ -58,6 +58,10 @@ _WORK_START_HOUR = 7
 _WORK_END_HOUR = 20  # exclusive — last check can fire at 19:xx
 
 _DEFAULT_INTERVAL_MINUTES = 120
+# How long the reminder stays quiet after the seller says an invoice is already
+# there and Allegro disagrees. Long enough not to argue with them every two
+# hours, short enough that a genuinely missing invoice still comes back.
+_RECHECK_SNOOZE_MINUTES = 60 * 24
 _MIN_SNOOZE_MINUTES = 5
 _MAX_SNOOZE_MINUTES = 60 * 24 * 14  # 2 weeks — sanity cap on a misparsed duration
 
@@ -497,6 +501,9 @@ async def handle_reply(
     if action == "issue":
         return await _issue_all(user_id, state)
 
+    if action == "already_issued":
+        return await _accept_already_issued(user_id, state)
+
     if action == "decline":
         await set_monitor_enabled(user_id, False)
         return (
@@ -534,6 +541,48 @@ async def _issue_all(user_id: str, state: dict) -> str:
     return f"Wystawiam {_count_phrase(len(order_ids))}:\n\n" + "\n\n---\n\n".join(results)
 
 
+async def _accept_already_issued(user_id: str, state: dict) -> str:
+    """The seller says the invoice already exists — so go and look, right now.
+
+    The answer is never taken on trust and never written down as a fact of our
+    own: this reminder is only ever as right as Allegro, so the seller saying
+    "it's already there" is a reason to ask Allegro again immediately instead of
+    at the next scheduled pass. If Allegro agrees, the reminder goes quiet by
+    itself; if it doesn't, the seller gets told exactly what is missing — the
+    invoice PDF on the order — rather than being nagged to issue a second one.
+    """
+    from services.allegro_service import AllegroAPIError, AllegroAuthError, AllegroService
+
+    asked_about = state.get("order_ids", [])
+    try:
+        allegro = AllegroService.get_instance(user_id)
+        await allegro._load_tokens_from_redis()
+        orders = await allegro.get_orders_needing_invoice(shipped_only=True)
+    except (AllegroAuthError, AllegroAPIError) as exc:
+        logger.warning("Invoice reminder: re-check on request failed user=%s: %s", user_id, exc)
+        return (
+            "Nie udało mi się teraz zapytać Allegro o te faktury — sprawdzę ponownie przy "
+            f"następnym przebiegu. (Szczegóły: {exc})"
+        )
+
+    still_missing = [o.order_id for o in orders if o.order_id in asked_about]
+    if not still_missing:
+        await _resolve_state(user_id, state)
+        return (
+            "Sprawdziłem w Allegro — masz rację, faktury są na miejscu. "
+            "Przestaję o nie przypominać."
+        )
+
+    await _set_snooze(user_id, state, _RECHECK_SNOOZE_MINUTES)
+    return (
+        f"Sprawdziłem w Allegro i dla {_format_order_ids(still_missing)} nadal nie widzi faktury. "
+        "Allegro pokazuje tylko faktury dołączone do zamówienia jako PDF — sama faktura "
+        "w inFakt czy w Twojej księgowości mu nie wystarczy.\n\n"
+        "Napisz „dołącz fakturę do zamówienia `<id>`”, jeśli mam spróbować ją tam wysłać. "
+        f"Nie będę o to pytać przez {_format_duration(_RECHECK_SNOOZE_MINUTES)}."
+    )
+
+
 # ── Reply classification (small dedicated LLM call, same shape as the
 # orchestrator's own context classifier — see agents/orchestrator.py) ────────
 
@@ -567,6 +616,11 @@ SNOOZE_UNSPECIFIED
 DECLINE
   — sprzedawca chce WYŁĄCZYĆ te automatyczne przypomnienia w ogóle (np. "przestań
     pytać", "wyłącz to", "nie chcę tych przypomnień", "daj mi spokój").
+ALREADY_ISSUED
+  — sprzedawca mówi, że faktura dla TYCH zamówień JUŻ istnieje / już ją wystawił lub
+    dołączył (np. "przecież ją wystawiłem", "ta faktura już jest", "faktura jest już
+    dodana do zamówienia", "już to zrobiłem"). To NIE jest prośba o wystawienie —
+    tu nie wolno niczego wystawiać.
 UNRELATED
   — wiadomość NIE jest odpowiedzią na to przypomnienie, tylko dotyczy czegoś zupełnie
     innego (nowe, niepowiązane pytanie/polecenie),
@@ -579,7 +633,8 @@ ISSUE wybieraj TYLKO wtedy, gdy sprzedawca wyraźnie POLECA wystawić faktury te
 W razie jakiejkolwiek wątpliwości odpowiedz UNRELATED — wystawionej faktury VAT nie
 da się cofnąć.
 
-Odpowiedz TYLKO jednym z: ISSUE / SNOOZE:<liczba> / SNOOZE_UNSPECIFIED / DECLINE / UNRELATED.
+Odpowiedz TYLKO jednym z: ISSUE / SNOOZE:<liczba> / SNOOZE_UNSPECIFIED / DECLINE /
+ALREADY_ISSUED / UNRELATED.
 """.strip()
 
 # Second layer under _reminder_owns_reply: even when the reminder may claim
@@ -655,6 +710,8 @@ async def _classify_reply(
 
 
 def _parse_classification(raw: str) -> tuple[str, int]:
+    if raw.startswith("ALREADY_ISSUED"):
+        return "already_issued", 0
     if raw.startswith("ISSUE"):
         return "issue", 0
     if raw.startswith("DECLINE"):

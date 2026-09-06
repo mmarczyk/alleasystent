@@ -29,7 +29,7 @@ from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
 from services.allegro_service import (
-    INVOICE_FILE_MAX_BYTES, SCOPE_BILLING_READ, SCOPE_ORDERS_WRITE,
+    SCOPE_BILLING_READ, SCOPE_ORDERS_WRITE,
     AllegroAPIError, AllegroAuthError, AllegroService,
     is_thread_unread, thread_last_message_at,
 )
@@ -2589,12 +2589,15 @@ class AllegroAgent(BaseAgent):
         the SCOPE_ORDERS_WRITE scope — without it they answer 403, which is
         the "brak uprawnień" the seller sees.
         """
-        from services.infakt_service import InfaktAPIError, InfaktService
+        from services import invoice_ledger
+        from services.infakt_service import (
+            InfaktAPIError,
+            InvoiceTooLargeError,
+            attach_invoice_to_order,
+        )
 
-        infakt = InfaktService.get_instance()
         try:
-            invoice = await infakt.get_invoice(invoice_uuid)
-            pdf_bytes = await infakt.get_invoice_pdf(invoice_uuid)
+            number = await attach_invoice_to_order(self._allegro, order_id, invoice_uuid)
         except InfaktAPIError as exc:
             logger.error("attach_invoice_to_allegro_order: fetch from inFakt failed for %s: %s", invoice_uuid, exc)
             if exc.status_code == 404:
@@ -2604,21 +2607,12 @@ class AllegroAgent(BaseAgent):
                     "zamówienia ponownie przez issue_invoice_for_order."
                 )
             return f"❌ Nie udało się pobrać faktury `{invoice_uuid}` z inFakt: {exc}"
-
-        number = invoice.get("number", "")
-        filename = f"faktura-{number or invoice_uuid}.pdf"
-        if len(pdf_bytes) > INVOICE_FILE_MAX_BYTES:
-            # Caught here rather than at Allegro: the upload is the second of two
-            # calls, so letting it fail would leave an empty invoice record on the
-            # order that a retry then has to work around.
+        except InvoiceTooLargeError as exc:
             return (
-                f"❌ Faktura {number or invoice_uuid} waży {len(pdf_bytes) / 1024 / 1024:.1f} MB, "
-                f"a Allegro przyjmuje pliki do {INVOICE_FILE_MAX_BYTES // 1024 // 1024} MB — "
+                f"❌ Faktura {exc.number or invoice_uuid} waży {exc.size_bytes / 1024 / 1024:.1f} MB, "
+                f"a Allegro przyjmuje pliki do {exc.limit_bytes // 1024 // 1024} MB — "
                 "nie wysłano jej. Zmniejsz PDF w inFakt i spróbuj ponownie."
             )
-        try:
-            allegro_invoice_id = await self._allegro.create_order_invoice_record(order_id, number, filename)
-            await self._allegro.upload_order_invoice_file(order_id, allegro_invoice_id, pdf_bytes)
         except AllegroAPIError as exc:
             logger.error(
                 "attach_invoice_to_allegro_order: order %s failed (status=%s, code=%s): %s",
@@ -2636,6 +2630,11 @@ class AllegroAgent(BaseAgent):
                 )
             return f"❌ Nie udało się dołączyć faktury do zamówienia `{order_id}` w Allegro: {exc}"
 
+        # The ledger is what stops the invoice reminder nagging about an order
+        # whose invoice only reached Allegro on this second, manual step.
+        await invoice_ledger.mark_attached(
+            invoice_ledger.user_id_of(self._allegro), order_id, number=number,
+        )
         return f"✅ Faktura {number or invoice_uuid} dołączona do zamówienia `{order_id}` w Allegro — kupujący zobaczy ją na stronie zamówienia."
 
     async def _send_invoice_to_ksef(self, invoice_uuid: str) -> str:
@@ -3806,17 +3805,40 @@ class AllegroAgent(BaseAgent):
                 *[self._allegro.get_order_invoice_data(o.order_id) for o in orders],
                 return_exceptions=True,
             )
-            header = f"**Zamówień bez faktury: {len(orders)}**\n"
+            # The list itself is Allegro's live answer. The ledger only adds
+            # what Allegro cannot know: that we already issued an invoice for
+            # this order in inFakt and failed to attach it. Saying so beats
+            # calling it "niewystawiona" and inviting a duplicate.
+            from services import invoice_ledger
+            issued = await invoice_ledger.get_records(
+                invoice_ledger.user_id_of(self._allegro), [o.order_id for o in orders]
+            )
+            not_issued = sum(1 for o in orders if o.order_id not in issued)
+            header = f"**Zamówień bez faktury: {not_issued}**"
+            if issued:
+                header += (
+                    f" (+{len(issued)}, dla których faktura już istnieje, ale nie jest dołączona "
+                    "do zamówienia w Allegro — napisz „dołącz fakturę do zamówienia `<id>`”)"
+                )
+            header += "\n"
             blocks = []
             for o, inv in zip(orders, inv_results):
                 items_str = ", ".join(f"{li.offer_name} ×{li.quantity}" for li in o.line_items[:3])
+                record = issued.get(o.order_id)
+                if record:
+                    invoice_line = (
+                        f"**Faktura: wystawiona w inFakt ({record.get('number') or record.get('invoice_uuid') or 'brak numeru'}), "
+                        "NIE dołączona do zamówienia w Allegro** — nie wystawiaj jej drugi raz"
+                    )
+                else:
+                    invoice_line = "**Faktura: niewystawiona**"
                 # No status/date lines here any more — _order_bullet already
                 # prints both (and in Warsaw time), so repeating them made the
                 # same order carry two "when" fields in two formats.
                 extra = [
                     f"E-mail: {o.buyer_email}",
                     f"Produkty: {items_str}",
-                    "**Faktura: niewystawiona**",
+                    invoice_line,
                 ]
                 if isinstance(inv, dict) and inv.get("required"):
                     if inv.get("company_name"):
