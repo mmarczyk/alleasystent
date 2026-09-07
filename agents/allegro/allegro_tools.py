@@ -1217,6 +1217,38 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "suggest_sales_record_reminder",
+            "description": (
+                "Present the user with a button to enable the monthly SALES-RECORD REMINDER "
+                "(ewidencja sprzedaży bezrachunkowej) — the nag to issue the record of "
+                "non-invoiced sales for the PREVIOUS month, which is due by the 5th. It starts "
+                "on the 1st at 8:00, asks twice a day (8:00 and 20:00) over the 1st-3rd and four "
+                "times a day (8:00, 12:00, 16:00, 20:00) from the 4th on, and keeps going past "
+                "the deadline until the seller says it is done (\"już wystawiłem\"). "
+                "Unlike the other reminders it checks nothing in Allegro — the ewidencja lives "
+                "in the seller's own accounting, so their answer is the only thing that stops it. "
+                "Call it when the user brings up the ewidencja, the monthly accounting deadline "
+                "of the 5th, or wants to be reminded about non-invoiced/receipt-less sales. "
+                "Do NOT call multiple times in one conversation."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_sales_record_reminder",
+            "description": (
+                "Show a button to disable the monthly SALES-RECORD REMINDER (ewidencja sprzedaży "
+                "bezrachunkowej) in the browser. Call it when the user asks to stop being "
+                "reminded about the ewidencja or the monthly deadline of the 5th."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "suggest_message_monitoring",
             "description": (
                 "Present the user with a button to enable automatic monitoring of new/unread buyer "
@@ -1528,6 +1560,8 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "suggest_invoice_reminder": "action",
     "suggest_message_reminder": "action",
     "disable_message_reminder": "action",
+    "suggest_sales_record_reminder": "action",
+    "disable_sales_record_reminder": "action",
     "suggest_message_monitoring": "action",
     "suggest_returns_monitoring": "action",
     "disable_order_monitoring": "action",
@@ -1623,6 +1657,8 @@ _TOOL_LABELS: dict[str, str] = {
     "disable_invoice_reminder":        "monitoring",
     "suggest_message_reminder":        "monitoring",
     "disable_message_reminder":        "monitoring",
+    "suggest_sales_record_reminder":   "monitoring",
+    "disable_sales_record_reminder":   "monitoring",
     "suggest_message_monitoring":      "monitoring",
     "disable_message_monitoring":      "monitoring",
     "suggest_returns_monitoring":      "monitoring",
@@ -1684,7 +1720,8 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
                    "buyer", "customer", "nip",
                    "telefon", "tel", "komork", "phone", "mail", "e-mail"),
     "zwroty":     ("zwrot", "reklamacj", "spor"),
-    "monitoring": ("monitor", "powiad", "notyfikacj", "przypomn", "wlacz", "wylacz"),
+    "monitoring": ("monitor", "powiad", "notyfikacj", "przypomn", "wlacz", "wylacz",
+                   "ewidencj", "bezrachunkow"),
 }
 
 _DIACRITICS = str.maketrans("ąćęłńóśźż", "acelnoszz")

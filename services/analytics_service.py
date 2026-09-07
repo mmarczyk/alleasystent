@@ -99,6 +99,8 @@ _TOOL_LABELS = {
     "disable_invoice_monitoring":      "Monitoring faktur",
     "suggest_message_reminder":        "Przypomnienia o wiadomościach",
     "disable_message_reminder":        "Przypomnienia o wiadomościach",
+    "suggest_sales_record_reminder":   "Przypomnienia o ewidencji",
+    "disable_sales_record_reminder":   "Przypomnienia o ewidencji",
     "suggest_message_monitoring":      "Monitoring wiadomości",
     "disable_message_monitoring":      "Monitoring wiadomości",
     "suggest_returns_monitoring":      "Monitoring zwrotów",

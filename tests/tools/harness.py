@@ -45,12 +45,13 @@ MONITOR_KINDS = {
     "message": "message",
     "message_reminder": "message_reminder",
     "invoice_reminder": "invoice_reminder",
+    "sales_record_reminder": "sales_record_reminder",
     "returns": "returns_complaints",
 }
 
 ALL_MONITORS_OFF: dict[str, bool] = {
     "order": False, "message": False, "message_reminder": False,
-    "invoice_reminder": False, "returns": False,
+    "invoice_reminder": False, "sales_record_reminder": False, "returns": False,
 }
 
 

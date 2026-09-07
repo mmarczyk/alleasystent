@@ -487,7 +487,11 @@ class AllegroAgent(BaseAgent):
         "7:00-20:00 check that keeps ASKING in chat for as long as a buyer message STAYS unread; "
         "pick this one when the user wants to stop FORGETTING or MISSING messages, and the monitor "
         "above when they want to know the moment one arrives — they are independent and can both be "
-        "on), or RETURNS/COMPLAINTS monitoring (suggest_returns_monitoring / "
+        "on), the monthly SALES-RECORD REMINDER (suggest_sales_record_reminder / "
+        "disable_sales_record_reminder — the ewidencja sprzedaży bezrachunkowej for the PREVIOUS "
+        "month, due by the 5th; it runs off the calendar alone, checks nothing in Allegro, and "
+        "only stops for the month when the seller says it is done — use this pair for ANY request "
+        "about the ewidencja or the monthly deadline of the 5th), or RETURNS/COMPLAINTS monitoring (suggest_returns_monitoring / "
         "disable_returns_monitoring — a single shared toggle covering BOTH zwroty and reklamacje, "
         "there is no separate tool for each) — call suggest_message_monitoring after get_message_threads "
         "when the user asks about being notified of new buyer messages, and likewise "
@@ -1680,6 +1684,37 @@ class AllegroAgent(BaseAgent):
             "odłożenie, zapamiętam na jak długo.\n\n"
             '<button class="btn-message-reminder" onclick="MessageReminder.enable()">'
             '⏰ Włącz przypomnienia o wiadomościach</button>'
+        )
+
+    async def _sales_record_reminder_status_block(self) -> str:
+        """Deterministic (non-LLM) status + action button for the monthly
+        SALES-RECORD reminder — the ewidencja sprzedaży bezrachunkowej for the
+        previous month, due by the 5th (see services/sales_record_reminder.py).
+
+        The odd one out among the reminders: it checks nothing, because nothing
+        we can reach knows whether the ewidencja exists. Its schedule comes from
+        the calendar (twice a day over the 1st-3rd, four times a day from the
+        4th) and only the seller saying "już wystawiłem" stops it for the month.
+        """
+        from services.sales_record_reminder import is_monitor_enabled
+
+        if await is_monitor_enabled(self._allegro._user_id):
+            return (
+                "📒 Przypomnienia o ewidencji sprzedaży bezrachunkowej są włączone — od 1. dnia "
+                "miesiąca przypomnę Ci na czacie o ewidencji za poprzedni miesiąc (termin: 5. dnia): "
+                "przez pierwsze 3 dni 2 razy dziennie, potem 4 razy dziennie, w godzinach 8:00-20:00, "
+                "aż napiszesz, że jest już wystawiona.\n\n"
+                '<button class="btn-sales-record-reminder" style="filter:grayscale(1)" '
+                'onclick="SalesRecordReminder.disable();this.outerHTML=\'<span>✓ Przypomnienia o ewidencji wyłączone</span>\'">'
+                '🔕 Wyłącz przypomnienia o ewidencji</button>'
+            )
+        return (
+            "💡 Mogę co miesiąc przypominać Ci o ewidencji sprzedaży bezrachunkowej za poprzedni "
+            "miesiąc (termin: do 5. dnia miesiąca) — od 1. dnia, przez pierwsze 3 dni 2 razy "
+            "dziennie, potem 4 razy dziennie, w godzinach 8:00-20:00, aż napiszesz, że jest już "
+            "wystawiona.\n\n"
+            '<button class="btn-sales-record-reminder" onclick="SalesRecordReminder.enable()">'
+            '📒 Włącz przypomnienia o ewidencji</button>'
         )
 
     async def _message_monitoring_status_block(self) -> str:
@@ -3883,6 +3918,9 @@ class AllegroAgent(BaseAgent):
 
         if tool_name in ("suggest_message_reminder", "disable_message_reminder"):
             return await self._message_reminder_status_block()
+
+        if tool_name in ("suggest_sales_record_reminder", "disable_sales_record_reminder"):
+            return await self._sales_record_reminder_status_block()
 
         if tool_name in ("suggest_message_monitoring", "disable_message_monitoring"):
             return await self._message_monitoring_status_block()

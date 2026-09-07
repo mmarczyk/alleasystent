@@ -1899,6 +1899,42 @@ const MessageReminder = (() => {
   return { isEnabled, enable, disable };
 })();
 
+// ── Sales-record reminder (ewidencja sprzedaży bezrachunkowej) ──
+// The monthly nag to issue the previous month's ewidencja by the 5th
+// (services/sales_record_reminder.py), on the same Cloud Run pass as the two
+// reminders above. Its cadence is the calendar, not an interval: from the 1st
+// at 8:00, twice a day over the 1st-3rd and four times a day from the 4th,
+// between 8:00 and 20:00, until the seller replies that it is done. Nothing is
+// checked anywhere — the ewidencja lives in the seller's accounting — so their
+// answer is the only thing that stops it for the month.
+// Toggle only, like the other two: it is delivered as a chat message.
+const SalesRecordReminder = (() => {
+  const ENABLED_KEY = 'ae_sales_record_reminder_enabled';
+
+  function isEnabled() { return localStorage.getItem(ENABLED_KEY) === '1'; }
+
+  async function enable() {
+    localStorage.setItem(ENABLED_KEY, '1');
+    fetch(Settings.api('/allegro/sales-record-reminder/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+    UI.toast('✓ Przypomnienia o ewidencji włączone — napiszę Ci na czacie od 1. dnia miesiąca');
+    document.querySelectorAll('.btn-sales-record-reminder').forEach(btn => {
+      btn.outerHTML = '<span class="monitoring-badge">✓ Przypomnienia o ewidencji aktywne</span>';
+    });
+    return true;
+  }
+
+  function disable() {
+    localStorage.removeItem(ENABLED_KEY);
+    fetch(Settings.api('/allegro/sales-record-reminder/disable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
+  }
+
+  return { isEnabled, enable, disable };
+})();
+
 // ── Notifications (bell icon panel) ──────────────
 const Notifications = (() => {
   let _items = [];
@@ -2087,6 +2123,7 @@ const UI = (() => {
     document.getElementById('set-toggle-returns').checked = ReturnsMonitor.isEnabled();
     document.getElementById('set-toggle-invoice-reminder').checked = InvoiceReminder.isEnabled();
     document.getElementById('set-toggle-message-reminder').checked = MessageReminder.isEnabled();
+    document.getElementById('set-toggle-sales-record-reminder').checked = SalesRecordReminder.isEnabled();
     document.getElementById('set-toggle-theme').checked = Theme.isDark();
     updateVersionInfo();
   }
@@ -2114,6 +2151,10 @@ const UI = (() => {
 
   function toggleMessageReminder(on) {
     if (on) MessageReminder.enable(); else MessageReminder.disable();
+  }
+
+  function toggleSalesRecordReminder(on) {
+    if (on) SalesRecordReminder.enable(); else SalesRecordReminder.disable();
   }
 
   function toggleDarkTheme(on) {
@@ -2148,7 +2189,7 @@ const UI = (() => {
   return {
     toast, autoResize, openSettings, closeSettings, toggleSidebar, exportChat, clearAllHistory,
     toggleOrderMonitoring, toggleMessageMonitoring, toggleReturnsMonitoring,
-    toggleInvoiceReminder, toggleMessageReminder, toggleDarkTheme,
+    toggleInvoiceReminder, toggleMessageReminder, toggleSalesRecordReminder, toggleDarkTheme,
   };
 })();
 

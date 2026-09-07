@@ -378,6 +378,16 @@ CASES: list[Case] = [
          "Nie przypominaj mi o nieprzeczytanych wiadomościach",
          ("Wyłącz przypomnienia o wiadomościach",), monitors={"message_reminder": True},
          note="Przypomnienia włączone → status + przycisk wyłączenia."),
+    Case("suggest_sales_record_reminder", "suggest_sales_record_reminder", {},
+         "Przypominaj mi o ewidencji sprzedaży bezrachunkowej",
+         ("Włącz przypomnienia o ewidencji",),
+         note="Comiesięczne przypomnienie o ewidencji za poprzedni miesiąc (termin: 5. dnia) "
+              "wyłączone → przycisk włączenia. Jako jedyne przypomnienie nie sprawdza niczego "
+              "w Allegro — kończy je dopiero odpowiedź sprzedawcy, że ewidencja jest wystawiona."),
+    Case("disable_sales_record_reminder", "disable_sales_record_reminder", {},
+         "Wyłącz przypomnienia o ewidencji",
+         ("Wyłącz przypomnienia o ewidencji",), monitors={"sales_record_reminder": True},
+         note="Przypomnienia włączone → status + przycisk wyłączenia."),
     Case("suggest_returns_monitoring", "suggest_returns_monitoring", {},
          "Informuj mnie o nowych zwrotach i reklamacjach",
          ("Włącz monitoring zwrotów",),

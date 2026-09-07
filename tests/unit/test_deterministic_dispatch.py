@@ -292,6 +292,8 @@ class TestMonitoringToggles:
         ("wyłącz monitoring wiadomości", ("disable_message_monitoring", {})),
         ("powiadamiaj mnie o zwrotach i reklamacjach", ("suggest_returns_monitoring", {})),
         ("wyłącz monitoring zwrotów", ("disable_returns_monitoring", {})),
+        ("przypominaj mi o ewidencji sprzedaży bezrachunkowej", ("suggest_sales_record_reminder", {})),
+        ("wyłącz przypomnienia o ewidencji", ("disable_sales_record_reminder", {})),
     ])
     def test_toggle_resolves(self, query, expected):
         assert _resolve(query) == expected
@@ -306,6 +308,23 @@ class TestMonitoringToggles:
             "chcę powiadomienia o fakturach",
         ):
             assert _resolve(query) == ("suggest_invoice_reminder", {}), query
+
+    def test_an_ewidencja_question_is_not_a_toggle(self):
+        """"Ewidencja" is also just something the seller asks about — answering
+        that with a toggle button instead of an answer is the failure the
+        reminder-word guard in _match_sales_record_reminder prevents."""
+        for query in (
+            "co to jest ewidencja sprzedaży bezrachunkowej",
+            "do kiedy muszę wystawić ewidencję",
+        ):
+            assert _resolve(query) != ("suggest_sales_record_reminder", {}), query
+
+    def test_the_ewidencja_outranks_the_invoice_reminder_when_both_are_named(self):
+        """It is the more specific topic — "faktury" is half of how a seller
+        describes the ewidencja in the first place."""
+        assert _resolve("przypominaj mi o ewidencji zamiast o fakturach") == (
+            "suggest_sales_record_reminder", {},
+        )
 
 
 class TestNamedBuyerAccount:
