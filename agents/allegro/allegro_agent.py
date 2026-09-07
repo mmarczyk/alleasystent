@@ -342,6 +342,14 @@ class AllegroAgent(BaseAgent):
         "which get_orders can't do either — buyer_login is the Allegro login, not a company or "
         "person's name — in that case call ask_clarifying_question asking for the order_id or the "
         "buyer's Allegro login).\n"
+        "• DELIVERY COST OF ONE ORDER — 'ile kosztowała dostawa', 'jaki był koszt dostawy tego "
+        "zamówienia', 'ile kupujący zapłacił za wysyłkę', 'czy dostawa była darmowa', 'ile mnie "
+        "kosztowała ta przesyłka' → get_order_details with that order_id. It reports BOTH sides "
+        "(what the buyer paid — already inside the order value — and what Allegro charged you for "
+        "the shipment, plus the balance), so never answer a delivery-cost question with "
+        "get_orders_delivery: that tool lists MANY orders and has no order_id filter, so it "
+        "answers a different question entirely. Delivery costs ACROSS several orders (no single "
+        "order named) are get_orders_delivery — its summary totals what the buyers paid.\n"
         "• ZYSK/MARŻA ON ONE ORDER WITH A PURCHASE COST THE USER GIVES — 'dla tego zamówienia "
         "policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł', 'ile na tym zarobiłem przy "
         "zakupie po 8 zł/szt', 'jaka marża, jak towar kosztował mnie 12 zł' → "
@@ -457,7 +465,8 @@ class AllegroAgent(BaseAgent):
         "Only call the delivery tool(s) after the user answers that question, unless they already "
         "specified the channel(s) upfront as above.\n"
         "BILLING ROUTING: "
-        "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
+        "1) Specific order costs, delivery cost of a specific order included → ALWAYS "
+        "get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit ('ile zarobiłem', 'zysk', 'przychód po opłatach', 'podsumuj sprzedaż') "
         "→ get_sales_summary, ONE call covering the WHOLE period asked about. Resolve the period from the "
         "current date in your context ('z tego roku'/'w tym roku' → 1 January of the current year through "
@@ -1068,6 +1077,60 @@ class AllegroAgent(BaseAgent):
     @staticmethod
     def _format_price(amount: float, currency: str = "PLN") -> str:
         return f"{amount:.2f}".replace(".", ",") + f" {currency}"
+
+    @classmethod
+    def _signed_price(cls, amount: float, currency: str = "PLN") -> str:
+        """A money figure that carries its own direction: "+9,99 PLN" for money
+        coming in, "-9,99 PLN" for money going out. Used wherever a line can go
+        either way (a delivery balance, a shipping charge that a refund turned
+        into a credit), so the sign is never hardcoded next to an absolute
+        value that later flips."""
+        return ("+" if amount >= 0 else "-") + cls._format_price(abs(amount), currency)
+
+    @staticmethod
+    def _delivery_cost(order: Any) -> tuple[float | None, str]:
+        """What the BUYER paid for delivery — `delivery.cost` on the checkout
+        form. Allegro already counts it inside `summary.totalToPay`, so it is
+        part of the order value, never an extra on top of it (hence the
+        "w tym dostawa" wording wherever both are shown).
+
+        Returns (amount, currency). None means Allegro sent no cost block at
+        all — personal pickup, or an older order — which is NOT the same thing
+        as 0.00 (free delivery the seller paid for), so the two must never
+        collapse into one line: "brak danych" and "darmowa dostawa" are
+        different answers to "ile kosztowała dostawa".
+        """
+        d = order.delivery if isinstance(order.delivery, dict) else {}
+        order_currency = getattr(order, "currency", "") or "PLN"
+        cost = d.get("cost")
+        if not isinstance(cost, dict):
+            return None, order_currency
+        try:
+            amount = float(cost.get("amount"))
+        except (TypeError, ValueError):
+            return None, order_currency
+        return amount, cost.get("currency") or order_currency
+
+    # Allegro has no billing-entry flag saying "this charge is the shipment" —
+    # the type ids differ per delivery product (Allegro Delivery, WZA labels,
+    # courier top-ups) and new ones appear whenever a carrier is added, so the
+    # human-readable type description is the only stable signal. Matched on
+    # word stems because Allegro declines them ("Opłata za przesyłkę",
+    # "Opłaty za etykiety", "Zwrot opłaty za wysyłkę").
+    _DELIVERY_FEE_DESC_RE = re.compile(
+        r"przesy[łl]k|etykiet|dostaw|wysy[łl]k|kurier|paczkomat|list\s+przewozowy|allegro\s+delivery",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_delivery_fee_entry(cls, entry: dict) -> bool:
+        """Whether a billing entry is Allegro charging the seller for the
+        SHIPMENT itself (or refunding it), as opposed to a sale commission or
+        a promotion fee. Used to answer "ile kosztowała mnie wysyłka" without
+        making the store owner read the whole billing list and guess which
+        rows are the parcel."""
+        desc = (entry.get("type") or {}).get("description") or ""
+        return bool(cls._DELIVERY_FEE_DESC_RE.search(desc))
 
     @staticmethod
     def _is_balance_transfer_entry(entry: dict) -> bool:
@@ -1821,6 +1884,12 @@ class AllegroAgent(BaseAgent):
         if o.created_at:
             lines.append(f"- Złożone: {cls._format_dt_pl(o.created_at)}")
         if include_delivery:
+            # What the buyer paid for this parcel — the courier view is where
+            # "ile kosztowała dostawa w tych zamówieniach" gets asked, and the
+            # figure is already on the order, so it never needs a second call.
+            paid_by_buyer, delivery_currency = cls._delivery_cost(o)
+            if paid_by_buyer is not None:
+                lines.append(f"- Koszt dostawy: {cls._format_price(paid_by_buyer, delivery_currency)}")
             tracking = (
                 cls._dig(d, "smart", "trackingCode", default=None)
                 or cls._dig(d, "trackingCode", default="—")
@@ -3019,6 +3088,20 @@ class AllegroAgent(BaseAgent):
             summary = "**Podsumowanie kurierów:**\n" + "\n".join(
                 f"- {method}: {count} zamówień" for method, count in courier_counts.most_common()
             )
+            # Delivery totals for the whole listing, so "ile kosztowały te
+            # dostawy" is answered by the same call that lists them instead of
+            # leaving the store owner to add the per-order lines up by hand.
+            delivery_costs = [self._delivery_cost(o) for o in orders]
+            known = [(amount, currency) for amount, currency in delivery_costs if amount is not None]
+            if known:
+                currency = known[0][1]
+                total_delivery = sum(amount for amount, _ in known)
+                missing = len(delivery_costs) - len(known)
+                summary += (
+                    f"\n- Koszt dostawy zapłacony przez kupujących: "
+                    f"**{self._format_price(total_delivery, currency)}**"
+                    + (f" (bez {missing} zamówień bez danych o koszcie dostawy)" if missing else "")
+                )
             body = summary + "\n\n---\n\n" + body
         return body + suffix
 
@@ -3054,6 +3137,12 @@ class AllegroAgent(BaseAgent):
                 or self._dig(d, "trackingCode", default="N/A")
             )
             billing_lines = []
+            # Shipping charged BY Allegro TO the seller (the label), kept apart
+            # from the sale commission so the delivery section can state the
+            # seller's own shipping cost — "ile kosztowała dostawa" is a
+            # question about the parcel, not about the whole billing list.
+            delivery_fees = 0.0
+            delivery_credits = 0.0
             if billing_entries:
                 total_fees = 0.0
                 total_credits = 0.0
@@ -3069,6 +3158,11 @@ class AllegroAgent(BaseAgent):
                         total_fees += abs(amount)
                     else:
                         total_credits += amount
+                    if self._is_delivery_fee_entry(e):
+                        if amount < 0:
+                            delivery_fees += abs(amount)
+                        else:
+                            delivery_credits += amount
                 net = order.total_price - total_fees + total_credits
                 billing_lines.append(
                     f"  - Suma opłat: -{total_fees:.2f} PLN"
@@ -3091,18 +3185,70 @@ class AllegroAgent(BaseAgent):
                 f"{self._format_price(li.price, li.currency)}"
                 for li in order.line_items
             ]
+            # Delivery costs have two sides and the store owner asks about
+            # both with the same words ("koszty dostawy"): what the buyer paid
+            # (delivery.cost, already inside the order value) and what Allegro
+            # charged the seller for the shipment (its billing entries). Both
+            # are spelled out here — showing only the method and the tracking
+            # number, as this tool used to, left a delivery-cost question
+            # unanswered even though every figure was already fetched.
+            paid_by_buyer, delivery_currency = self._delivery_cost(order)
+            value_line = f"- Wartość: {self._format_price(order.total_price, order.currency)}"
+            if paid_by_buyer:
+                value_line += f" (w tym dostawa {self._format_price(paid_by_buyer, delivery_currency)})"
+            delivery_lines = [f"  - Metoda: {method_name}"]
+            if paid_by_buyer is None:
+                delivery_lines.append("  - Koszt dostawy zapłacony przez kupującego: brak danych")
+            elif paid_by_buyer == 0:
+                delivery_lines.append(
+                    "  - Koszt dostawy zapłacony przez kupującego: 0,00 "
+                    f"{delivery_currency} (darmowa dostawa)"
+                )
+            else:
+                delivery_lines.append(
+                    "  - Koszt dostawy zapłacony przez kupującego: "
+                    f"{self._format_price(paid_by_buyer, delivery_currency)}"
+                )
+            if delivery_fees or delivery_credits:
+                # A shipping refund can exceed the charge (a cancelled parcel
+                # refunded in a later period), so the seller's shipping cost
+                # can legitimately come out negative — it is signed, never
+                # printed as a charge with a stray minus in front of it.
+                seller_cost = delivery_fees - delivery_credits
+                delivery_lines.append(
+                    "  - Opłaty Allegro za wysyłkę (Twój koszt): "
+                    f"{self._signed_price(-seller_cost, order.currency)}"
+                    + (f" (w tym zwroty +{self._format_price(delivery_credits, order.currency)})"
+                       if delivery_credits else "")
+                )
+                if paid_by_buyer is not None:
+                    delivery_lines.append(
+                        "  - Bilans dostawy: "
+                        f"{self._signed_price(paid_by_buyer - seller_cost, order.currency)} "
+                        f"(kupujący zapłacił {self._format_price(paid_by_buyer, delivery_currency)}, "
+                        f"wysyłka kosztowała {self._format_price(seller_cost, order.currency)})"
+                    )
+            elif billing_entries:
+                # Billing came back and simply carries no shipping row: the
+                # label was bought outside Allegro (own courier contract,
+                # personal pickup), so Allegro genuinely does not know that
+                # cost. Saying so beats an unexplained missing line.
+                delivery_lines.append(
+                    "  - Opłaty Allegro za wysyłkę: brak w rozliczeniu Allegro "
+                    "(etykieta opłacona poza Allegro nie jest tu widoczna)"
+                )
+            delivery_lines.append(f"  - Tracking: {tracking}")
             lines = [
                 f"- Zamówienie: `{order.order_id}`",
                 f"- Kupujący: {order.buyer_login}",
                 f"- Status: {self._fulfillment_pl(order.fulfillment_status)}",
                 f"- Wysyłka do: {self._dispatch_deadline_pl(order)}",
-                f"- Wartość: {self._format_price(order.total_price, order.currency)}",
+                value_line,
                 f"- Faktura: {invoice_str}",
                 "- Produkty:",
                 *product_lines,
                 "- Dostawa:",
-                f"  - Metoda: {method_name}",
-                f"  - Tracking: {tracking}",
+                *delivery_lines,
             ]
             if billing_lines:
                 lines.append("- Rozliczenie:")

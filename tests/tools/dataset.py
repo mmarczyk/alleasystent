@@ -391,6 +391,10 @@ BILLING_ENTRIES: list[dict] = [
     _entry("be-6", "REF", "Zwrot prowizji", 12.40, in_month(3.0), ORD_4),
     _entry("be-7", "SUC", "Prowizja od sprzedaży", -8.24, in_month(3.9), ORD_5),
     _entry("be-8", "SUC", "Prowizja od sprzedaży", -137.39, in_month(5.9), ORD_6),
+    # The shipping label Allegro sold the seller for ORD_3 — the delivery side
+    # of an order's costs, which get_order_details reports next to what the
+    # buyer paid for the same parcel (delivery.cost, 12.99 on ORD_3).
+    _entry("be-11", "SHP", "Opłata za przesyłkę Allegro Delivery", -11.99, hours_ago(2.8), ORD_3),
     # No order.id — an account-level cost (subscription).
     _entry("be-9", "SUB", "Abonament Allegro Firma", -49.00, in_month(7.0)),
     # PAD — internal transfer, must be shown but excluded from the totals.

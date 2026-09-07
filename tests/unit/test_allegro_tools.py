@@ -352,6 +352,12 @@ class TestLabelPhraseCoverage:
         ("pokaż listę zamówień z tego miesiąca", "get_orders"),
         ("jaki jest status tego zamówienia", "get_order_details"),
         ("jakie kurierzy w zamówieniach do wysyłki", "get_orders_delivery"),
+        # Delivery costs: one order is get_order_details (it has the order_id
+        # filter and reports both sides of the cost), many orders are the
+        # courier listing — both have to survive the label filter.
+        ("ile kosztowała dostawa tego zamówienia", "get_order_details"),
+        ("czy dostawa była darmowa", "get_order_details"),
+        ("ile kosztowały dostawy w zamówieniach do wysłania", "get_orders_delivery"),
         ("pokaż moje oferty", "get_active_offers"),
         ("podsumowanie moich ofert", "get_offers_summary"),
         ("oferty z niskim stanem magazynowym", "query_offers_by_stock"),
