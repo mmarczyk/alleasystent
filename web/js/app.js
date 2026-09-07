@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════
-   AllEasystent Chat UI — main controller
+   AlleAsystent Chat UI — main controller
    ═══════════════════════════════════════════════════ */
 
 // ── Marked.js config ─────────────────────────────
@@ -2168,7 +2168,7 @@ const UI = (() => {
   function exportChat() {
     const c = Store.active();
     if (!c || !c.messages.length) { toast('Brak wiadomości do eksportu'); return; }
-    const text = c.messages.map(m => `[${m.role === 'user' ? 'Ty' : 'AllEasystent'}]\n${m.content}`).join('\n\n---\n\n');
+    const text = c.messages.map(m => `[${m.role === 'user' ? 'Ty' : 'AlleAsystent'}]\n${m.content}`).join('\n\n---\n\n');
     const blob = new Blob([text], { type: 'text/plain' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -2589,7 +2589,7 @@ const Chat = (() => {
       }
       // Notify if the tab was in the background when the response arrived
       if (document.hidden && fullText && !isError) {
-        WebPush.sendNotification('AllEasystent', fullText);
+        WebPush.sendNotification('AlleAsystent', fullText);
       }
     }
   }
