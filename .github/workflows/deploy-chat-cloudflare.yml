@@ -1,0 +1,84 @@
+name: Deploy AllEasystent Chat UI to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/deploy-chat-cloudflare.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pages deployments are atomic, but two overlapping runs still race: if the
+# OLDER commit's upload finishes LAST it becomes the live deployment, and the
+# site serves older code than what's on main. Same reasoning as
+# deploy-backend.yml — cancel the in-flight run so only the newest commit ever
+# reaches `wrangler pages deploy`.
+concurrency:
+  group: cloudflare-pages-chat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build & Deploy to Cloudflare Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: cloudflare-pages
+      url: https://${{ vars.CLOUDFLARE_PROJECT }}.pages.dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Vendor JS/CSS are downloaded at Docker build time and not committed to
+      # the repo.  Download them here so Cloudflare Pages has them too.
+      - name: Download vendor assets
+        run: |
+          mkdir -p web/js/vendor web/css/vendor
+          curl -sSfL "https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" \
+            -o web/js/vendor/marked.min.js
+          curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" \
+            -o web/js/vendor/highlight.min.js
+          curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" \
+            -o web/css/vendor/github-dark.min.css
+          curl -sSfL "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" \
+            -o web/css/vendor/github.min.css
+          curl -sSfL "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" \
+            -o web/js/vendor/chart.min.js
+          # chart.umd.min.js embeds "//# sourceMappingURL=chart.umd.min.js.map",
+          # so the matching map must sit alongside it under its original name.
+          curl -sSfL "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js.map" \
+            -o web/js/vendor/chart.umd.min.js.map
+
+      # Inject Cloud Run backend URL and this deploy's commit SHA into config.js.
+      # Set BACKEND_URL as a GitHub Actions variable (repo → Settings → Variables):
+      #   BACKEND_URL = https://alleasystent-<hash>-ew.a.run.app
+      # Leave empty to keep same-origin mode (all-in-one deployment).
+      - name: Inject backend URL and frontend version
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          echo "window.__BACKEND_URL__ = '${BACKEND_URL}';" > web/config.js
+          echo "window.__FRONTEND_VERSION__ = '${GIT_SHA}';" >> web/config.js
+          sed -i "s/__GIT_SHA__/${GIT_SHA}/" web/sw.js
+
+      # CLOUDFLARE_PROJECT is the Pages project name (repo variable), e.g.
+      # `alleasystent` → https://alleasystent.pages.dev. The project has to
+      # exist already: create it in the dashboard as a Direct Upload project,
+      # because wrangler cannot create one non-interactively.
+      #
+      # --branch=main makes this a production deployment rather than a preview
+      # one. --commit-dirty silences the warning about the generated config.js
+      # and the patched sw.js; the tree is meant to differ from the commit here.
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy web
+            --project-name=${{ vars.CLOUDFLARE_PROJECT }}
+            --branch=main
+            --commit-dirty=true
