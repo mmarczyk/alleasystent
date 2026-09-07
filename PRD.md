@@ -1,4 +1,4 @@
-# AllEasystent — Product Requirements Document
+# AlleAsystent — Product Requirements Document
 
 **Wersja:** 1.0  
 **Data:** 2026-06-09  
@@ -8,7 +8,7 @@
 
 ## 1. Cel produktu
 
-AllEasystent to asystent AI dla właścicieli sklepów na Allegro. Umożliwia zarządzanie zamówieniami, ofertami, wiadomościami od kupujących i kontem sprzedawcy przez interfejs konwersacyjny — bez konieczności klikania w panelu Allegro. System obsługuje wielokanałowy dostęp: interfejs webowy (PWA) oraz Facebook Messenger.
+AlleAsystent to asystent AI dla właścicieli sklepów na Allegro. Umożliwia zarządzanie zamówieniami, ofertami, wiadomościami od kupujących i kontem sprzedawcy przez interfejs konwersacyjny — bez konieczności klikania w panelu Allegro. System obsługuje wielokanałowy dostęp: interfejs webowy (PWA) oraz Facebook Messenger.
 
 ---
 
