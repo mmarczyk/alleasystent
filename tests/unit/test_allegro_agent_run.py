@@ -428,6 +428,123 @@ class TestFormatInstruction:
         assert len(last_system["content"]) < len(first_system["content"]) / 2
 
 
+class TestOrderDetailsLeadIn:
+    """A details block answers a question the seller asked in their own words
+    ("ile kosztowała dostawa?"), but on its own it opens with an order id and
+    leaves them to search twenty lines for the answer. So one generated
+    sentence goes in front of it — generated, because a fixed "poniżej
+    szczegóły zamówienia" says the same thing whatever was asked, which is
+    exactly what makes it read as boilerplate. The block underneath stays the
+    Python-rendered one; see _LEAD_IN_TOOLS.
+    """
+
+    def _details_agent(self, block="- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"):
+        agent = _agent({"get_order_details": block})
+        agent._allegro.get_orders = AsyncMock(return_value=[MagicMock(order_id="abc-123")])
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_sentence_goes_in_front_and_the_block_is_untouched(self):
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_resp("Koszt dostawy masz w sekcji Dostawa poniżej.")
+        )
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text == (
+            "Koszt dostawy masz w sekcji Dostawa poniżej.\n\n"
+            "- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_question_and_the_data_are_both_in_the_prompt(self):
+        """What keeps the sentence from sounding detached: it is written with
+        the actual question and the actual block in front of the model, not
+        from the tool name alone."""
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(return_value=_resp("Poniżej dane."))
+
+        await agent.run(
+            "szczegóły ostatniego nowego zamówienia",
+            conversation_history=[{"role": "user", "content": "a ile kosztowała dostawa?"}],
+        )
+
+        sent = json.dumps(
+            agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False
+        )
+        assert "szczegóły ostatniego nowego zamówienia" in sent
+        assert "137,70 PLN" in sent
+        assert "a ile kosztowała dostawa?" in sent
+
+    @pytest.mark.asyncio
+    async def test_a_sentence_stating_a_number_the_data_does_not_have_is_dropped(self):
+        """The figures are rendered in Python precisely so no model touches
+        them — an opener claiming a different amount would undo that in the
+        first line the seller reads."""
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_resp("Dostawa kosztowała 19,99 PLN — szczegóły poniżej.")
+        )
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text == "- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"
+
+    @pytest.mark.asyncio
+    async def test_a_number_copied_from_the_data_is_kept(self):
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_resp("To zamówienie jest na 137,70 PLN — reszta poniżej.")
+        )
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text.startswith("To zamówienie jest na 137,70 PLN — reszta poniżej.\n\n")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_lead_in_call_still_answers(self):
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(side_effect=RuntimeError("model down"))
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text == "- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"
+
+    @pytest.mark.asyncio
+    async def test_other_passthrough_tools_get_no_lead_in_call(self):
+        """One tool asked for this, and every extra LLM call is latency in
+        front of an answer — the listings already read as answers."""
+        agent = _agent({"get_new_orders": "- Zamówienie: 1"})
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match + passthrough")
+        )
+
+        response = await agent.run("jakie mam nowe zamówienia")
+
+        assert response.text == "- Zamówienie: 1"
+        assert agent._client.chat.completions.create.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_english_turn_asks_the_interpret_call_for_the_same_sentence(self):
+        """The interpret path is otherwise told not to add an intro at all
+        (_RENDERED_VIEW_INSTRUCTION), so without the carve-out an English
+        question would get the bare block."""
+        agent = _agent({"get_order_details": "- Zamówienie: `x`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_order_details", {"order_id": "x"})]),
+            _resp(),
+            _resp("Here are the details.\n\n- Zamówienie: `x`"),
+        ])
+
+        await agent.run("show me the details of order x")
+
+        sent = json.dumps(
+            agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False
+        )
+        assert "WYJĄTEK — WSTĘP" in sent
+
+
 class TestToolContextFilter:
     """See agents/allegro/allegro_tools.py select_tools_for_context() — most
     turns are about one topic, so the tool-select call doesn't need to see
@@ -521,7 +638,7 @@ class TestLatestOrderChain:
         agent = _agent({"get_order_details": "- Zamówienie: abc-123"})
         agent._allegro.get_orders = AsyncMock(return_value=[MagicMock(order_id="abc-123")])
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=AssertionError("no LLM call expected — deterministic chain + passthrough")
+            return_value=_resp("Poniżej szczegóły ostatniego zamówienia.")
         )
 
         response = await agent.run("szczegóły ostatniego nowego zamówienia")
@@ -530,13 +647,15 @@ class TestLatestOrderChain:
             status="READY_FOR_PROCESSING", fulfillment_status="NEW", limit=1,
         )
         agent._execute_tool.assert_awaited_once_with("get_order_details", {"order_id": "abc-123"})
-        assert response.text == "- Zamówienie: abc-123"
+        assert response.text == (
+            "Poniżej szczegóły ostatniego zamówienia.\n\n- Zamówienie: abc-123"
+        )
         assert response.metadata["output_format"] == "chat"
-        # Zero LLM calls at all: the chain resolver skips tool-select, and
-        # get_order_details is now in _PASSTHROUGH_TOOLS (its dispatch
-        # already builds the final plain-text reply) so interpret is
-        # skipped too.
-        assert agent._client.chat.completions.create.call_count == 0
+        # The chain resolver skips tool-select and get_order_details is in
+        # _PASSTHROUGH_TOOLS (its dispatch already builds the final plain-text
+        # reply), so interpret is skipped too — the single LLM call left is the
+        # lead-in sentence in front of the block (see _LEAD_IN_TOOLS).
+        assert agent._client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
     async def test_falls_back_to_bare_new_orders_when_none_exist(self):

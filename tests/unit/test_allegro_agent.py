@@ -837,6 +837,49 @@ class TestDeliveryCosts:
         ) in result
 
 
+class TestLeadInSanitising:
+    """_clean_lead_in decides what is allowed in front of a rendered details
+    block. Everything a lead-in must not be is dropped rather than shown: the
+    fallback is the block on its own, which is what the seller got before the
+    sentence existed and is never worse than a malformed opener."""
+
+    def _clean(self, raw, rendered="- Wartość: 137,70 PLN\n- Dostawa: 12,99 PLN"):
+        from agents.allegro.allegro_agent import AllegroAgent
+        return AllegroAgent._clean_lead_in(raw, rendered)
+
+    def test_plain_sentence_passes_through(self):
+        assert self._clean("Koszt dostawy masz w sekcji Dostawa.") == (
+            "Koszt dostawy masz w sekcji Dostawa."
+        )
+
+    def test_only_the_first_line_survives(self):
+        """A model that answers with a sentence AND its own copy of the data
+        would otherwise print the block twice."""
+        assert self._clean(
+            "Poniżej szczegóły.\n\n- Wartość: 137,70 PLN\n- Dostawa: 12,99 PLN"
+        ) == "Poniżej szczegóły."
+
+    def test_markdown_lead_characters_are_stripped(self):
+        assert self._clean("## Szczegóły zamówienia") == "Szczegóły zamówienia"
+        assert self._clean("- Koszt dostawy poniżej.") == "Koszt dostawy poniżej."
+
+    def test_a_number_from_the_data_is_allowed(self):
+        assert self._clean("Dostawa kosztowała 12,99 PLN.") == "Dostawa kosztowała 12,99 PLN."
+        # Same figure written with a dot — still the block's number, not a new one.
+        assert self._clean("Dostawa kosztowała 12.99 PLN.") == "Dostawa kosztowała 12.99 PLN."
+
+    def test_a_number_that_is_not_in_the_data_drops_the_whole_sentence(self):
+        assert self._clean("Dostawa kosztowała 19,99 PLN.") == ""
+        # Including one the model computed itself out of two real figures.
+        assert self._clean("Razem 150,69 PLN.") == ""
+
+    def test_empty_or_oversized_output_is_dropped(self):
+        assert self._clean("") == ""
+        assert self._clean("   \n  \n") == ""
+        assert self._clean("Bardzo długie zdanie. " * 20) == ""
+        assert self._clean("```\nkod\n```") == ""
+
+
 class TestCalculateOrderProfit:
     """calculate_order_profit is the only place the seller's own purchase cost
     enters the app — Allegro knows the order value and its fees, never what the

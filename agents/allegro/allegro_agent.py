@@ -166,6 +166,43 @@ _RENDERED_VIEW_TOOLS = frozenset(TOOL_OUTPUT_FORMAT)
 # for it to do.
 _PASSTHROUGH_TOOLS = _RENDERED_VIEW_TOOLS
 
+# Tools whose finished view is a wall of fields answering a question the user
+# asked in their own words — "ile kosztowała dostawa", "czy zapłacił", "co
+# tam jest" — and which therefore reads as a data dump unless something ties
+# it back to that question. These get ONE generated sentence in front of the
+# block (see AllegroAgent._lead_in): the block itself is still built in Python
+# and reaches the user byte-for-byte, so the sentence is the only thing an LLM
+# writes here and it can never reshape, reorder or invent a field.
+_LEAD_IN_TOOLS = frozenset({"get_order_details"})
+
+_LEAD_IN_SYSTEM_PROMPT = (
+    "Jesteś asystentem sprzedawcy w sklepie Allegro. Twoim JEDYNYM zadaniem jest napisać "
+    "jedno zdanie wprowadzające do gotowych danych, które użytkownik zobaczy zaraz pod nim.\n"
+    "ZASADY:\n"
+    "- Dokładnie JEDNO zdanie, maksymalnie ok. 200 znaków, zwykły tekst.\n"
+    "- Zdanie ma nawiązywać do tego, o co użytkownik faktycznie pytał, i powiedzieć, gdzie "
+    "w danych poniżej jest odpowiedź (np. „koszty dostawy masz w sekcji Dostawa”).\n"
+    "- Jeśli odpowiedzią jest jedna konkretna liczba lub wartość, możesz ją podać — ale "
+    "WYŁĄCZNIE przepisaną znak w znak z danych. Nigdy nie licz, nie zaokrąglaj i nie "
+    "wymyślaj żadnej liczby, daty ani nazwy.\n"
+    "- Jeśli danych na to pytanie tam NIE MA, napisz to wprost w tym zdaniu.\n"
+    "- Bez powitań, bez markdown, bez list, bez nagłówków, bez emoji, bez pytań na koniec "
+    "i bez powtarzania szczegółów, które i tak są poniżej.\n"
+    "- Pisz w języku pytania użytkownika.\n"
+    "Odpowiedz samym tym zdaniem — niczym więcej."
+)
+
+# The one exception to _RENDERED_VIEW_INSTRUCTION's "nie dopisuj wstępu", so a
+# non-Polish or multi-tool turn gets the same lead-in as the bypass path above
+# instead of the details block landing bare.
+_LEAD_IN_INTERPRET_INSTRUCTION = (
+    "WYJĄTEK — WSTĘP: zacznij odpowiedź od JEDNEGO krótkiego zdania, które nawiązuje do "
+    "pytania użytkownika i mówi, gdzie w danych poniżej jest odpowiedź (jeśli danych na to "
+    "pytanie tam nie ma — napisz to wprost). Potem przepisz dane bez zmian, zgodnie z "
+    "regułą wyżej. Żadnej liczby w tym zdaniu nie licz ani nie zaokrąglaj — wolno ją tylko "
+    "przepisać z danych."
+)
+
 
 
 class AllegroAgent(BaseAgent):
@@ -564,6 +601,99 @@ class AllegroAgent(BaseAgent):
         "step in this conversation can find the right invoice."
     )
 
+    # A lead-in may repeat a figure from the block, never produce one of its
+    # own, so every number it contains has to be findable in the block. Digit
+    # runs are compared with the decimal separator normalised, because the
+    # block writes Polish amounts ("12,99 PLN") and a model may echo them
+    # either way.
+    _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+    @classmethod
+    def _lead_in_invents_a_number(cls, lead: str, rendered: str) -> bool:
+        """True when the sentence states a number the data underneath does not.
+
+        The whole point of rendering the details in Python is that no model
+        gets to touch the figures; a lead-in that opens with an invented
+        "dostawa kosztowała 19,99 zł" over a block saying 12,99 would undo
+        exactly that, and it is the first line the seller reads. Cheaper to
+        drop such a sentence than to caveat it.
+        """
+        in_block = {n.replace(",", ".") for n in cls._NUMBER_RE.findall(rendered)}
+        return any(n.replace(",", ".") not in in_block for n in cls._NUMBER_RE.findall(lead))
+
+    @classmethod
+    def _clean_lead_in(cls, raw: str, rendered: str) -> str:
+        """The model's sentence, or "" when it is not usable as one.
+
+        Everything a lead-in must not be — a heading, a bullet, a second copy
+        of the block, a paragraph — is dropped here rather than shown, because
+        the fallback (the details on their own) is exactly what the seller got
+        before this existed and is never worse than a malformed opener.
+        """
+        first = next((ln.strip() for ln in (raw or "").splitlines() if ln.strip()), "")
+        first = first.lstrip("#*->• ").strip()
+        if not first or len(first) > 300 or "```" in first:
+            return ""
+        if cls._lead_in_invents_a_number(first, rendered):
+            logger.warning("[allegro] lead-in dropped — number not present in the tool data: %r", first)
+            return ""
+        return first
+
+    async def _lead_in(
+        self,
+        query: str,
+        rendered: str,
+        model_pool: list[str],
+        conversation_history: list[dict[str, str]] | None,
+        context: str | None,
+    ) -> str:
+        """One sentence tying a details block back to what the user asked.
+
+        Rendered fields alone read like a form the seller has to search: they
+        asked "ile kosztowała dostawa?" and got twenty lines starting with the
+        order id. A fixed opener ("poniżej szczegóły zamówienia") would be no
+        better — it says the same thing whatever was asked, which is precisely
+        what makes it sound canned. So the sentence is written per turn, with
+        the question and the block in front of the model, while the block
+        itself stays the Python-rendered one.
+
+        Failure of any kind returns "" and the caller shows the block alone —
+        a missing opener is a cosmetic loss, a failed answer is not.
+        """
+        from agents.base_agent import _call_with_retry
+
+        history = [
+            {"role": m.get("role", "user"), "content": m.get("content", "")}
+            for m in (conversation_history or [])[-4:]
+            if m.get("content")
+        ]
+        system = _LEAD_IN_SYSTEM_PROMPT
+        if context:
+            system += f"\n\n## Kontekst rozmowy\n{context}"
+        messages = [
+            {"role": "system", "content": system},
+            *history,
+            {"role": "user", "content": (
+                f"Pytanie użytkownika:\n{query}\n\n"
+                f"Dane, które zobaczy pod Twoim zdaniem:\n{rendered}"
+            )},
+        ]
+        try:
+            resp = await _call_with_retry(
+                self._client, model_pool, "allegro/lead-in",
+                messages=messages,
+                max_tokens=160,
+                # One sentence over data that is already final — nothing to
+                # reason about, and this call sits in front of an answer the
+                # user is waiting for (see the reasoning_effort comments on
+                # the tool-select and interpret calls).
+                reasoning_effort="none",
+            )
+        except Exception as exc:
+            logger.warning("[allegro] lead-in call failed, showing the details alone: %s", exc)
+            return ""
+        return self._clean_lead_in(resp.choices[0].message.content or "", rendered)
+
     def _build_interpret_system_prompt(self, context: str | None) -> str:
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -892,12 +1022,25 @@ class AllegroAgent(BaseAgent):
             # collapsing it into plain chat text here would silently drop that
             # presentation.
             bypass_format = resolve_output_format(called_tools)
+            bypass_text = single_tool_raw_result
+            # The one thing the rendered block can't do for itself: say what it
+            # has to do with the question. See _LEAD_IN_TOOLS — the block is
+            # still the Python-rendered one, the sentence in front of it is the
+            # only generated text, and a failed/blank/number-inventing sentence
+            # leaves the block exactly as it was.
+            if called_tools[0] in _LEAD_IN_TOOLS:
+                with perf.stage("lead_in_llm"):
+                    lead = await self._lead_in(
+                        query, bypass_text, model_pool, conversation_history, context,
+                    )
+                if lead:
+                    bypass_text = f"{lead}\n\n{bypass_text}"
             perf.log(
                 source=self.agent_name, output_format=bypass_format,
                 tools=called_tools[0], bypassed_interpret=True,
             )
             return AgentResponse(
-                text=single_tool_raw_result,
+                text=bypass_text,
                 agent_type=self.agent_name,
                 metadata={
                     "output_format": bypass_format,
@@ -921,6 +1064,12 @@ class AllegroAgent(BaseAgent):
             if any(t in _RENDERED_VIEW_TOOLS for t in called_tools)
             else None
         )
+        # Same lead-in the bypass path adds, asked for in the instruction here
+        # because on this path the LLM writes the whole reply — without the
+        # carve-out the rule right above it ("nie dopisuj wstępu") would forbid
+        # the sentence, and an English question would get the bare block.
+        if format_instruction and any(t in _LEAD_IN_TOOLS for t in called_tools):
+            format_instruction += "\n" + _LEAD_IN_INTERPRET_INSTRUCTION
         if format_instruction:
             messages.append({"role": "user", "content": format_instruction})
 
