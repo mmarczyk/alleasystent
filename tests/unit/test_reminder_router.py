@@ -1,6 +1,6 @@
 """Unit tests for services/reminder_router.py.
 
-The point of this module is the tie: two reminders waiting at once, a bare
+The point of this module is the tie: several reminders waiting at once, a bare
 "tak", and nothing in the thread saying which one it answers. It must ASK
 rather than pick — the invoice reminder's "yes" issues real VAT invoices.
 """
@@ -19,6 +19,10 @@ def set_env(monkeypatch):
 
 INVOICE_ASK = "🧾 Masz 1 niewystawioną fakturę dla już wysłanych zamówień: `123`.\n\nWystawić je teraz?"
 MESSAGE_ASK = "💬 Masz 2 nieprzeczytanych wiadomości od kupujących (od: kowalski).\n\nPokazać je?"
+SALES_RECORD_ASK = (
+    "📒 Trzeba wystawić ewidencję sprzedaży bezrachunkowej za sierpień 2026. "
+    "Termin to 5 września — zostały 4 dni.\n\nNapisz „już wystawiłem”, kiedy będzie gotowa."
+)
 OTHER_ASK = "Masz 3 nowe zamówienia do realizacji. Pokazać szczegóły?"
 
 OPEN = {"status": "awaiting_response"}
@@ -28,11 +32,13 @@ class _Router:
     """Drives the router with both reminders stubbed, and an in-memory stand-in
     for the Redis-held "which one did you mean?" note."""
 
-    def __init__(self, invoice_open: bool, message_open: bool):
+    def __init__(self, invoice_open: bool, message_open: bool, sales_open: bool = False):
         self.invoice_open = invoice_open
         self.message_open = message_open
+        self.sales_open = sales_open
         self.invoice = AsyncMock(return_value="INVOICE HANDLED")
         self.message = AsyncMock(return_value="MESSAGE HANDLED")
+        self.sales = AsyncMock(return_value="SALES RECORD HANDLED")
         self.ask: dict | None = None
 
     async def __call__(self, text, last_assistant_text=None):
@@ -48,8 +54,11 @@ class _Router:
                    new=AsyncMock(return_value=OPEN if self.invoice_open else None)), \
              patch("services.message_reminder.get_pending_state",
                    new=AsyncMock(return_value=OPEN if self.message_open else None)), \
+             patch("services.sales_record_reminder.get_pending_state",
+                   new=AsyncMock(return_value=OPEN if self.sales_open else None)), \
              patch("services.invoice_reminder.handle_reply", new=self.invoice), \
              patch("services.message_reminder.handle_reply", new=self.message), \
+             patch("services.sales_record_reminder.handle_reply", new=self.sales), \
              patch.object(rr, "_load_ask", new=AsyncMock(side_effect=lambda u: self.ask)), \
              patch.object(rr, "_save_ask", new=AsyncMock(side_effect=_save)), \
              patch.object(rr, "_clear_ask", new=AsyncMock(side_effect=_clear)):
@@ -188,3 +197,61 @@ class TestOwnAskPatternsDoNotOverlap:
 
         assert INV.search(INVOICE_ASK) and INV.search(INV_DURATION)
         assert MSG.search(MESSAGE_ASK) and MSG.search(MSG_DURATION)
+
+
+class TestTheSalesRecordReminderJoinsTheSameTie:
+    """The third reminder (services/sales_record_reminder.py) is routed like
+    the other two — the only difference is what its "yes" costs."""
+
+    async def test_only_it_open_needs_no_question(self):
+        router = _Router(invoice_open=False, message_open=False, sales_open=True)
+        assert await router("już wystawiłem", None) == "SALES RECORD HANDLED"
+
+    async def test_naming_the_ewidencja_wins_over_the_other_open_reminders(self):
+        router = _Router(invoice_open=True, message_open=True, sales_open=True)
+        assert await router("ewidencja już wysłana", None) == "SALES RECORD HANDLED"
+        router.invoice.assert_not_awaited()
+        router.message.assert_not_awaited()
+
+    async def test_its_own_ask_settles_a_bare_reply(self):
+        router = _Router(invoice_open=True, message_open=True, sales_open=True)
+        assert await router("już wystawiłem", SALES_RECORD_ASK) == "SALES RECORD HANDLED"
+        router.invoice.assert_not_awaited()
+
+    async def test_three_open_and_nothing_to_go_on_asks_which(self):
+        router = _Router(invoice_open=True, message_open=True, sales_open=True)
+        out = await router("tak", None)
+        assert "Nie mam pewności" in out
+        assert "ewidencję sprzedaży bezrachunkowej" in out
+        assert set(router.ask["kinds"]) == {
+            "invoice_reminder", "message_reminder", "sales_record_reminder",
+        }
+        router.sales.assert_not_awaited()
+
+    async def test_picking_it_replays_the_original_message(self):
+        router = _Router(invoice_open=True, message_open=True, sales_open=True)
+        await router("tak", None)
+        assert await router("ewidencja", None) == "SALES RECORD HANDLED"
+        assert router.sales.await_args.args[1] == "tak"
+
+    async def test_its_duration_answer_does_not_snooze_another_reminder(self):
+        from services.sales_record_reminder import _ASK_DURATION_TEXT as SALES_DURATION
+
+        router = _Router(invoice_open=True, message_open=True, sales_open=True)
+        assert await router("2 godziny", SALES_DURATION) == "SALES RECORD HANDLED"
+        router.invoice.assert_not_awaited()
+        router.message.assert_not_awaited()
+
+    def test_its_own_ask_pattern_does_not_overlap_with_the_others(self):
+        from services.invoice_reminder import _ASK_DURATION_TEXT as INV_DURATION, _OWN_ASK_RE as INV
+        from services.message_reminder import _ASK_DURATION_TEXT as MSG_DURATION, _OWN_ASK_RE as MSG
+        from services.sales_record_reminder import (
+            _ASK_DURATION_TEXT as SALES_DURATION, _OWN_ASK_RE as SALES,
+        )
+
+        for text in (INVOICE_ASK, INV_DURATION, MESSAGE_ASK, MSG_DURATION):
+            assert not SALES.search(text), text
+        for pattern in (INV, MSG):
+            assert not pattern.search(SALES_RECORD_ASK)
+            assert not pattern.search(SALES_DURATION)
+        assert SALES.search(SALES_RECORD_ASK) and SALES.search(SALES_DURATION)

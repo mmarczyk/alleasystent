@@ -906,6 +906,38 @@ async def allegro_invoice_reminder_disable(request: Request):
     return {"status": "disabled"}
 
 
+@app.get("/allegro/sales-record-reminder/status", tags=["Allegro"])
+async def allegro_sales_record_reminder_status(request: Request):
+    """Whether the monthly sales-record (ewidencja) reminder is enabled for the current user."""
+    from services.auth_service import get_current_user
+    from services.sales_record_reminder import is_monitor_enabled
+
+    user = await get_current_user(request)
+    return {"enabled": await is_monitor_enabled(user["sub"])}
+
+
+@app.post("/allegro/sales-record-reminder/enable", tags=["Allegro"])
+async def allegro_sales_record_reminder_enable(request: Request):
+    """Turn on the monthly sales-record (ewidencja) reminder for the current user."""
+    from services.auth_service import get_current_user
+    from services.sales_record_reminder import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled(user["sub"], True)
+    return {"status": "enabled"}
+
+
+@app.post("/allegro/sales-record-reminder/disable", tags=["Allegro"])
+async def allegro_sales_record_reminder_disable(request: Request):
+    """Turn off the monthly sales-record (ewidencja) reminder for the current user."""
+    from services.auth_service import get_current_user
+    from services.sales_record_reminder import set_monitor_enabled
+
+    user = await get_current_user(request)
+    await set_monitor_enabled(user["sub"], False)
+    return {"status": "disabled"}
+
+
 @app.get("/allegro/message-monitor/status", tags=["Allegro"])
 async def allegro_message_monitor_status(request: Request):
     """Whether automatic message checking is currently enabled for the current user."""
@@ -1124,22 +1156,33 @@ async def _refresh_pending_chats(user_sub: str, entries: list[tuple[str | None, 
     """Bring queued assistant-initiated messages up to date before showing them.
 
     A queued message was written whenever its monitor last ran and then waited
-    in Redis for the seller to open the app — up to a day. The invoice reminder
-    is the one where that staleness is actively wrong rather than merely old:
-    it states how many invoices are still to be issued, and the seller may have
-    issued them elsewhere in the meantime (Allegro's panel, another device),
-    which is exactly what "it says I have an invoice to issue but the order
-    already has one" looks like. So it gets a last-second re-check against
-    Allegro, and drops out entirely if nothing is pending any more.
+    in Redis for the seller to open the app — up to a day. The two REMINDERS
+    are where that staleness is actively wrong rather than merely old, so each
+    gets a last-second refresh and may drop out of the queue entirely:
+
+      - the invoice reminder states how many invoices are still to be issued,
+        and the seller may have issued them elsewhere in the meantime
+        (Allegro's panel, another device) — which is exactly what "it says I
+        have an invoice to issue but the order already has one" looks like, so
+        it is re-checked against Allegro;
+      - the sales-record reminder states how many days are left until the 5th,
+        a number that is simply wrong a day later, so it is rebuilt from the
+        clock (nothing to fetch — it runs entirely off Redis).
 
     Anything else in the queue is a plain event report and goes through as-is.
     """
-    from services.invoice_reminder import PENDING_CHAT_TAG, refresh_pending_message
+    from services import invoice_reminder, sales_record_reminder
+
+    refreshers = {
+        invoice_reminder.PENDING_CHAT_TAG: invoice_reminder.refresh_pending_message,
+        sales_record_reminder.PENDING_CHAT_TAG: sales_record_reminder.refresh_pending_message,
+    }
 
     texts: list[str] = []
     for tag, text in entries:
-        if tag == PENDING_CHAT_TAG:
-            text = await refresh_pending_message(user_sub, text)
+        refresh = refreshers.get(tag)
+        if refresh:
+            text = await refresh(user_sub, text)
             if not text:
                 continue
         texts.append(text)

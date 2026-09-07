@@ -143,6 +143,7 @@ _MONITOR_LS_KEYS = {
     "message": "ae_message_monitor_enabled",
     "returns": "ae_returns_monitor_enabled",
     "invoice_reminder": "ae_invoice_reminder_enabled",
+    "sales_record_reminder": "ae_sales_record_reminder_enabled",
 }
 
 
