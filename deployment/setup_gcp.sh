@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# AlleAsystent — GCP Infrastructure Setup Script
+# AllEasystent — GCP Infrastructure Setup Script
 #
 # Run once to provision all required GCP resources.
 # Prerequisites: gcloud CLI authenticated, PROJECT_ID set.
@@ -32,13 +32,13 @@ echo "▶ Creating Artifact Registry repository..."
 gcloud artifacts repositories create "$REPO_NAME" \
   --repository-format=docker \
   --location="$REGION" \
-  --description="AlleAsystent Docker images" \
+  --description="AllEasystent Docker images" \
   --project="$PROJECT_ID" || echo "  (already exists)"
 
 # ── Service Account ───────────────────────────────────────────────────────────
 echo "▶ Creating service account: $SA_NAME"
 gcloud iam service-accounts create "$SA_NAME" \
-  --display-name="AlleAsystent Service Account" \
+  --display-name="AllEasystent Service Account" \
   --project="$PROJECT_ID" || echo "  (already exists)"
 
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
