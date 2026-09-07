@@ -1,4 +1,4 @@
-# AlleAsystent — Wymagania funkcjonalne
+# AllEasystent — Wymagania funkcjonalne
 
 **Wersja:** 1.1
 **Data aktualizacji:** 2026-06-16
@@ -27,7 +27,7 @@
 
 ## 1. Cel produktu
 
-AlleAsystent to asystent AI dla właścicieli sklepów na Allegro. Umożliwia zarządzanie zamówieniami, ofertami, wiadomościami od kupujących i kontem sprzedawcy przez interfejs konwersacyjny — bez konieczności klikania w panelu Allegro.
+AllEasystent to asystent AI dla właścicieli sklepów na Allegro. Umożliwia zarządzanie zamówieniami, ofertami, wiadomościami od kupujących i kontem sprzedawcy przez interfejs konwersacyjny — bez konieczności klikania w panelu Allegro.
 
 **Główne grupy funkcji:**
 

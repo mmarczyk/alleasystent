@@ -1,4 +1,4 @@
-# AlleAsystent
+# AllEasystent
 
 Asystent AI dla sprzedawców na Allegro. Umożliwia zarządzanie zamówieniami, ofertami, wiadomościami i kontem przez interfejs konwersacyjny — bez klikania w panelu Allegro.
 
