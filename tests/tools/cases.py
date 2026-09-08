@@ -89,7 +89,7 @@ CASES: list[Case] = [
               "spełniających kryteria”, które czyta się jak brak zamówień w ogóle."),
     Case("get_order_details", "get_order_details", {"order_id": ds.ORD_1},
          f"Szczegóły zamówienia {ds.ORD_1}",
-         ("- Zamówienie:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),
+         ("**Zamówienie**", "- Ilość:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),
          note="Zamówienie + wpisy rozliczeniowe + status faktury w jednym."),
     Case("get_order_details__delivery_cost", "get_order_details", {"order_id": ds.ORD_3},
          "Ile kosztowała dostawa w tym zamówieniu?",
