@@ -619,8 +619,8 @@ class TestGetOrderDetailsDispatch:
             order_id="abc-123",
             buyer_login="jan_kowalski",
             buyer_email="jan@example.com",
-            status="BOUGHT",
-            fulfillment_status="READY_FOR_PROCESSING",
+            status="READY_FOR_PROCESSING",
+            fulfillment_status="NEW",
             total_price=189.98,
             currency="PLN",
             created_at="2026-08-27T10:15:00Z",
@@ -635,15 +635,16 @@ class TestGetOrderDetailsDispatch:
         defaults.update(overrides)
         return AllegroOrder(**defaults)
 
-    def _make_agent_with_order(self, order, billing_entries=None, existing_invoices=None):
+    def _make_agent_with_order(self, order, billing_entries=None, existing_invoices=None, carriers=None):
         agent = _make_agent()
         agent._allegro.get_order = AsyncMock(return_value=order)
         agent._allegro.get_billing_entries_for_order = AsyncMock(return_value=billing_entries or [])
         agent._allegro.get_order_invoices = AsyncMock(return_value=existing_invoices or [])
+        agent._allegro.get_carriers = AsyncMock(return_value=carriers or [])
         return agent
 
     @pytest.mark.asyncio
-    async def test_plain_text_bullet_list_no_headers_or_code_fences(self):
+    async def test_renders_the_shared_order_block_with_detail_sections(self):
         order = self._make_order()
         agent = self._make_agent_with_order(order)
 
@@ -651,14 +652,44 @@ class TestGetOrderDetailsDispatch:
 
         assert "```" not in result
         assert "#" not in result
-        assert "- Zamówienie: `abc-123`" in result
-        assert "- Kupujący: jan_kowalski" in result
-        assert "- Wartość: 189,98 PLN" in result
+        # The listing block, field for field (see _order_bullet) …
+        assert "**Zamówienie** `abc-123`" in result
+        assert "- Zamawiający: **jan_kowalski**" in result
+        assert "- Status: **Nowe**" in result
+        assert "- Rodzaj dostawy: InPost Paczkomaty" in result
+        assert "- Ilość: 2 szt." in result
+        assert "- Wartość: **189,98 PLN**" in result
+        assert "- Opłacone: 27.08.2026, 12:20" in result
+        assert "- Numer śledzenia: PL123456789" in result
+        # … then the sections only the details answer carries.
+        assert "- Faktura: Kupujący nie poprosił o fakturę." in result
         assert "- Produkty:" in result
         assert "  - Sweter wełniany M (ID: 111): 1 szt. × 129,99 PLN" in result
-        assert "- Dostawa:" in result
-        assert "  - Metoda: InPost Paczkomaty" in result
-        assert "  - Tracking: PL123456789" in result
+        assert "- Link: https://allegro.pl/sprzedaz/zamowienia/abc-123" in result
+
+    @pytest.mark.asyncio
+    async def test_carrier_names_come_from_the_carriers_endpoint(self):
+        order = self._make_order(
+            delivery={"method": {"id": "ALLEGRO-ONE-BOX", "name": "One Box"}, "pickupPoint": {"name": "One Box WRO01"}},
+        )
+        agent = self._make_agent_with_order(
+            order, carriers=[{"id": "ALLEGRO-ONE-BOX", "name": "Allegro One Box, DPD"}]
+        )
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "- Rodzaj dostawy: Allegro One Box, DPD" in result
+        assert "- Punkt odbioru: One Box WRO01" in result
+
+    @pytest.mark.asyncio
+    async def test_failed_carrier_lookup_falls_back_to_the_order_delivery_name(self):
+        order = self._make_order()
+        agent = self._make_agent_with_order(order)
+        agent._allegro.get_carriers = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "- Rodzaj dostawy: InPost Paczkomaty" in result
 
     @pytest.mark.asyncio
     async def test_total_quantity_line_sums_all_line_items(self):
@@ -698,8 +729,8 @@ class TestGetOrderDetailsDispatch:
         assert "- Rozliczenie:" in result
         assert result.count("Prowizja od sprzedaży") == 2
         assert "Opłata za wystawienie oferty" in result
-        assert "Suma opłat: -19.99 PLN" in result
-        assert "Zysk netto: 169.99 PLN" in result
+        assert "Suma opłat: -19,99 PLN" in result
+        assert "Zysk netto: **169,99 PLN**" in result
 
     @pytest.mark.asyncio
     async def test_invoice_status_variants(self):

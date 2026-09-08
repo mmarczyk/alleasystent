@@ -1826,14 +1826,15 @@ class AllegroAgent(BaseAgent):
         include_delivery: bool = False,
         extra_lines: list[str] | None = None,
     ) -> str:
-        """Render ONE order as the bullet block that every order listing uses.
+        """Render ONE order as the bullet block every order answer uses.
 
         Deliberately the only order renderer left: get_new_orders,
-        get_orders, get_orders_delivery and get_orders_pending_invoice each
-        had their own block before, differing in field order and even in
-        timezone (one printed raw UTC timestamps, the other Warsaw local
-        time), so the same order read differently depending on which tool
-        happened to fetch it. Fields, in the order the store owner asked for:
+        get_orders, get_orders_delivery, get_orders_pending_invoice and
+        get_order_details each had their own block before, differing in field
+        order and even in timezone (one printed raw UTC timestamps, the other
+        Warsaw local time), so the same order read differently depending on
+        which tool happened to fetch it. Fields, in the order the store owner
+        asked for:
         buyer, status, dispatch deadline, delivery type, quantity, value,
         payment time, order time — then courier details when the caller asked
         for them, any caller-specific extras, and the panel link.
@@ -1867,7 +1868,11 @@ class AllegroAgent(BaseAgent):
             if pickup_name:
                 lines.append(f"- Punkt odbioru: {pickup_name}")
         if extra_lines:
-            lines.extend(f"- {line}" for line in extra_lines)
+            # An already-indented entry is a sub-bullet the caller formatted
+            # itself (get_order_details' product and billing rows sitting under
+            # their own "Produkty:"/"Rozliczenie:" heading) — prefixing it with
+            # "- " too would flatten that nesting into one long list.
+            lines.extend(line if line.startswith(" ") else f"- {line}" for line in extra_lines)
         lines.append(f"- Link: https://allegro.pl/sprzedaz/zamowienia/{o.order_id}")
         return "\n".join(lines)
 
@@ -3066,28 +3071,30 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "get_order_details":
             logger.info("DEBUG get_order_details called for order_id=%s", tool_input.get("order_id"))
-            order, billing_entries, existing_invoices = await asyncio.gather(
+            order, billing_entries, existing_invoices, carriers = await asyncio.gather(
                 self._allegro.get_order(tool_input["order_id"]),
                 self._allegro.get_billing_entries_for_order(tool_input["order_id"]),
                 self._allegro.get_order_invoices(tool_input["order_id"]),
+                self._allegro.get_carriers(),
                 return_exceptions=True,
             )
             if isinstance(order, BaseException):
                 raise order
             billing_entries = billing_entries if not isinstance(billing_entries, BaseException) else []
             existing_invoices = existing_invoices if not isinstance(existing_invoices, BaseException) else []
+            # id→name for "Rodzaj dostawy", exactly as the listings resolve it;
+            # a failed lookup only costs the nicer carrier name, never the answer.
+            carrier_map: dict[str, str] = {}
+            if isinstance(carriers, BaseException):
+                logger.warning("[allegro] carrier lookup failed, using order delivery name: %s", carriers)
+            else:
+                carrier_map = {c["id"]: c.get("name", c["id"]) for c in carriers}
             if not order.invoice_required:
                 invoice_str = "Kupujący nie poprosił o fakturę."
             elif existing_invoices:
                 invoice_str = "Kupujący poprosił o fakturę — faktura już wystawiona."
             else:
                 invoice_str = "Kupujący poprosił o fakturę — NIE WYSTAWIONO jeszcze faktury."
-            d = order.delivery if isinstance(order.delivery, dict) else {}
-            method_name = self._dig(d, "method", "name", default="N/A")
-            tracking = (
-                self._dig(d, "smart", "trackingCode", default=None)
-                or self._dig(d, "trackingCode", default="N/A")
-            )
             billing_lines = []
             if billing_entries:
                 total_fees = 0.0
@@ -3099,56 +3106,53 @@ class AllegroAgent(BaseAgent):
                     occurred = e.get("occurredAt", "")[:10]
                     offer_part = f" — {offer_name}" if offer_name else ""
                     sign = "+" if amount > 0 else "-"
-                    billing_lines.append(f"  - {occurred} | {desc}{offer_part} | {sign}{abs(amount):.2f} PLN")
+                    # Polish formatting throughout (_format_price), so the fee
+                    # rows don't print "6.44 PLN" next to a "64,48 PLN" order
+                    # value two lines above them.
+                    billing_lines.append(
+                        f"  - {occurred} | {desc}{offer_part} | "
+                        f"{sign}{self._format_price(abs(amount), order.currency)}"
+                    )
                     if amount < 0:
                         total_fees += abs(amount)
                     else:
                         total_credits += amount
                 net = order.total_price - total_fees + total_credits
                 billing_lines.append(
-                    f"  - Suma opłat: -{total_fees:.2f} PLN"
-                    + (f" | Zwroty: +{total_credits:.2f} PLN" if total_credits else "")
+                    f"  - Suma opłat: -{self._format_price(total_fees, order.currency)}"
+                    + (
+                        f" | Zwroty: +{self._format_price(total_credits, order.currency)}"
+                        if total_credits else ""
+                    )
                 )
-                billing_lines.append(f"  - Zysk netto: {net:.2f} PLN")
+                billing_lines.append(f"  - Zysk netto: **{self._format_price(net, order.currency)}**")
 
-            # Final, ready-to-display plain-text bullet list — built here
-            # instead of handed to the interpret LLM as raw data, because
-            # _TOOL_SPECIFIC_INSTRUCTIONS for this tool already fully
-            # prescribes the shape (exact fields, exact bullet order, "use
-            # ONLY the data above, never invent") — there was never any real
-            # judgment left for the LLM to apply, just mechanical field-
-            # copying it was doing worse (slower, and with a nonzero chance
-            # of skipping a billing row) than Python can. See
-            # _PASSTHROUGH_TOOLS for how this reaches the user with zero
-            # LLM calls.
-            product_lines = [
+            # Final, ready-to-display text — built here instead of handed to the
+            # interpret LLM as raw data, because the shape is fully prescribed
+            # (exact fields, exact bullet order, "use ONLY the data above, never
+            # invent"): there was never any real judgment left for the LLM to
+            # apply, just mechanical field-copying it was doing worse (slower,
+            # and with a nonzero chance of skipping a billing row) than Python
+            # can. See _PASSTHROUGH_TOOLS for how this reaches the user with
+            # zero LLM calls.
+            #
+            # The block itself is _order_bullet — the same renderer every order
+            # listing uses — so one order reads identically whether it arrived
+            # in a list or as an answer to "szczegóły zamówienia X". Only the
+            # detail-specific sections (invoice status, per-product rows,
+            # billing) are added on top of it.
+            extra_lines = [f"Faktura: {invoice_str}", "Produkty:"]
+            extra_lines += [
                 f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} szt. × "
                 f"{self._format_price(li.price, li.currency)}"
                 for li in order.line_items
             ]
-            # Same "Ilość: N szt." line the order listings carry (see
-            # _order_bullet) — the per-product lines above already give the
-            # split, but a multi-item order made the seller add them up by
-            # hand to answer "ile sztuk poszło w tej paczce".
-            total_qty = sum(li.quantity for li in order.line_items)
-            lines = [
-                f"- Zamówienie: `{order.order_id}`",
-                f"- Kupujący: {order.buyer_login}",
-                f"- Status: {self._fulfillment_pl(order.fulfillment_status)}",
-                f"- Wysyłka do: {self._dispatch_deadline_pl(order)}",
-                f"- Ilość: {total_qty} szt.",
-                f"- Wartość: {self._format_price(order.total_price, order.currency)}",
-                f"- Faktura: {invoice_str}",
-                "- Produkty:",
-                *product_lines,
-                "- Dostawa:",
-                f"  - Metoda: {method_name}",
-                f"  - Tracking: {tracking}",
-            ]
             if billing_lines:
-                lines.append("- Rozliczenie:")
-                lines.extend(billing_lines)
-            return "\n".join(lines)
+                extra_lines.append("Rozliczenie:")
+                extra_lines.extend(billing_lines)
+            return self._order_bullet(
+                order, carrier_map=carrier_map, include_delivery=True, extra_lines=extra_lines
+            )
 
         if tool_name == "calculate_order_profit":
             return await self._order_profit(tool_input)
