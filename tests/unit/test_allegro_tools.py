@@ -396,6 +396,8 @@ class TestLabelPhraseCoverage:
         ("wyłącz monitoring wiadomości", "disable_message_monitoring"),
         ("powiadamiaj mnie o zwrotach i reklamacjach", "suggest_returns_monitoring"),
         ("wyłącz monitoring zwrotów", "disable_returns_monitoring"),
+        ("przypominaj mi o ewidencji sprzedaży bezrachunkowej", "suggest_sales_record_reminder"),
+        ("wyłącz przypomnienia o ewidencji", "disable_sales_record_reminder"),
     ]
 
     @pytest.mark.parametrize("query,tool_name", _CASES)

@@ -40,6 +40,7 @@ from services.return_complaint_monitor import run_once as run_returns_complaints
 from services.message_monitor import run_once as run_message_monitor  # noqa: E402
 from services.invoice_reminder import run_once as run_invoice_reminder  # noqa: E402
 from services.message_reminder import run_once as run_message_reminder  # noqa: E402
+from services.sales_record_reminder import run_once as run_sales_record_reminder  # noqa: E402
 
 
 async def _run_all() -> None:
@@ -65,6 +66,10 @@ async def _run_all() -> None:
         await run_message_reminder()
     except Exception:
         logger.exception("message reminder pass failed")
+    try:
+        await run_sales_record_reminder()
+    except Exception:
+        logger.exception("sales record reminder pass failed")
 
 
 class Handler(BaseHTTPRequestHandler):

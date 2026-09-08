@@ -474,8 +474,11 @@ _match_returns_monitoring = _monitoring_matcher(
 # ("przypominaj mi o fakturach") and the generic monitoring/notification
 # wording that used to reach the removed toggle ("włącz powiadomienia o
 # fakturach") — there is nothing else left for the latter to mean.
+# "przypom" rather than "przypomn": the seller says "przypominaj mi o…" at
+# least as often as "przypomnienia o…", and the longer stem missed every
+# imperative form, sending a perfectly unambiguous toggle request to the LLM.
 _REMINDER_WORD_RE = re.compile(
-    r"przypomn|nagaj|pytaj\s+mnie|dopytuj|monitor|powiad|notyfikacj", re.IGNORECASE,
+    r"przypom|nagaj|pytaj\s+mnie|dopytuj|monitor|powiad|notyfikacj", re.IGNORECASE,
 )
 
 
@@ -487,7 +490,27 @@ def _match_invoice_reminder(query: str) -> tuple[str, dict] | None:
     return "suggest_invoice_reminder", {}
 
 
+# The monthly ewidencja sprzedaży bezrachunkowej (services/
+# sales_record_reminder.py). Same shape as the invoice matcher above, and for
+# the same reason it insists on a reminder word: "ewidencja" is a topic the
+# seller also just asks ABOUT ("co to jest ewidencja bezrachunkowa?", "do
+# kiedy mam ją wystawić?"), and answering those with a toggle button instead
+# of an answer is the failure this guard exists to avoid.
+_SALES_RECORD_TOPIC_RE = re.compile(r"ewidencj|bezrachunkow|bez\s*rachunk", re.IGNORECASE)
+
+
+def _match_sales_record_reminder(query: str) -> tuple[str, dict] | None:
+    if not (_REMINDER_WORD_RE.search(query) and _SALES_RECORD_TOPIC_RE.search(query)):
+        return None
+    if _DISABLE_RE.search(query):
+        return "disable_sales_record_reminder", {}
+    return "suggest_sales_record_reminder", {}
+
+
 _MONITORING_MATCHERS: list[Callable[[str], tuple[str, dict] | None]] = [
+    # Before the invoice matcher: "przypominaj mi o ewidencji zamiast o
+    # fakturach" names both, and the ewidencja is the more specific topic.
+    _match_sales_record_reminder,
     _match_invoice_reminder,
     _match_order_monitoring,
     _match_message_monitoring,

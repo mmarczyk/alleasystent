@@ -5,14 +5,16 @@ Routes an incoming chat message to the reminder it answers — or, when more
 than one could plausibly claim it, asks the seller which one they meant
 instead of guessing.
 
-Two reminders write proactively into the chat and then wait for a reply:
-services/invoice_reminder.py (unissued VAT invoices) and
-services/message_reminder.py (unread buyer messages). Each holds its own
+Three reminders write proactively into the chat and then wait for a reply:
+services/invoice_reminder.py (unissued VAT invoices),
+services/message_reminder.py (unread buyer messages) and
+services/sales_record_reminder.py (the monthly ewidencja sprzedaży
+bezrachunkowej, due by the 5th). Each holds its own
 question/answer state in Redis rather than in the conversation, because the
 seller may answer from a different chat thread than the nudge landed in — see
 those modules' docstrings.
 
-That design leaves one case neither module can settle alone: BOTH are waiting,
+That design leaves one case no module can settle alone: SEVERAL are waiting,
 the seller types a bare "tak", and there is no assistant turn in this thread to
 attribute it to. Whichever module was consulted first used to win the tie
 silently. That is the wrong default here — the invoice reminder's "yes" issues
@@ -62,7 +64,7 @@ def _specs() -> list[_Spec]:
     """Imported lazily and per call, matching how every other module in this
     package reaches the reminders — they pull in Redis, the Allegro service and
     the OpenAI client, none of which should load at import time."""
-    from services import invoice_reminder, message_reminder
+    from services import invoice_reminder, message_reminder, sales_record_reminder
 
     return [
         _Spec(
@@ -82,6 +84,15 @@ def _specs() -> list[_Spec]:
             own_ask_re=message_reminder._OWN_ASK_RE,
             get_pending_state=message_reminder.get_pending_state,
             handle_reply=message_reminder.handle_reply,
+        ),
+        _Spec(
+            kind=sales_record_reminder._MONITOR_KIND,
+            label="ewidencję sprzedaży bezrachunkowej",  # in the accusative: the question reads "o {label}"
+            answer_word="ewidencja",
+            topic_re=sales_record_reminder._SALES_RECORD_TOPIC_RE,
+            own_ask_re=sales_record_reminder._OWN_ASK_RE,
+            get_pending_state=sales_record_reminder.get_pending_state,
+            handle_reply=sales_record_reminder.handle_reply,
         ),
     ]
 

@@ -1,0 +1,23 @@
+# Cloudflare Pages reads this file from the build output and does not serve it.
+# Rules are applied in order and a later one wins for the same header name, so
+# the specific rules below deliberately follow the catch-all.
+/*
+  Cache-Control: no-cache
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# Pinned third-party builds, downloaded at deploy time — safe to hold a day.
+/js/vendor/*
+  Cache-Control: public, max-age=86400
+
+/css/vendor/*
+  Cache-Control: public, max-age=86400
+
+/icons/*
+  Cache-Control: public, max-age=86400
+
+# The service worker must never be served from cache: its bytes carry the
+# deploy's SHA, and that byte-diff is what makes the browser notice an update.
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+  Service-Worker-Allowed: /
