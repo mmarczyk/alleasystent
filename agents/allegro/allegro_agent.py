@@ -3122,15 +3122,21 @@ class AllegroAgent(BaseAgent):
             # _PASSTHROUGH_TOOLS for how this reaches the user with zero
             # LLM calls.
             product_lines = [
-                f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} × "
+                f"  - {li.offer_name} (ID: {li.offer_id}): {li.quantity} szt. × "
                 f"{self._format_price(li.price, li.currency)}"
                 for li in order.line_items
             ]
+            # Same "Ilość: N szt." line the order listings carry (see
+            # _order_bullet) — the per-product lines above already give the
+            # split, but a multi-item order made the seller add them up by
+            # hand to answer "ile sztuk poszło w tej paczce".
+            total_qty = sum(li.quantity for li in order.line_items)
             lines = [
                 f"- Zamówienie: `{order.order_id}`",
                 f"- Kupujący: {order.buyer_login}",
                 f"- Status: {self._fulfillment_pl(order.fulfillment_status)}",
                 f"- Wysyłka do: {self._dispatch_deadline_pl(order)}",
+                f"- Ilość: {total_qty} szt.",
                 f"- Wartość: {self._format_price(order.total_price, order.currency)}",
                 f"- Faktura: {invoice_str}",
                 "- Produkty:",

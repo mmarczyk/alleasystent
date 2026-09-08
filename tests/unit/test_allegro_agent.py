@@ -655,10 +655,24 @@ class TestGetOrderDetailsDispatch:
         assert "- Kupujący: jan_kowalski" in result
         assert "- Wartość: 189,98 PLN" in result
         assert "- Produkty:" in result
-        assert "  - Sweter wełniany M (ID: 111): 1 × 129,99 PLN" in result
+        assert "  - Sweter wełniany M (ID: 111): 1 szt. × 129,99 PLN" in result
         assert "- Dostawa:" in result
         assert "  - Metoda: InPost Paczkomaty" in result
         assert "  - Tracking: PL123456789" in result
+
+    @pytest.mark.asyncio
+    async def test_total_quantity_line_sums_all_line_items(self):
+        from models.allegro import AllegroOrderLine
+        order = self._make_order(line_items=[
+            AllegroOrderLine(offer_id="111", offer_name="Sweter wełniany M", quantity=2, price=129.99),
+            AllegroOrderLine(offer_id="222", offer_name="Skarpety wełniane 3-pak", quantity=3, price=59.99),
+        ])
+        agent = self._make_agent_with_order(order)
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "- Ilość: 5 szt." in result
+        assert "  - Skarpety wełniane 3-pak (ID: 222): 3 szt. × 59,99 PLN" in result
 
     @pytest.mark.asyncio
     async def test_no_billing_entries_omits_billing_section(self):
