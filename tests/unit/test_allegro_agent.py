@@ -748,6 +748,196 @@ class TestGetOrderDetailsDispatch:
             assert expected_substr in result, result
 
 
+class TestDeliveryCosts:
+    """"Ile kosztowała dostawa?" used to come back with the courier's name and
+    a tracking number and nothing else — the figures were all fetched and none
+    of them rendered. Both sides are now spelled out: what the buyer paid
+    (delivery.cost, already inside the order value) and what Allegro charged
+    the seller for the shipment (its billing entries)."""
+
+    def _make_order(self, delivery=None, **overrides):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        defaults = dict(
+            order_id="abc-123",
+            buyer_login="jan_kowalski",
+            status="BOUGHT",
+            fulfillment_status="READY_FOR_SHIPMENT",
+            total_price=139.98,
+            currency="PLN",
+            paid_at="2026-08-27T10:20:00Z",
+            delivery=delivery if delivery is not None else {
+                "method": {"name": "Kurier DPD"},
+                "cost": {"amount": "14.99", "currency": "PLN"},
+            },
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Sweter", quantity=1, price=124.99)],
+        )
+        defaults.update(overrides)
+        return AllegroOrder(**defaults)
+
+    def _agent_with_order(self, order, billing_entries=None):
+        agent = _make_agent()
+        agent._allegro.get_order = AsyncMock(return_value=order)
+        agent._allegro.get_billing_entries_for_order = AsyncMock(return_value=billing_entries or [])
+        agent._allegro.get_order_invoices = AsyncMock(return_value=[])
+        agent._allegro.get_carriers = AsyncMock(return_value=[])
+        return agent
+
+    @staticmethod
+    def _entry(desc, amount):
+        return {
+            "value": {"amount": amount},
+            "type": {"description": desc},
+            "occurredAt": "2026-08-27T00:00:00Z",
+        }
+
+    @pytest.mark.asyncio
+    async def test_buyer_paid_delivery_is_shown_and_named_inside_the_order_value(self):
+        agent = self._agent_with_order(self._make_order())
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        # Allegro counts delivery inside summary.totalToPay, so the line has
+        # to say the two are not additive.
+        assert (
+            "  - Koszt dostawy zapłacony przez kupującego: 14,99 PLN "
+            "(wliczone w wartość zamówienia)"
+        ) in result
+        assert "- Wartość: **139,98 PLN**" in result
+        # …and the shared block does not print its own shorter cost line on top
+        # of the section above (see _order_bullet's include_delivery_cost).
+        assert "- Koszt dostawy: 14,99 PLN" not in result
+
+    @pytest.mark.asyncio
+    async def test_free_delivery_is_not_the_same_as_no_data(self):
+        free = self._agent_with_order(self._make_order(delivery={
+            "method": {"name": "Kurier DPD"}, "cost": {"amount": "0.00", "currency": "PLN"},
+        }))
+        unknown = self._agent_with_order(self._make_order(delivery={"method": {"name": "Odbiór osobisty"}}))
+
+        free_result = await free._dispatch("get_order_details", {"order_id": "abc-123"})
+        unknown_result = await unknown._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "Koszt dostawy zapłacony przez kupującego: 0,00 PLN (darmowa dostawa)" in free_result
+        assert "wliczone w wartość zamówienia" not in free_result
+        assert "Koszt dostawy zapłacony przez kupującego: brak danych" in unknown_result
+
+    @pytest.mark.asyncio
+    async def test_allegro_shipping_fee_is_split_out_of_the_billing_list(self):
+        agent = self._agent_with_order(self._make_order(), billing_entries=[
+            self._entry("Prowizja od sprzedaży", "-12.50"),
+            self._entry("Opłata za przesyłkę", "-11.99"),
+        ])
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "  - Opłaty Allegro za wysyłkę (Twój koszt): -11,99 PLN" in result
+        assert "  - Bilans dostawy: +3,00 PLN" in result
+        # The commission is not shipping and must not leak into either line.
+        # Checked on the delivery lines themselves, not on the whole block:
+        # "Suma opłat" legitimately totals commission + shipping (-24,49 PLN),
+        # and now that every billing figure is written Polish-style it would
+        # collide with a plain "not in result".
+        assert "Prowizja od sprzedaży" in result
+        delivery_lines = [ln for ln in result.splitlines() if "wysyłkę" in ln or "Bilans dostawy" in ln]
+        assert delivery_lines
+        assert not any("24,49" in ln for ln in delivery_lines)
+
+    @pytest.mark.asyncio
+    async def test_shipping_refund_can_turn_the_sellers_cost_into_a_credit(self):
+        agent = self._agent_with_order(self._make_order(), billing_entries=[
+            self._entry("Opłata za przesyłkę", "-11.99"),
+            self._entry("Zwrot opłaty za przesyłkę", "14.00"),
+        ])
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "Opłaty Allegro za wysyłkę (Twój koszt): +2,01 PLN" in result
+        assert "(w tym zwroty +14,00 PLN)" in result
+
+    @pytest.mark.asyncio
+    async def test_billing_without_any_shipping_row_says_so_instead_of_going_silent(self):
+        agent = self._agent_with_order(self._make_order(), billing_entries=[
+            self._entry("Prowizja od sprzedaży", "-12.50"),
+        ])
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "Opłaty Allegro za wysyłkę: brak w rozliczeniu Allegro" in result
+
+    @pytest.mark.asyncio
+    async def test_no_billing_entries_at_all_claims_nothing_about_shipping_fees(self):
+        agent = self._agent_with_order(self._make_order(), billing_entries=[])
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "Opłaty Allegro za wysyłkę" not in result
+        assert "Koszt dostawy zapłacony przez kupującego: 14,99 PLN" in result
+
+    @pytest.mark.asyncio
+    async def test_courier_listing_shows_each_delivery_cost_and_their_total(self):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[
+            self._make_order(order_id="ord-1"),
+            self._make_order(order_id="ord-2", delivery={
+                "method": {"name": "Allegro Paczkomaty InPost"},
+                "cost": {"amount": "9.99", "currency": "PLN"},
+            }),
+            self._make_order(order_id="ord-3", delivery={"method": {"name": "Odbiór osobisty"}}),
+        ])
+
+        result = await agent._dispatch("get_orders_delivery", {})
+
+        assert result.count("- Koszt dostawy: ") == 2
+        assert "- Koszt dostawy: 14,99 PLN" in result
+        assert (
+            "- Koszt dostawy zapłacony przez kupujących: **24,98 PLN** "
+            "(bez 1 zamówień bez danych o koszcie dostawy)"
+        ) in result
+
+
+class TestLeadInSanitising:
+    """_clean_lead_in decides what is allowed in front of a rendered details
+    block. Everything a lead-in must not be is dropped rather than shown: the
+    fallback is the block on its own, which is what the seller got before the
+    sentence existed and is never worse than a malformed opener."""
+
+    def _clean(self, raw, rendered="- Wartość: 137,70 PLN\n- Dostawa: 12,99 PLN"):
+        from agents.allegro.allegro_agent import AllegroAgent
+        return AllegroAgent._clean_lead_in(raw, rendered)
+
+    def test_plain_sentence_passes_through(self):
+        assert self._clean("Koszt dostawy masz w sekcji Dostawa.") == (
+            "Koszt dostawy masz w sekcji Dostawa."
+        )
+
+    def test_only_the_first_line_survives(self):
+        """A model that answers with a sentence AND its own copy of the data
+        would otherwise print the block twice."""
+        assert self._clean(
+            "Poniżej szczegóły.\n\n- Wartość: 137,70 PLN\n- Dostawa: 12,99 PLN"
+        ) == "Poniżej szczegóły."
+
+    def test_markdown_lead_characters_are_stripped(self):
+        assert self._clean("## Szczegóły zamówienia") == "Szczegóły zamówienia"
+        assert self._clean("- Koszt dostawy poniżej.") == "Koszt dostawy poniżej."
+
+    def test_a_number_from_the_data_is_allowed(self):
+        assert self._clean("Dostawa kosztowała 12,99 PLN.") == "Dostawa kosztowała 12,99 PLN."
+        # Same figure written with a dot — still the block's number, not a new one.
+        assert self._clean("Dostawa kosztowała 12.99 PLN.") == "Dostawa kosztowała 12.99 PLN."
+
+    def test_a_number_that_is_not_in_the_data_drops_the_whole_sentence(self):
+        assert self._clean("Dostawa kosztowała 19,99 PLN.") == ""
+        # Including one the model computed itself out of two real figures.
+        assert self._clean("Razem 150,69 PLN.") == ""
+
+    def test_empty_or_oversized_output_is_dropped(self):
+        assert self._clean("") == ""
+        assert self._clean("   \n  \n") == ""
+        assert self._clean("Bardzo długie zdanie. " * 20) == ""
+        assert self._clean("```\nkod\n```") == ""
+
+
 class TestCalculateOrderProfit:
     """calculate_order_profit is the only place the seller's own purchase cost
     enters the app — Allegro knows the order value and its fees, never what the

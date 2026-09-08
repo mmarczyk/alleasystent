@@ -166,6 +166,43 @@ _RENDERED_VIEW_TOOLS = frozenset(TOOL_OUTPUT_FORMAT)
 # for it to do.
 _PASSTHROUGH_TOOLS = _RENDERED_VIEW_TOOLS
 
+# Tools whose finished view is a wall of fields answering a question the user
+# asked in their own words — "ile kosztowała dostawa", "czy zapłacił", "co
+# tam jest" — and which therefore reads as a data dump unless something ties
+# it back to that question. These get ONE generated sentence in front of the
+# block (see AllegroAgent._lead_in): the block itself is still built in Python
+# and reaches the user byte-for-byte, so the sentence is the only thing an LLM
+# writes here and it can never reshape, reorder or invent a field.
+_LEAD_IN_TOOLS = frozenset({"get_order_details"})
+
+_LEAD_IN_SYSTEM_PROMPT = (
+    "Jesteś asystentem sprzedawcy w sklepie Allegro. Twoim JEDYNYM zadaniem jest napisać "
+    "jedno zdanie wprowadzające do gotowych danych, które użytkownik zobaczy zaraz pod nim.\n"
+    "ZASADY:\n"
+    "- Dokładnie JEDNO zdanie, maksymalnie ok. 200 znaków, zwykły tekst.\n"
+    "- Zdanie ma nawiązywać do tego, o co użytkownik faktycznie pytał, i powiedzieć, gdzie "
+    "w danych poniżej jest odpowiedź (np. „koszty dostawy masz w sekcji Dostawa”).\n"
+    "- Jeśli odpowiedzią jest jedna konkretna liczba lub wartość, możesz ją podać — ale "
+    "WYŁĄCZNIE przepisaną znak w znak z danych. Nigdy nie licz, nie zaokrąglaj i nie "
+    "wymyślaj żadnej liczby, daty ani nazwy.\n"
+    "- Jeśli danych na to pytanie tam NIE MA, napisz to wprost w tym zdaniu.\n"
+    "- Bez powitań, bez markdown, bez list, bez nagłówków, bez emoji, bez pytań na koniec "
+    "i bez powtarzania szczegółów, które i tak są poniżej.\n"
+    "- Pisz w języku pytania użytkownika.\n"
+    "Odpowiedz samym tym zdaniem — niczym więcej."
+)
+
+# The one exception to _RENDERED_VIEW_INSTRUCTION's "nie dopisuj wstępu", so a
+# non-Polish or multi-tool turn gets the same lead-in as the bypass path above
+# instead of the details block landing bare.
+_LEAD_IN_INTERPRET_INSTRUCTION = (
+    "WYJĄTEK — WSTĘP: zacznij odpowiedź od JEDNEGO krótkiego zdania, które nawiązuje do "
+    "pytania użytkownika i mówi, gdzie w danych poniżej jest odpowiedź (jeśli danych na to "
+    "pytanie tam nie ma — napisz to wprost). Potem przepisz dane bez zmian, zgodnie z "
+    "regułą wyżej. Żadnej liczby w tym zdaniu nie licz ani nie zaokrąglaj — wolno ją tylko "
+    "przepisać z danych."
+)
+
 
 
 class AllegroAgent(BaseAgent):
@@ -342,6 +379,14 @@ class AllegroAgent(BaseAgent):
         "which get_orders can't do either — buyer_login is the Allegro login, not a company or "
         "person's name — in that case call ask_clarifying_question asking for the order_id or the "
         "buyer's Allegro login).\n"
+        "• DELIVERY COST OF ONE ORDER — 'ile kosztowała dostawa', 'jaki był koszt dostawy tego "
+        "zamówienia', 'ile kupujący zapłacił za wysyłkę', 'czy dostawa była darmowa', 'ile mnie "
+        "kosztowała ta przesyłka' → get_order_details with that order_id. It reports BOTH sides "
+        "(what the buyer paid — already inside the order value — and what Allegro charged you for "
+        "the shipment, plus the balance), so never answer a delivery-cost question with "
+        "get_orders_delivery: that tool lists MANY orders and has no order_id filter, so it "
+        "answers a different question entirely. Delivery costs ACROSS several orders (no single "
+        "order named) are get_orders_delivery — its summary totals what the buyers paid.\n"
         "• ZYSK/MARŻA ON ONE ORDER WITH A PURCHASE COST THE USER GIVES — 'dla tego zamówienia "
         "policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł', 'ile na tym zarobiłem przy "
         "zakupie po 8 zł/szt', 'jaka marża, jak towar kosztował mnie 12 zł' → "
@@ -457,7 +502,8 @@ class AllegroAgent(BaseAgent):
         "Only call the delivery tool(s) after the user answers that question, unless they already "
         "specified the channel(s) upfront as above.\n"
         "BILLING ROUTING: "
-        "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
+        "1) Specific order costs, delivery cost of a specific order included → ALWAYS "
+        "get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit ('ile zarobiłem', 'zysk', 'przychód po opłatach', 'podsumuj sprzedaż') "
         "→ get_sales_summary, ONE call covering the WHOLE period asked about. Resolve the period from the "
         "current date in your context ('z tego roku'/'w tym roku' → 1 January of the current year through "
@@ -558,6 +604,99 @@ class AllegroAgent(BaseAgent):
         "must stay VERBATIM in your reply, exact ID included — it's the only way a later "
         "step in this conversation can find the right invoice."
     )
+
+    # A lead-in may repeat a figure from the block, never produce one of its
+    # own, so every number it contains has to be findable in the block. Digit
+    # runs are compared with the decimal separator normalised, because the
+    # block writes Polish amounts ("12,99 PLN") and a model may echo them
+    # either way.
+    _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+    @classmethod
+    def _lead_in_invents_a_number(cls, lead: str, rendered: str) -> bool:
+        """True when the sentence states a number the data underneath does not.
+
+        The whole point of rendering the details in Python is that no model
+        gets to touch the figures; a lead-in that opens with an invented
+        "dostawa kosztowała 19,99 zł" over a block saying 12,99 would undo
+        exactly that, and it is the first line the seller reads. Cheaper to
+        drop such a sentence than to caveat it.
+        """
+        in_block = {n.replace(",", ".") for n in cls._NUMBER_RE.findall(rendered)}
+        return any(n.replace(",", ".") not in in_block for n in cls._NUMBER_RE.findall(lead))
+
+    @classmethod
+    def _clean_lead_in(cls, raw: str, rendered: str) -> str:
+        """The model's sentence, or "" when it is not usable as one.
+
+        Everything a lead-in must not be — a heading, a bullet, a second copy
+        of the block, a paragraph — is dropped here rather than shown, because
+        the fallback (the details on their own) is exactly what the seller got
+        before this existed and is never worse than a malformed opener.
+        """
+        first = next((ln.strip() for ln in (raw or "").splitlines() if ln.strip()), "")
+        first = first.lstrip("#*->• ").strip()
+        if not first or len(first) > 300 or "```" in first:
+            return ""
+        if cls._lead_in_invents_a_number(first, rendered):
+            logger.warning("[allegro] lead-in dropped — number not present in the tool data: %r", first)
+            return ""
+        return first
+
+    async def _lead_in(
+        self,
+        query: str,
+        rendered: str,
+        model_pool: list[str],
+        conversation_history: list[dict[str, str]] | None,
+        context: str | None,
+    ) -> str:
+        """One sentence tying a details block back to what the user asked.
+
+        Rendered fields alone read like a form the seller has to search: they
+        asked "ile kosztowała dostawa?" and got twenty lines starting with the
+        order id. A fixed opener ("poniżej szczegóły zamówienia") would be no
+        better — it says the same thing whatever was asked, which is precisely
+        what makes it sound canned. So the sentence is written per turn, with
+        the question and the block in front of the model, while the block
+        itself stays the Python-rendered one.
+
+        Failure of any kind returns "" and the caller shows the block alone —
+        a missing opener is a cosmetic loss, a failed answer is not.
+        """
+        from agents.base_agent import _call_with_retry
+
+        history = [
+            {"role": m.get("role", "user"), "content": m.get("content", "")}
+            for m in (conversation_history or [])[-4:]
+            if m.get("content")
+        ]
+        system = _LEAD_IN_SYSTEM_PROMPT
+        if context:
+            system += f"\n\n## Kontekst rozmowy\n{context}"
+        messages = [
+            {"role": "system", "content": system},
+            *history,
+            {"role": "user", "content": (
+                f"Pytanie użytkownika:\n{query}\n\n"
+                f"Dane, które zobaczy pod Twoim zdaniem:\n{rendered}"
+            )},
+        ]
+        try:
+            resp = await _call_with_retry(
+                self._client, model_pool, "allegro/lead-in",
+                messages=messages,
+                max_tokens=160,
+                # One sentence over data that is already final — nothing to
+                # reason about, and this call sits in front of an answer the
+                # user is waiting for (see the reasoning_effort comments on
+                # the tool-select and interpret calls).
+                reasoning_effort="none",
+            )
+        except Exception as exc:
+            logger.warning("[allegro] lead-in call failed, showing the details alone: %s", exc)
+            return ""
+        return self._clean_lead_in(resp.choices[0].message.content or "", rendered)
 
     def _build_interpret_system_prompt(self, context: str | None) -> str:
         from datetime import datetime
@@ -887,12 +1026,25 @@ class AllegroAgent(BaseAgent):
             # collapsing it into plain chat text here would silently drop that
             # presentation.
             bypass_format = resolve_output_format(called_tools)
+            bypass_text = single_tool_raw_result
+            # The one thing the rendered block can't do for itself: say what it
+            # has to do with the question. See _LEAD_IN_TOOLS — the block is
+            # still the Python-rendered one, the sentence in front of it is the
+            # only generated text, and a failed/blank/number-inventing sentence
+            # leaves the block exactly as it was.
+            if called_tools[0] in _LEAD_IN_TOOLS:
+                with perf.stage("lead_in_llm"):
+                    lead = await self._lead_in(
+                        query, bypass_text, model_pool, conversation_history, context,
+                    )
+                if lead:
+                    bypass_text = f"{lead}\n\n{bypass_text}"
             perf.log(
                 source=self.agent_name, output_format=bypass_format,
                 tools=called_tools[0], bypassed_interpret=True,
             )
             return AgentResponse(
-                text=single_tool_raw_result,
+                text=bypass_text,
                 agent_type=self.agent_name,
                 metadata={
                     "output_format": bypass_format,
@@ -916,6 +1068,12 @@ class AllegroAgent(BaseAgent):
             if any(t in _RENDERED_VIEW_TOOLS for t in called_tools)
             else None
         )
+        # Same lead-in the bypass path adds, asked for in the instruction here
+        # because on this path the LLM writes the whole reply — without the
+        # carve-out the rule right above it ("nie dopisuj wstępu") would forbid
+        # the sentence, and an English question would get the bare block.
+        if format_instruction and any(t in _LEAD_IN_TOOLS for t in called_tools):
+            format_instruction += "\n" + _LEAD_IN_INTERPRET_INSTRUCTION
         if format_instruction:
             messages.append({"role": "user", "content": format_instruction})
 
@@ -1072,6 +1230,60 @@ class AllegroAgent(BaseAgent):
     @staticmethod
     def _format_price(amount: float, currency: str = "PLN") -> str:
         return f"{amount:.2f}".replace(".", ",") + f" {currency}"
+
+    @classmethod
+    def _signed_price(cls, amount: float, currency: str = "PLN") -> str:
+        """A money figure that carries its own direction: "+9,99 PLN" for money
+        coming in, "-9,99 PLN" for money going out. Used wherever a line can go
+        either way (a delivery balance, a shipping charge that a refund turned
+        into a credit), so the sign is never hardcoded next to an absolute
+        value that later flips."""
+        return ("+" if amount >= 0 else "-") + cls._format_price(abs(amount), currency)
+
+    @staticmethod
+    def _delivery_cost(order: Any) -> tuple[float | None, str]:
+        """What the BUYER paid for delivery — `delivery.cost` on the checkout
+        form. Allegro already counts it inside `summary.totalToPay`, so it is
+        part of the order value, never an extra on top of it (hence the
+        "w tym dostawa" wording wherever both are shown).
+
+        Returns (amount, currency). None means Allegro sent no cost block at
+        all — personal pickup, or an older order — which is NOT the same thing
+        as 0.00 (free delivery the seller paid for), so the two must never
+        collapse into one line: "brak danych" and "darmowa dostawa" are
+        different answers to "ile kosztowała dostawa".
+        """
+        d = order.delivery if isinstance(order.delivery, dict) else {}
+        order_currency = getattr(order, "currency", "") or "PLN"
+        cost = d.get("cost")
+        if not isinstance(cost, dict):
+            return None, order_currency
+        try:
+            amount = float(cost.get("amount"))
+        except (TypeError, ValueError):
+            return None, order_currency
+        return amount, cost.get("currency") or order_currency
+
+    # Allegro has no billing-entry flag saying "this charge is the shipment" —
+    # the type ids differ per delivery product (Allegro Delivery, WZA labels,
+    # courier top-ups) and new ones appear whenever a carrier is added, so the
+    # human-readable type description is the only stable signal. Matched on
+    # word stems because Allegro declines them ("Opłata za przesyłkę",
+    # "Opłaty za etykiety", "Zwrot opłaty za wysyłkę").
+    _DELIVERY_FEE_DESC_RE = re.compile(
+        r"przesy[łl]k|etykiet|dostaw|wysy[łl]k|kurier|paczkomat|list\s+przewozowy|allegro\s+delivery",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_delivery_fee_entry(cls, entry: dict) -> bool:
+        """Whether a billing entry is Allegro charging the seller for the
+        SHIPMENT itself (or refunding it), as opposed to a sale commission or
+        a promotion fee. Used to answer "ile kosztowała mnie wysyłka" without
+        making the store owner read the whole billing list and guess which
+        rows are the parcel."""
+        desc = (entry.get("type") or {}).get("description") or ""
+        return bool(cls._DELIVERY_FEE_DESC_RE.search(desc))
 
     @staticmethod
     def _is_balance_transfer_entry(entry: dict) -> bool:
@@ -1824,6 +2036,7 @@ class AllegroAgent(BaseAgent):
         *,
         carrier_map: dict[str, str] | None = None,
         include_delivery: bool = False,
+        include_delivery_cost: bool = True,
         extra_lines: list[str] | None = None,
     ) -> str:
         """Render ONE order as the bullet block every order answer uses.
@@ -1857,6 +2070,16 @@ class AllegroAgent(BaseAgent):
         if o.created_at:
             lines.append(f"- Złożone: {cls._format_dt_pl(o.created_at)}")
         if include_delivery:
+            # What the buyer paid for this parcel — the courier view is where
+            # "ile kosztowała dostawa w tych zamówieniach" gets asked, and the
+            # figure is already on the order, so it never needs a second call.
+            # …unless the caller states that cost itself in a fuller form
+            # (get_order_details' "Dostawa:" section gives the buyer's side,
+            # Allegro's shipping fee and the balance between them) — printing
+            # it here too would put the same figure in the block twice.
+            paid_by_buyer, delivery_currency = cls._delivery_cost(o)
+            if include_delivery_cost and paid_by_buyer is not None:
+                lines.append(f"- Koszt dostawy: {cls._format_price(paid_by_buyer, delivery_currency)}")
             tracking = (
                 cls._dig(d, "smart", "trackingCode", default=None)
                 or cls._dig(d, "trackingCode", default="—")
@@ -3059,6 +3282,20 @@ class AllegroAgent(BaseAgent):
             summary = "**Podsumowanie kurierów:**\n" + "\n".join(
                 f"- {method}: {count} zamówień" for method, count in courier_counts.most_common()
             )
+            # Delivery totals for the whole listing, so "ile kosztowały te
+            # dostawy" is answered by the same call that lists them instead of
+            # leaving the store owner to add the per-order lines up by hand.
+            delivery_costs = [self._delivery_cost(o) for o in orders]
+            known = [(amount, currency) for amount, currency in delivery_costs if amount is not None]
+            if known:
+                currency = known[0][1]
+                total_delivery = sum(amount for amount, _ in known)
+                missing = len(delivery_costs) - len(known)
+                summary += (
+                    f"\n- Koszt dostawy zapłacony przez kupujących: "
+                    f"**{self._format_price(total_delivery, currency)}**"
+                    + (f" (bez {missing} zamówień bez danych o koszcie dostawy)" if missing else "")
+                )
             body = summary + "\n\n---\n\n" + body
         return body + suffix
 
@@ -3096,6 +3333,12 @@ class AllegroAgent(BaseAgent):
             else:
                 invoice_str = "Kupujący poprosił o fakturę — NIE WYSTAWIONO jeszcze faktury."
             billing_lines = []
+            # Shipping charged BY Allegro TO the seller (the label), kept apart
+            # from the sale commission so the delivery section can state the
+            # seller's own shipping cost — "ile kosztowała dostawa" is a
+            # question about the parcel, not about the whole billing list.
+            delivery_fees = 0.0
+            delivery_credits = 0.0
             if billing_entries:
                 total_fees = 0.0
                 total_credits = 0.0
@@ -3117,6 +3360,11 @@ class AllegroAgent(BaseAgent):
                         total_fees += abs(amount)
                     else:
                         total_credits += amount
+                    if self._is_delivery_fee_entry(e):
+                        if amount < 0:
+                            delivery_fees += abs(amount)
+                        else:
+                            delivery_credits += amount
                 net = order.total_price - total_fees + total_credits
                 billing_lines.append(
                     f"  - Suma opłat: -{self._format_price(total_fees, order.currency)}"
@@ -3147,11 +3395,74 @@ class AllegroAgent(BaseAgent):
                 f"{self._format_price(li.price, li.currency)}"
                 for li in order.line_items
             ]
+            # Delivery costs have two sides and the store owner asks about
+            # both with the same words ("koszty dostawy"): what the buyer paid
+            # (delivery.cost, already inside the order value) and what Allegro
+            # charged the seller for the shipment (its billing entries). Both
+            # are spelled out here — showing only the method and the tracking
+            # number, as this tool used to, left a delivery-cost question
+            # unanswered even though every figure was already fetched. The
+            # carrier, tracking number and pickup point are NOT repeated here:
+            # _order_bullet already prints them above (which is why the buyer's
+            # cost is asked of it with include_delivery_cost=False — this
+            # section states it in full, with the free-delivery and no-data
+            # cases the listing line cannot carry).
+            paid_by_buyer, delivery_currency = self._delivery_cost(order)
+            delivery_lines = []
+            if paid_by_buyer is None:
+                delivery_lines.append("  - Koszt dostawy zapłacony przez kupującego: brak danych")
+            elif paid_by_buyer == 0:
+                delivery_lines.append(
+                    "  - Koszt dostawy zapłacony przez kupującego: 0,00 "
+                    f"{delivery_currency} (darmowa dostawa)"
+                )
+            else:
+                # Allegro counts delivery inside summary.totalToPay, so this
+                # says outright that it is not an extra on top of "Wartość".
+                delivery_lines.append(
+                    "  - Koszt dostawy zapłacony przez kupującego: "
+                    f"{self._format_price(paid_by_buyer, delivery_currency)} "
+                    "(wliczone w wartość zamówienia)"
+                )
+            if delivery_fees or delivery_credits:
+                # A shipping refund can exceed the charge (a cancelled parcel
+                # refunded in a later period), so the seller's shipping cost
+                # can legitimately come out negative — it is signed, never
+                # printed as a charge with a stray minus in front of it.
+                seller_cost = delivery_fees - delivery_credits
+                delivery_lines.append(
+                    "  - Opłaty Allegro za wysyłkę (Twój koszt): "
+                    f"{self._signed_price(-seller_cost, order.currency)}"
+                    + (f" (w tym zwroty +{self._format_price(delivery_credits, order.currency)})"
+                       if delivery_credits else "")
+                )
+                if paid_by_buyer is not None:
+                    delivery_lines.append(
+                        "  - Bilans dostawy: "
+                        f"{self._signed_price(paid_by_buyer - seller_cost, order.currency)} "
+                        f"(kupujący zapłacił {self._format_price(paid_by_buyer, delivery_currency)}, "
+                        f"wysyłka kosztowała {self._format_price(seller_cost, order.currency)})"
+                    )
+            elif billing_entries:
+                # Billing came back and simply carries no shipping row: the
+                # label was bought outside Allegro (own courier contract,
+                # personal pickup), so Allegro genuinely does not know that
+                # cost. Saying so beats an unexplained missing line.
+                delivery_lines.append(
+                    "  - Opłaty Allegro za wysyłkę: brak w rozliczeniu Allegro "
+                    "(etykieta opłacona poza Allegro nie jest tu widoczna)"
+                )
+            extra_lines.append("Dostawa:")
+            extra_lines.extend(delivery_lines)
             if billing_lines:
                 extra_lines.append("Rozliczenie:")
                 extra_lines.extend(billing_lines)
             return self._order_bullet(
-                order, carrier_map=carrier_map, include_delivery=True, extra_lines=extra_lines
+                order,
+                carrier_map=carrier_map,
+                include_delivery=True,
+                include_delivery_cost=False,
+                extra_lines=extra_lines,
             )
 
         if tool_name == "calculate_order_profit":

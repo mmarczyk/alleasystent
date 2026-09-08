@@ -91,6 +91,13 @@ CASES: list[Case] = [
          f"Szczegóły zamówienia {ds.ORD_1}",
          ("**Zamówienie**", "- Ilość:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),
          note="Zamówienie + wpisy rozliczeniowe + status faktury w jednym."),
+    Case("get_order_details__delivery_cost", "get_order_details", {"order_id": ds.ORD_3},
+         "Ile kosztowała dostawa w tym zamówieniu?",
+         ("- Koszt dostawy zapłacony przez kupującego: 12,99 PLN",
+          "- Opłaty Allegro za wysyłkę (Twój koszt): -11,99 PLN",
+          "- Bilans dostawy: +1,00 PLN"),
+         note="Koszty dostawy z obu stron: ile zapłacił kupujący (jest już wliczone "
+              "w wartość zamówienia) i ile Allegro policzyło sprzedawcy za przesyłkę."),
     Case("calculate_order_profit", "calculate_order_profit",
          {"order_id": ds.ORD_1, "unit_cost": 8.1},
          "Dla tego zamówienia policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł",
