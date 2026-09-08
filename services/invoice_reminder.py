@@ -65,6 +65,10 @@ _RECHECK_SNOOZE_MINUTES = 60 * 24
 _MIN_SNOOZE_MINUTES = 5
 _MAX_SNOOZE_MINUTES = 60 * 24 * 14  # 2 weeks — sanity cap on a misparsed duration
 
+# How many orders the reminder names one by one before it just counts the rest —
+# a chat message, not a report.
+_MAX_LISTED_ORDERS = 10
+
 _STATUS_IDLE = "idle"
 _STATUS_AWAITING_RESPONSE = "awaiting_response"
 _STATUS_AWAITING_DURATION = "awaiting_duration"
@@ -242,13 +246,13 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
     order_ids = [o.order_id for o in orders]
 
     if status == _STATUS_IDLE:
-        await _ask(user_id, order_ids, again=False, awaiting_duration=False)
+        await _ask(user_id, orders, again=False, awaiting_duration=False)
         new_status = _STATUS_AWAITING_RESPONSE
         new_reminder_count = 1
     else:
         # Still waiting on a reply from last time — the seller either never
         # answered at all, or was asked "for how long?" and never said.
-        await _ask(user_id, order_ids, again=True, awaiting_duration=(status == _STATUS_AWAITING_DURATION))
+        await _ask(user_id, orders, again=True, awaiting_duration=(status == _STATUS_AWAITING_DURATION))
         new_status = status
         new_reminder_count = reminder_count + 1
 
@@ -261,44 +265,107 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
 
 # ── Messaging ────────────────────────────────────────────────────────────────
 
+def _plural_pl(count: int, one: str, few: str, many: str) -> str:
+    """Polish has three plural forms, and "3 niewystawionych faktur" used the
+    wrong one — 2-4 (but not 12-14) take their own."""
+    if count == 1:
+        return one
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return few
+    return many
+
+
 def _pending_invoice_phrase(count: int) -> str:
-    return "1 niewystawioną fakturę" if count == 1 else f"{count} niewystawionych faktur"
+    form = _plural_pl(
+        count, "niewystawioną fakturę", "niewystawione faktury", "niewystawionych faktur",
+    )
+    return f"{count} {form}"
 
 
 def _count_phrase(count: int) -> str:
-    return "1 fakturę" if count == 1 else f"{count} faktur"
+    return f"{count} {_plural_pl(count, 'fakturę', 'faktury', 'faktur')}"
 
 
-def _format_order_ids(order_ids: list[str]) -> str:
-    shown = ", ".join(f"`{oid}`" for oid in order_ids[:10])
-    if len(order_ids) > 10:
-        shown += f" i {len(order_ids) - 10} więcej"
-    return shown
+def _format_price(amount: float, currency: str = "PLN") -> str:
+    """Same shape as every price the assistant prints (AllegroAgent._format_price)."""
+    return f"{amount:.2f}".replace(".", ",") + f" {currency or 'PLN'}"
 
 
-def _build_ask_text(order_ids: list[str], again: bool, awaiting_duration: bool) -> str:
-    phrase = _pending_invoice_phrase(len(order_ids))
-    ids_str = _format_order_ids(order_ids)
+def _buyer_label(order) -> str:
+    """Who the invoice is for, named the way the seller would name them.
+
+    Allegro's `invoice.address` block is the only place the buyer OF THE INVOICE
+    is stated — a company with its name, a private person with theirs. The
+    Allegro login is an account handle that frequently says nothing about who
+    that is, so it is the fallback, not the first choice.
+    """
+    invoice_buyer = getattr(order, "invoice_buyer", None)
+    company = (getattr(invoice_buyer, "company_name", "") or "").strip()
+    if company:
+        return company
+    person = " ".join(
+        part for part in (
+            (getattr(invoice_buyer, "first_name", "") or "").strip(),
+            (getattr(invoice_buyer, "last_name", "") or "").strip(),
+        ) if part
+    )
+    return person or getattr(order, "buyer_login", "") or "nieznany kupujący"
+
+
+def _format_order_lines(orders: list) -> str:
+    """One line per pending invoice: for whom, for how much, and only then the id.
+
+    A bare list of order ids is what the seller was getting, and an id identifies
+    nothing to a human — they cannot tell from it whose invoice is missing or
+    whether it is worth 30 zł or 3000 zł, which is exactly what decides whether
+    they deal with it now.
+    """
+    shown = orders[:_MAX_LISTED_ORDERS]
+    lines = [
+        f"- **{_buyer_label(o)}** — {_format_price(o.total_price, o.currency)} (`{o.order_id}`)"
+        for o in shown
+    ]
+    if len(orders) > _MAX_LISTED_ORDERS:
+        lines.append(f"- …i {len(orders) - _MAX_LISTED_ORDERS} więcej")
+    if len(orders) > 1:
+        total = sum(o.total_price for o in orders)
+        # One currency in practice (a PLN account); if that ever stops being
+        # true, the sum is meaningless, so it is simply left out.
+        currencies = {o.currency or "PLN" for o in orders}
+        if len(currencies) == 1:
+            lines.append(f"\nRazem: **{_format_price(total, currencies.pop())}**")
+    return "\n".join(lines)
+
+
+def _build_ask_text(orders: list, again: bool, awaiting_duration: bool) -> str:
+    count = len(orders)
+    phrase = _pending_invoice_phrase(count)
+    listing = _format_order_lines(orders)
+    orders_pl = "wysłanego zamówienia" if count == 1 else "wysłanych zamówień"
+    issue_q = "Wystawić ją teraz?" if count == 1 else "Wystawić je teraz?"
 
     if not again:
         return (
-            f"🧾 Masz {phrase} dla już wysłanych zamówień: {ids_str}.\n\n"
-            "Wystawić je teraz?"
+            f"🧾 Masz {phrase} dla już {orders_pl}:\n\n"
+            f"{listing}\n\n"
+            f"{issue_q}"
         )
     if awaiting_duration:
         return (
-            f"🧾 Ponownie Ci przypominam o {phrase} do wystawienia ({ids_str}) — "
-            "na jak długo mam odłożyć to przypomnienie? Albo napisz „wystaw”, "
+            f"🧾 Ponownie Ci przypominam — masz {phrase} do wystawienia:\n\n"
+            f"{listing}\n\n"
+            "Na jak długo mam odłożyć to przypomnienie? Albo napisz „wystaw”, "
             "jeśli chcesz zrobić to teraz."
         )
     return (
-        f"🧾 Ponownie Ci przypominam: nadal masz {phrase} dla wysłanych zamówień "
-        f"({ids_str}). Wystawić je teraz?"
+        f"🧾 Ponownie Ci przypominam — nadal masz {phrase} dla {orders_pl}:\n\n"
+        f"{listing}\n\n"
+        f"{issue_q}"
     )
 
 
-async def _ask(user_id: str, order_ids: list[str], again: bool, awaiting_duration: bool) -> None:
-    await _notify(user_id, chat_text=_build_ask_text(order_ids, again, awaiting_duration))
+async def _ask(user_id: str, orders: list, again: bool, awaiting_duration: bool) -> None:
+    await _notify(user_id, chat_text=_build_ask_text(orders, again, awaiting_duration))
 
 
 async def _notify(user_id: str, chat_text: str) -> None:
@@ -387,7 +454,7 @@ async def refresh_pending_message(user_id: str, queued_text: str) -> str | None:
     )
     await _update_pending_orders(user_id, state, order_ids)
     return _build_ask_text(
-        order_ids,
+        orders,
         again=state.get("reminder_count", 0) > 1,
         awaiting_duration=state.get("status") == _STATUS_AWAITING_DURATION,
     )
@@ -573,7 +640,7 @@ async def _accept_already_issued(user_id: str, state: dict) -> str:
             f"następnym przebiegu. (Szczegóły: {exc})"
         )
 
-    still_missing = [o.order_id for o in orders if o.order_id in asked_about]
+    still_missing = [o for o in orders if o.order_id in asked_about]
     if not still_missing:
         await _resolve_state(user_id, state)
         return (
@@ -583,7 +650,8 @@ async def _accept_already_issued(user_id: str, state: dict) -> str:
 
     await _set_snooze(user_id, state, _RECHECK_SNOOZE_MINUTES)
     return (
-        f"Sprawdziłem w Allegro i dla {_format_order_ids(still_missing)} nadal nie widzi faktury. "
+        "Sprawdziłem w Allegro i przy tych zamówieniach nadal nie widzi faktury:\n\n"
+        f"{_format_order_lines(still_missing)}\n\n"
         "Allegro pokazuje tylko faktury dołączone do zamówienia jako PDF — sama faktura "
         "w inFakt czy w Twojej księgowości mu nie wystarczy.\n\n"
         "Napisz „dołącz fakturę do zamówienia `<id>`”, jeśli mam spróbować ją tam wysłać. "

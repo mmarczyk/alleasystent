@@ -14,6 +14,26 @@ def set_env(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
 
 
+def _order(order_id: str, *, company: str = "", first: str = "", last: str = "",
+           login: str = "kupujacy", total: float = 100.0, currency: str = "PLN"):
+    """An AllegroOrder as get_orders_needing_invoice returns it — the reminder
+    reads the buyer and the value off the order it already has, no extra call."""
+    from models.allegro import AllegroInvoiceBuyer, AllegroOrder
+
+    return AllegroOrder(
+        order_id=order_id,
+        buyer_login=login,
+        status="READY_FOR_PROCESSING",
+        fulfillment_status="SENT",
+        total_price=total,
+        currency=currency,
+        invoice_required=True,
+        invoice_buyer=AllegroInvoiceBuyer(
+            required=True, company_name=company, first_name=first, last_name=last,
+        ),
+    )
+
+
 class TestParseClassification:
     """The reply classifier's output parser — safety-critical: anything it
     can't confidently parse must fall back to "unrelated", never "issue"."""
@@ -76,23 +96,20 @@ class TestPhrases:
         from services.invoice_reminder import _pending_invoice_phrase
         assert _pending_invoice_phrase(1) == "1 niewystawioną fakturę"
 
-    def test_pending_invoice_phrase_plural(self):
+    def test_pending_invoice_phrase_uses_the_2_to_4_form(self):
+        """"3 niewystawionych faktur" was the wrong Polish plural."""
         from services.invoice_reminder import _pending_invoice_phrase
-        assert _pending_invoice_phrase(3) == "3 niewystawionych faktur"
+        assert _pending_invoice_phrase(3) == "3 niewystawione faktury"
+        assert _pending_invoice_phrase(5) == "5 niewystawionych faktur"
+        assert _pending_invoice_phrase(12) == "12 niewystawionych faktur"
+        assert _pending_invoice_phrase(22) == "22 niewystawione faktury"
 
     def test_count_phrase(self):
         from services.invoice_reminder import _count_phrase
         assert _count_phrase(1) == "1 fakturę"
+        assert _count_phrase(3) == "3 faktury"
         assert _count_phrase(5) == "5 faktur"
 
-    def test_format_order_ids_truncates(self):
-        from services.invoice_reminder import _format_order_ids
-        ids = [f"order-{i}" for i in range(12)]
-        result = _format_order_ids(ids)
-        assert "order-0" in result
-        assert "order-9" in result
-        assert "order-10" not in result
-        assert "2 więcej" in result
 
 
 class TestMonitorEnabled:
@@ -265,7 +282,7 @@ class TestReminderIsChatOnly:
         with patch.object(push_service, "store_pending_chat", store), \
              patch.object(push_service, "add_notification", notify), \
              patch.object(push_service, "send_push", push):
-            await invoice_reminder._ask("user1", ["o1", "o2"], **kwargs)
+            await invoice_reminder._ask("user1", [_order("o1"), _order("o2")], **kwargs)
         return store, notify, push
 
     @pytest.mark.asyncio
@@ -319,7 +336,8 @@ class TestReminderOwnsReply:
         for again, awaiting in ((False, False), (True, False), (True, True)):
             with patch.object(invoice_reminder, "_notify", AsyncMock()) as notify:
                 await invoice_reminder._ask(
-                    "u1", ["o1", "o2"], again=again, awaiting_duration=awaiting,
+                    "u1", [_order("o1"), _order("o2")],
+                    again=again, awaiting_duration=awaiting,
                 )
             text = notify.await_args.kwargs["chat_text"]
             assert invoice_reminder._reminder_owns_reply("tak", text) is True
@@ -494,7 +512,7 @@ class TestRefreshPendingMessage:
         allegro._tokens = {"access_token": "t"}
         allegro._load_tokens_from_redis = AsyncMock()
         allegro.get_orders_needing_invoice = AsyncMock(
-            return_value=[type("O", (), {"order_id": oid})() for oid in order_ids]
+            return_value=[_order(oid) for oid in order_ids]
         )
         return allegro
 
@@ -593,7 +611,7 @@ class TestSellerSaysItIsAlreadyIssued:
         allegro = AsyncMock()
         allegro._load_tokens_from_redis = AsyncMock()
         allegro.get_orders_needing_invoice = AsyncMock(
-            return_value=[type("O", (), {"order_id": oid})() for oid in order_ids]
+            return_value=[_order(oid) for oid in order_ids]
         )
         return allegro
 
@@ -678,3 +696,78 @@ class TestRemindingIsAllegrosCallAlone:
 
         source = inspect.getsource(invoice_reminder)
         assert "invoice_ledger" not in source
+
+class TestOrderLines:
+    """An order id identifies nothing to a human — the seller could not tell
+    from the old reminder whose invoice was missing, or whether it was worth
+    30 zł or 3000 zł, which is what decides whether they deal with it now."""
+
+    def test_a_company_buyer_is_named_with_the_value(self):
+        from services.invoice_reminder import _format_order_lines
+
+        line = _format_order_lines([_order("o1", company="Modelinarnia sp. z o.o.", total=249.0)])
+
+        assert "Modelinarnia sp. z o.o." in line
+        assert "249,00 PLN" in line
+        assert "`o1`" in line
+
+    def test_a_private_buyer_is_named_from_the_invoice_address(self):
+        from services.invoice_reminder import _format_order_lines
+
+        line = _format_order_lines([_order("o1", first="Jan", last="Kowalski")])
+
+        assert "Jan Kowalski" in line
+
+    def test_the_allegro_login_is_only_the_fallback(self):
+        """A login like "kot123" says nothing — but it beats naming nobody."""
+        from services.invoice_reminder import _format_order_lines
+
+        assert "kot123" in _format_order_lines([_order("o1", login="kot123")])
+
+    def test_a_total_is_added_for_more_than_one_order(self):
+        from services.invoice_reminder import _format_order_lines
+
+        out = _format_order_lines([
+            _order("o1", company="Firma A", total=100.0),
+            _order("o2", company="Firma B", total=49.5),
+        ])
+
+        assert "Razem" in out and "149,50 PLN" in out
+
+    def test_a_single_order_gets_no_total(self):
+        from services.invoice_reminder import _format_order_lines
+
+        assert "Razem" not in _format_order_lines([_order("o1", total=100.0)])
+
+    def test_mixed_currencies_are_not_summed(self):
+        from services.invoice_reminder import _format_order_lines
+
+        out = _format_order_lines([
+            _order("o1", total=100.0, currency="PLN"),
+            _order("o2", total=50.0, currency="EUR"),
+        ])
+
+        assert "Razem" not in out
+
+    def test_the_ask_itself_carries_the_buyer_and_the_value(self):
+        """The whole point: the seller reads the reminder, not the order ids."""
+        from services.invoice_reminder import _build_ask_text
+
+        text = _build_ask_text(
+            [_order("o1", company="Modelinarnia sp. z o.o.", total=249.0)],
+            again=False, awaiting_duration=False,
+        )
+
+        assert "Modelinarnia sp. z o.o." in text
+        assert "249,00 PLN" in text
+        assert "`o1`" in text
+
+    def test_the_listing_truncates(self):
+        from services.invoice_reminder import _format_order_lines
+
+        out = _format_order_lines([_order(f"order-{i}", total=1.0) for i in range(12)])
+
+        assert "order-0" in out
+        assert "order-9" in out
+        assert "order-10" not in out
+        assert "2 więcej" in out
