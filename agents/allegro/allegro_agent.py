@@ -440,22 +440,35 @@ class AllegroAgent(BaseAgent):
         "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
         "never issue_invoice_for_order or preview_pending_invoices for a yes/no question.\n"
         "AFTER ISSUING AN INVOICE (issue_invoice_for_order succeeded) — delivering it further:\n"
-        "  - attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
+        "  - THE HARD RULE: issuing an invoice NEVER delivers it anywhere. attach_invoice_to_allegro_order "
+        "and send_invoice_to_ksef must NEVER be called in the same turn as issue_invoice_for_order — not "
+        "even when the user's original request said 'wystaw i dodaj do Allegro' or 'wystaw i wyślij do "
+        "KSeF'. The buyer sees an attached PDF immediately and a KSeF submission cannot be taken back, so "
+        "the user has to LOOK at the invoice and say it is correct first. Those tools refuse the call "
+        "anyway in that turn — asking is not a formality you can skip.\n"
+        "  - So in the turn that issued the invoice: report the result (keeping the share link and the "
+        "invoice id verbatim), then ASK for confirmation and name what is waiting — e.g. 'Sprawdź proszę "
+        "fakturę pod linkiem. Jeśli jest OK, dołączę ją do zamówienia w Allegro (i wyślę do KSeF).' "
+        "— and stop. If the user named the channel(s) upfront, say you will do exactly that as soon as "
+        "they confirm; don't act on it yet.\n"
+        "  - In a LATER turn, once the user confirms the invoice is fine ('ok', 'faktura jest ok', "
+        "'wygląda dobrze', 'dołącz', 'wyślij do KSeF'):\n"
+        "    · attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
         "Allegro order, so the buyer sees it on their order page. Needs order_id + invoice_uuid "
         "(invoice_uuid comes from the issue_invoice_for_order result earlier in this conversation — "
         "never guess it, call ask_clarifying_question if it's not in context).\n"
-        "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
+        "    · send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
         "invoice_uuid, same rule — never guess it, call ask_clarifying_question instead.\n"
-        "  - If the user's ORIGINAL request already named the channel(s) ('wystaw i wyślij do KSeF i "
-        "Allegro', 'wystaw i dodaj do Allegro') — just call the matching tool(s) directly, no need to ask.\n"
-        "  - Otherwise: once the user confirms the issued invoice looks fine ('ok', 'faktura jest ok', "
-        "'wygląda dobrze') and hasn't named a channel yet, call get_order_invoice_data for that order to "
-        "check whether the buyer is a company or private person, then ASK in your reply: "
-        "for a company buyer — 'Wysłać fakturę do KSeF i dołączyć ją do zamówienia w Allegro?'; "
-        "for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' (don't default to KSeF for "
-        "a private person — only call send_invoice_to_ksef for one if the user explicitly asks). "
-        "Only call the delivery tool(s) after the user answers that question, unless they already "
-        "specified the channel(s) upfront as above.\n"
+        "    · If the confirmation is a bare 'ok'/'jest ok' and the user never named a channel, call "
+        "get_order_invoice_data for that order to check whether the buyer is a company or a private "
+        "person, then ASK which channel: for a company buyer — 'Wysłać fakturę do KSeF i dołączyć ją do "
+        "zamówienia w Allegro?'; for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' "
+        "(don't default to KSeF for a private person — only call send_invoice_to_ksef for one if the "
+        "user explicitly asks). If they already named the channel(s) in that same confirming message, "
+        "just call the matching tool(s).\n"
+        "  - A confirmation is the user's own words about the invoice. Never treat your own summary, "
+        "the tool result, or silence as confirmation, and never claim an invoice was attached or sent "
+        "unless the matching tool actually returned a success.\n"
         "BILLING ROUTING: "
         "1) Specific order costs → ALWAYS get_order_details (uses order.id filter, exact results). "
         "2) Period earnings/profit ('ile zarobiłem', 'zysk', 'przychód po opłatach', 'podsumuj sprzedaż') "
@@ -581,6 +594,9 @@ class AllegroAgent(BaseAgent):
         super().__init__()
         self.model_override = self._settings.gemini_model_fast
         self._allegro = AllegroService.get_instance(user_id)
+        # Orders and inFakt invoice ids this TURN has issued — the confirmation
+        # gate, see _delivery_needs_confirmation. Reset at the top of run().
+        self._issued_this_turn: set[str] = set()
 
     async def run(
         self,
@@ -591,6 +607,10 @@ class AllegroAgent(BaseAgent):
         from agents.base_agent import _call_for_reply, _call_with_retry
 
         perf = StageTimer("allegro_agent.run")
+
+        # A fresh turn has confirmed nothing yet (the instance is cached per
+        # user in the orchestrator, so this cannot be left over from last turn).
+        self._issued_this_turn = set()
 
         # ── Auth guard ────────────────────────────────────────────────────────
         with perf.stage("auth_check"):
@@ -2607,13 +2627,39 @@ class AllegroAgent(BaseAgent):
         Requiring a concrete order_id per call keeps the blast radius of any
         future misfire to at most one invoice.
 
-        Delegates to services.infakt_service.issue_invoice_for_order, which is
-        also called (once per order, same one-at-a-time path) by the invoice
-        reminder's "issue now" action — see services/invoice_reminder.py.
-        """
-        from services.infakt_service import issue_invoice_for_order
+        Issuance stops at inFakt: the invoice is NOT attached to the Allegro
+        order and NOT sent to KSeF here — both wait for the seller to confirm
+        the invoice is correct (see _delivery_needs_confirmation).
 
-        return await issue_invoice_for_order(self._allegro, order_id, self._settings.is_production)
+        Delegates to services.infakt_service.issue_invoice_for_order_detailed,
+        which is also called (once per order, same one-at-a-time path, via the
+        text-only wrapper) by the invoice reminder's "issue now" action — see
+        services/invoice_reminder.py.
+        """
+        from services.infakt_service import issue_invoice_for_order_detailed
+
+        outcome = await issue_invoice_for_order_detailed(
+            self._allegro, order_id, self._settings.is_production
+        )
+        # Both keys, because the two delivery tools are addressed differently:
+        # the Allegro attachment by order_id, the KSeF submission by invoice id.
+        self._issued_this_turn.add(order_id)
+        if outcome.invoice_uuid:
+            self._issued_this_turn.add(outcome.invoice_uuid)
+        return outcome.message
+
+    def _delivery_needs_confirmation(self, *keys: str) -> bool:
+        """Is this delivery request just the tail of an issuance in the same turn?
+
+        Attaching an invoice to the order shows it to the buyer and a KSeF
+        submission cannot be taken back, so neither may ride along on the same
+        message that asked for the invoice — not even when that message said
+        "wystaw i dodaj do Allegro". The seller looks at the invoice first and
+        says it is correct, and that confirmation is necessarily a NEW message,
+        which is exactly what this checks: an id issued earlier in this very turn
+        has not been confirmed by anyone.
+        """
+        return any(key and key in self._issued_this_turn for key in keys)
 
     async def _attach_invoice_to_allegro_order(self, order_id: str, invoice_uuid: str) -> str:
         """Fetch the invoice PDF from inFakt and attach it to the Allegro order.
@@ -2630,6 +2676,15 @@ class AllegroAgent(BaseAgent):
             InvoiceTooLargeError,
             attach_invoice_to_order,
         )
+
+        if self._delivery_needs_confirmation(order_id, invoice_uuid):
+            return (
+                f"⏸️ Faktura `{invoice_uuid}` została wystawiona przed chwilą, w tej samej "
+                "odpowiedzi — nie dołączam jej do zamówienia w Allegro bez Twojego potwierdzenia, "
+                "bo kupujący zobaczy ją od razu.\n"
+                "Sprawdź ją pod linkiem podglądu i jeśli jest OK, napisz „dołącz fakturę do "
+                f"zamówienia `{order_id}`” — wtedy ją dołączę."
+            )
 
         try:
             number = await attach_invoice_to_order(self._allegro, order_id, invoice_uuid)
@@ -2673,8 +2728,22 @@ class AllegroAgent(BaseAgent):
         return f"✅ Faktura {number or invoice_uuid} dołączona do zamówienia `{order_id}` w Allegro — kupujący zobaczy ją na stronie zamówienia."
 
     async def _send_invoice_to_ksef(self, invoice_uuid: str) -> str:
-        """Submit an already-issued inFakt invoice to KSeF."""
+        """Submit an already-issued inFakt invoice to KSeF — once confirmed.
+
+        Same rule as the Allegro attachment: a KSeF submission goes to the tax
+        authority and is not something to take back, so it never happens in the
+        same turn as the issuance (_delivery_needs_confirmation).
+        """
         from services.infakt_service import InfaktAPIError, InfaktService
+
+        if self._delivery_needs_confirmation(invoice_uuid):
+            return (
+                f"⏸️ Faktura `{invoice_uuid}` została wystawiona przed chwilą, w tej samej "
+                "odpowiedzi — nie wysyłam jej do KSeF bez Twojego potwierdzenia, bo tego "
+                "zgłoszenia nie da się cofnąć.\n"
+                "Sprawdź ją pod linkiem podglądu i jeśli jest OK, napisz „wyślij fakturę "
+                f"`{invoice_uuid}` do KSeF” — wtedy ją zgłoszę."
+            )
 
         infakt = InfaktService.get_instance()
         try:
@@ -3842,8 +3911,9 @@ class AllegroAgent(BaseAgent):
             )
             # The list itself is Allegro's live answer. The ledger only adds
             # what Allegro cannot know: that we already issued an invoice for
-            # this order in inFakt and failed to attach it. Saying so beats
-            # calling it "niewystawiona" and inviting a duplicate.
+            # this order in inFakt and it is waiting to be attached (for the
+            # seller's confirmation, or because the attachment failed). Saying
+            # so beats calling it "niewystawiona" and inviting a duplicate.
             from services import invoice_ledger
             issued = await invoice_ledger.get_records(
                 invoice_ledger.user_id_of(self._allegro), [o.order_id for o in orders]
@@ -3852,8 +3922,9 @@ class AllegroAgent(BaseAgent):
             header = f"**Zamówień bez faktury: {not_issued}**"
             if issued:
                 header += (
-                    f" (+{len(issued)}, dla których faktura już istnieje, ale nie jest dołączona "
-                    "do zamówienia w Allegro — napisz „dołącz fakturę do zamówienia `<id>`”)"
+                    f" (+{len(issued)}, dla których faktura już istnieje w inFakt, ale nie jest "
+                    "dołączona do zamówienia w Allegro — sprawdź ją i napisz „dołącz fakturę do "
+                    "zamówienia `<id>`”, wtedy ją dołączę)"
                 )
             header += "\n"
             blocks = []
@@ -3863,7 +3934,8 @@ class AllegroAgent(BaseAgent):
                 if record:
                     invoice_line = (
                         f"**Faktura: wystawiona w inFakt ({record.get('number') or record.get('invoice_uuid') or 'brak numeru'}), "
-                        "NIE dołączona do zamówienia w Allegro** — nie wystawiaj jej drugi raz"
+                        "NIE dołączona do zamówienia w Allegro — czeka na Twoje potwierdzenie** — "
+                        "nie wystawiaj jej drugi raz"
                     )
                 else:
                     invoice_line = "**Faktura: niewystawiona**"

@@ -296,10 +296,9 @@ CASES: list[Case] = [
          note="Payload inFakt bez wysyłki — nic nie trafia do inFakt."),
     Case("issue_invoice_for_order", "issue_invoice_for_order", {"order_id": ds.ORD_1},
          f"Wystaw fakturę dla zamówienia {ds.ORD_1}",
-         ("✅ Faktura", "infakt.pl/share", "firma", "Dołączona do zamówienia w Allegro"),
-         note="Wystawienie faktury w inFakt ORAZ dołączenie jej do zamówienia — "
-              "bez tego drugiego kroku Allegro nadal widzi zamówienie bez faktury "
-              "i przypominajka pyta o nie w kółko."),
+         ("✅ Faktura", "infakt.pl/share", "firma", "NIE dołączyłem", "potwierdzenie"),
+         note="Wystawienie faktury kończy się na inFakt — do Allegro i do KSeF trafia "
+              "dopiero po tym, jak użytkownik obejrzy fakturę i potwierdzi, że jest OK."),
     Case("issue_invoice_for_order__exists", "issue_invoice_for_order", {"order_id": ds.ORD_6},
          f"Wystaw fakturę dla zamówienia {ds.ORD_6}",
          ("faktura już istnieje",),

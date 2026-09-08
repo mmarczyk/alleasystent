@@ -1093,8 +1093,12 @@ ALLEGRO_TOOLS: list[dict] = [
                 "or given directly by the user). If you don't have a concrete order_id in context, ask "
                 "the user for it or look it up first — never guess or invent one. "
                 "This creates a real, numbered invoice in inFakt — it is not easily reversible. "
-                "Returns a share link for manual review PLUS the invoice_uuid needed for the follow-up "
-                "delivery tools (attach_invoice_to_allegro_order, send_invoice_to_ksef)."
+                "It STOPS THERE: the invoice is NOT attached to the Allegro order and NOT sent to KSeF. "
+                "Returns a share link for the user to review PLUS the invoice_uuid needed later by the "
+                "delivery tools (attach_invoice_to_allegro_order, send_invoice_to_ksef) — do NOT call "
+                "either of them in this turn, even if the request said 'wystaw i dodaj do Allegro' or "
+                "'wystaw i wyślij do KSeF'. Show the result, ask the user to check the invoice and "
+                "confirm, and wait for their answer."
             ),
             "parameters": {
                 "type": "object",
@@ -1115,7 +1119,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Requires BOTH the Allegro order_id and the inFakt invoice_uuid returned by an earlier "
                 "issue_invoice_for_order call in this conversation — never guess either ID; ask or look "
                 "it up if missing. Allegro allows only ONE PDF invoice per order — calling this twice "
-                "for the same order will fail."
+                "for the same order will fail. "
+                "ONLY call this once the user has confirmed, in their own words, that the issued invoice "
+                "is correct ('ok', 'faktura jest ok', 'dołącz ją'). NEVER in the same turn as "
+                "issue_invoice_for_order — the buyer sees the attached PDF the moment it lands, so an "
+                "invoice nobody has looked at must not go out; the tool refuses such a call anyway."
             ),
             "parameters": {
                 "type": "object",
@@ -1136,7 +1144,10 @@ ALLEGRO_TOOLS: list[dict] = [
                 "mandatory national e-invoicing system. Requires the inFakt invoice_uuid returned by an "
                 "earlier issue_invoice_for_order call in this conversation — never guess it. "
                 "Submission is asynchronous — this only confirms the request was accepted, final "
-                "processing must be checked in the inFakt panel. "
+                "processing must be checked in the inFakt panel, and it cannot be taken back. "
+                "ONLY call this once the user has confirmed, in their own words, that the issued invoice "
+                "is correct and is to go to KSeF. NEVER in the same turn as issue_invoice_for_order, even "
+                "if the original request said 'wystaw i wyślij do KSeF' — the tool refuses such a call. "
                 "Typically relevant for company (B2B) buyers; don't call it for a private-person buyer "
                 "unless the user explicitly asks for it."
             ),

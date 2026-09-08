@@ -9,14 +9,16 @@ time, because an invoice can be attached to an order by anyone at any moment and
 the seller is the one looking at it. Nothing here is allowed to stand in for
 that answer or to silence the invoice reminder.
 
-What it is for is the other direction: issuing and attaching are two calls
-against two different APIs, and the second one fails on its own (a token without
+What it is for is the other direction: issuing and attaching are two separate
+steps, and the gap between them is normal, not exceptional — attaching waits for
+the seller to confirm the invoice is correct (see services/infakt_service.py),
+and it can also fail on its own afterwards (a token without
 allegro:api:orders:write comes back 403, a PDF can be over Allegro's size
-limit). When that happens a real, numbered VAT invoice exists in inFakt while
-Allegro still reports the order as uninvoiced — correctly. Without a memory of
-the first call, the next "wystaw" would create a SECOND invoice for that order,
-which cannot be undone. So an issuance is written here, and the issuing path
-attaches the invoice it already has instead of making another one.
+limit). Either way a real, numbered VAT invoice exists in inFakt while Allegro
+still reports the order as uninvoiced — correctly. Without a memory of the first
+step, the next "wystaw" would create a SECOND invoice for that order, which
+cannot be undone. So an issuance is written here, and the issuing path points at
+the invoice it already has instead of making another one.
 """
 
 import json
@@ -61,10 +63,11 @@ async def record_issued(
 ) -> None:
     """Write down that an invoice for this order exists in inFakt.
 
-    Recorded even when the attachment to Allegro failed, and even when inFakt
-    accepted the job without confirming it in time: in both cases a real invoice
-    very probably exists, and the next "wystaw" must finish that one rather than
-    create a second.
+    Recorded as soon as the invoice is issued — normally with attached=False,
+    since the attachment waits for the seller's confirmation — and also when
+    inFakt accepted the job without confirming it in time: in every one of those
+    cases a real invoice very probably exists, and the next "wystaw" must point
+    at that one rather than create a second.
     """
     payload = {
         "invoice_uuid": invoice_uuid,

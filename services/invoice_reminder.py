@@ -538,7 +538,15 @@ async def _issue_all(user_id: str, state: dict) -> str:
     results = [await issue_invoice_for_order(allegro, order_id, is_production) for order_id in order_ids]
 
     await _resolve_state(user_id, state)
-    return f"Wystawiam {_count_phrase(len(order_ids))}:\n\n" + "\n\n---\n\n".join(results)
+    # Issuing is where this stops: nothing is attached to the Allegro orders and
+    # nothing goes to KSeF until the seller has looked at each invoice and said
+    # so — see services/infakt_service.issue_invoice_for_order_detailed.
+    return (
+        f"Wystawiam {_count_phrase(len(order_ids))}:\n\n"
+        + "\n\n---\n\n".join(results)
+        + "\n\n---\n\nSprawdź faktury pod linkami. Żadna nie trafiła jeszcze do zamówienia w "
+          "Allegro ani do KSeF — napisz, które mam dołączyć („dołącz fakturę do zamówienia `<id>`”)."
+    )
 
 
 async def _accept_already_issued(user_id: str, state: dict) -> str:
