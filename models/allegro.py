@@ -136,6 +136,33 @@ class AllegroOrder(BaseModel):
         return v if isinstance(v, dict) else {}
 
 
+class ThreadOrderMatch(BaseModel):
+    """Which order a buyer's message thread is about — see
+    AllegroService.resolve_thread_order.
+
+    A buyer asking "czy jest jeszcze możliwość wystawienia faktury do tej
+    transakcji" never names the transaction, so the order number has to come
+    from somewhere else: Allegro's own `relatedObject` tag on the message
+    (`source="message"`, exact), or, failing that, the buyer's order history
+    (`source="buyer_history"`, and only when they have exactly one order — one
+    order is an identification, several are a question for the seller).
+
+    `order_id` is empty whenever nothing could be pinned down; `candidates`
+    then holds what the buyer did order, newest first, for the seller to pick
+    from. Guessing is deliberately not an option — a wrong checkout-form id
+    would attach an invoice to somebody else's purchase.
+    """
+
+    buyer_login: str = ""
+    order_id: str = ""
+    source: str = ""  # "message" | "buyer_history" | "" (unresolved)
+    candidates: list[AllegroOrder] = Field(default_factory=list)
+
+    @property
+    def resolved(self) -> bool:
+        return bool(self.order_id)
+
+
 class AllegroMessage(BaseModel):
     thread_id: str
     message_id: str = ""

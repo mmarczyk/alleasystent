@@ -467,7 +467,10 @@ class AllegroAgent(BaseAgent):
         "(buyer, read status, last-message date), never the message text. Pass buyer_login and/or "
         "date ('dzisiaj'/'today' or 'YYYY-MM-DD') if you don't already have a thread_id from earlier "
         "in this conversation — the tool finds the matching thread for you, no need to call "
-        "get_message_threads first.\n"
+        "get_message_threads first. Its result also names the ORDER the message concerns, so a "
+        "buyer asking about 'ta transakcja' / 'to zamówienie' (a faktura, a return, a shipment) "
+        "is answered by calling get_thread_messages FIRST and then the order tool with THAT id — "
+        "never by asking the user for a UUID the message already carries.\n"
         "• New/recent customer returns, ANY status — 'nowe zwroty', 'jakie mam zwroty', 'czy są "
         "jakieś zwroty', 'ile zwrotów' → get_new_returns (count_only=true for a plain number "
         "question). NEVER confuse this with complaints/disputes even if the user's wording is loose.\n"
@@ -1896,6 +1899,94 @@ class AllegroAgent(BaseAgent):
             if carrier_upper.startswith(prefix):
                 return template.format(code=code)
         return None
+
+    async def _thread_order_block(
+        self,
+        thread_id: str,
+        messages: list[dict[str, Any]],
+        buyer_login: str = "",
+    ) -> str:
+        """Which order a message thread is about, appended under its text.
+
+        A buyer asking "czy jest jeszcze możliwość wystawienia faktury do tej
+        transakcji" names no transaction. Until the seller knows WHICH order
+        that is, they can do nothing about it — so reading the message and
+        hunting down the order number were two separate jobs, the second one
+        manual. AllegroService.resolve_thread_order does it from Allegro's own
+        `relatedObject` tag on the message (or, failing that, the buyer's order
+        history) and this block puts the answer where the question is.
+
+        It also puts the checkout-form id into the RENDERED text, which is the
+        only thing a later turn can see — conversation history carries the
+        rendered view, never tool arguments (see ConversationSession) — so
+        "wystaw do tego fakturę" as a follow-up has a real id to pass to
+        issue_invoice_for_order instead of a UUID the model would have to
+        invent.
+
+        Returns "" rather than raising: a lookup bolted onto message reading
+        must never cost the seller the message itself.
+        """
+        try:
+            match = await self._allegro.resolve_thread_order(
+                thread_id, messages=messages, buyer_login=buyer_login
+            )
+        except AllegroAPIError as exc:
+            logger.warning("thread order lookup failed for %s: %s", thread_id, exc)
+            return ""
+
+        if match.source == "message":
+            if match.candidates:
+                return "📦 **Zamówienie z tej wiadomości:** " + self._order_one_liner(
+                    match.candidates[0]
+                )
+            # The tag is the answer even when the order details would not load.
+            return (
+                f"📦 **Zamówienie z tej wiadomości:** `{match.order_id}` "
+                "(nie udało się pobrać szczegółów)"
+            )
+
+        if match.source == "buyer_history":
+            return (
+                "📦 **Zamówienie kupującego:** "
+                + self._order_one_liner(match.candidates[0])
+                + f"\nWiadomość nie ma podpiętego zamówienia — to jedyne zamówienie konta "
+                f"**{match.buyer_login}**."
+            )
+
+        if match.candidates:
+            shown = match.candidates[:5]
+            listing = "\n".join(f"- {self._order_one_liner(o)}" for o in shown)
+            more = "" if len(match.candidates) == len(shown) else f" (pokazuję {len(shown)} najnowszych)"
+            return (
+                "📦 **Wiadomość nie ma podpiętego zamówienia.** Konto "
+                f"**{match.buyer_login}** ma {len(match.candidates)} "
+                f"{self._plural_pl(len(match.candidates), 'zamówienie', 'zamówienia', 'zamówień')}"
+                f"{more} — którego dotyczy pytanie?\n{listing}"
+            )
+
+        # Nothing tagged and nothing bought: a pre-purchase question, or a buyer
+        # whose orders are outside what this token can read. Say so plainly —
+        # silence here reads as "there is no order", which is a different claim.
+        who = f" konta **{match.buyer_login}**" if match.buyer_login else ""
+        return (
+            f"📦 Nie udało się ustalić zamówienia dla tej wiadomości — brak "
+            f"podpiętego zamówienia i brak zamówień{who}."
+        )
+
+    def _order_one_liner(self, order: Any) -> str:
+        """One order as a single line: id, what it was, how much, when — enough
+        for the seller to recognise it, short enough to sit under a message."""
+        parts = [f"`{order.order_id}`"]
+        items = list(getattr(order, "line_items", []) or [])
+        if items:
+            what = items[0].offer_name
+            if len(items) > 1:
+                what += f" + {len(items) - 1} inne"
+            parts.append(what)
+        parts.append(self._format_price(order.total_price, order.currency))
+        if order.created_at:
+            parts.append(self._format_dt_pl(order.created_at))
+        return " — ".join(parts)
 
     async def _monitoring_status_block(self) -> str:
         """Deterministic (non-LLM) status + action button for automatic order checking.
@@ -4186,6 +4277,11 @@ class AllegroAgent(BaseAgent):
                 # buyer actually wrote.
                 lines.append(f"„{m.get('text', '')}”")
                 lines.append("")
+            # "N/A" is _dispatch's placeholder for a thread whose interlocutor
+            # Allegro did not name — not a login to look orders up by.
+            lines.append(await self._thread_order_block(
+                thread_id, messages, matched_buyer if matched_buyer not in (None, "N/A") else ""
+            ))
             return "\n".join(lines).rstrip()
 
         if tool_name == "get_account_info":
