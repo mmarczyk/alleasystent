@@ -1003,6 +1003,25 @@ class TestOrderValueFilter:
         assert "(przeszukano 100 ostatnich zamówień)" in result
 
     @pytest.mark.asyncio
+    async def test_a_count_off_a_full_page_says_so_too(self):
+        """A count is as wrong as a "brak": "masz 12 zamówień powyżej 500 zł"
+        read off a capped page is silently missing every match beyond it."""
+        agent = self._agent([self._order(f"o{i}", 900.00) for i in range(100)])
+
+        result = await agent._dispatch("get_orders", {"min_value": 500, "count_only": True})
+
+        assert "(przeszukano 100 ostatnich zamówień)" in result
+
+    @pytest.mark.asyncio
+    async def test_a_listing_off_a_full_page_opens_with_the_caveat(self):
+        agent = self._agent([self._order(f"o{i}", 900.00) for i in range(100)])
+
+        result = await agent._dispatch("get_orders", {"min_value": 500})
+
+        assert result.startswith("_Przeszukano 100 ostatnich zamówień._")
+        assert "**Zamówienie**" in result
+
+    @pytest.mark.asyncio
     async def test_a_short_page_makes_no_such_claim(self):
         agent = self._agent([self._order("small", 51.39)])
 

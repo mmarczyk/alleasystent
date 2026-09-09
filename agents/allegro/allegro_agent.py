@@ -3295,8 +3295,9 @@ class AllegroAgent(BaseAgent):
             limit=fetch_limit,
         )
         # A value filter narrows to a handful of orders out of a page of 100,
-        # so "brak zamówień" has to be able to mean "not among the 100 most
-        # recent" rather than "you never had one" — see _value_scan_note.
+        # so an answer built on it has to be able to say "out of the 100 most
+        # recent" rather than implying it saw everything — see value_scan_note
+        # below.
         scanned = len(orders)
         if exclude_fulfillment:
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
@@ -3335,16 +3336,17 @@ class AllegroAgent(BaseAgent):
         if scope:
             empty_msg = count_none = f"Brak zamówień{stage_note}{scope}."
         # Allegro cannot filter by amount, so a value question is answered from
-        # the page this call fetched. When that page came back full, "nothing
-        # matched" is only true of those orders — saying which is the
-        # difference between a real answer and a wrong one.
+        # the page this call fetched. When that page came back full, EVERY
+        # answer built on it is about those orders only — "nothing matched" may
+        # miss an order just outside the page, and so may a count ("masz 12"
+        # when the store had 40). Both say how far the search reached.
         value_scan_note = ""
         if (min_value is not None or max_value is not None) and scanned >= fetch_limit:
             value_scan_note = f" (przeszukano {scanned} ostatnich zamówień)"
         if tool_input.get("count_only"):
             return self._count_sentence(
                 len(orders), count_lead, count_forms, count_none, scope=scope
-            ) + (value_scan_note if not orders else "") + suffix
+            ) + value_scan_note + suffix
         if not orders:
             return empty_msg + value_scan_note + suffix
 
@@ -3399,6 +3401,11 @@ class AllegroAgent(BaseAgent):
                     f"**{self._format_price(total_delivery, currency)}**{detail}"
                 )
             body = summary + "\n\n---\n\n" + body
+        if value_scan_note:
+            # Leading, not trailing: a listing ends with the last order's link,
+            # and a caveat about what the search covered belongs before the
+            # results, not tacked on where it reads as part of that order.
+            body = f"_Przeszukano {scanned} ostatnich zamówień._\n\n" + body
         return body + suffix
 
     # ── Tool dispatch ─────────────────────────────────────────────────────────

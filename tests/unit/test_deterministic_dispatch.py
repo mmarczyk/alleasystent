@@ -469,6 +469,33 @@ class TestExtractValueBounds:
         assert extract_value_bounds(query) == {}
 
     @pytest.mark.parametrize("query", [
+        # "min" lives inside "termin" and "od" inside "przychód" — without a
+        # word boundary on the direction word, both grew a filter out of a
+        # number that had nothing to do with an order value.
+        "jaki mam termin 500 zł",
+        "przychód 500 zł w tym tygodniu",
+        "dochód 2000 zł",
+    ])
+    def test_a_direction_word_inside_another_word_is_not_a_direction(self, query):
+        assert extract_value_bounds(query) == {}
+
+    @pytest.mark.parametrize("query,expected", [
+        ("orders above 500 zł", {"min_value": 500.0}),
+        ("orders under 100 zł", {"max_value": 100.0}),
+        ("orders between 500 and 1000 zł", {"min_value": 500.0, "max_value": 1000.0}),
+    ])
+    def test_english_wording_too(self, query, expected):
+        """The assistant answers English questions as well, and the amount is
+        dropped just as readily there."""
+        assert extract_value_bounds(query) == expected
+
+    def test_a_backwards_explicit_range_is_read_as_the_range_it_describes(self):
+        """One range, one typo, one obvious meaning."""
+        assert extract_value_bounds("zamówienia od 100 zł do 50 zł") == {
+            "min_value": 50.0, "max_value": 100.0,
+        }
+
+    @pytest.mark.parametrize("query", [
         "dla tego zamówienia policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł",
         "ile zarobiłem, jeśli kupiłem po 8 zł za sztukę",
         "jaka marża przy koszcie zakupu 12 zł",

@@ -87,18 +87,24 @@ _UNIT_COST_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _VALUE_RANGE_RE = re.compile(
-    rf"(?:mi[ęe]dzy|od)\s+({_AMOUNT})\s*(?:{_CURRENCY})?\s+(?:a|do)\s+({_AMOUNT})\s*{_CURRENCY}",
+    rf"\b(?:mi[ęe]dzy|od|between|from)\s+({_AMOUNT})\s*(?:{_CURRENCY})?\s+"
+    rf"(?:a|do|and|to)\s+({_AMOUNT})\s*{_CURRENCY}",
     re.IGNORECASE,
 )
+# \b on the direction word is not cosmetic: without it "min" matched inside
+# "termin" and "od" inside "przychód", so "jaki mam termin 500 zł" silently
+# grew a min_value=500 filter.
 _VALUE_MIN_RE = re.compile(
-    rf"(?:ponad|powy[żz]ej|wi[ęe]cej\s+ni[żz]|wy[żz]sz\w*\s+ni[żz]|dro[żz]sz\w*\s+ni[żz]|"
-    rf"przekracza\w*|co\s+najmniej|nie\s+mniej\s+ni[żz]|min(?:imum)?\.?|od)\s+"
+    rf"\b(?:ponad|powy[żz]ej|wi[ęe]cej\s+ni[żz]|wy[żz]sz\w*\s+ni[żz]|dro[żz]sz\w*\s+ni[żz]|"
+    rf"przekracza\w*|co\s+najmniej|nie\s+mniej\s+ni[żz]|min(?:imum)?\.?|od|"
+    rf"above|over|more\s+than|at\s+least)\s+"
     rf"({_AMOUNT})\s*{_CURRENCY}",
     re.IGNORECASE,
 )
 _VALUE_MAX_RE = re.compile(
-    rf"(?:poni[żz]ej|mniej\s+ni[żz]|ni[żz]sz\w*\s+ni[żz]|ta[ńn]sz\w*\s+ni[żz]|"
-    rf"nie\s+wi[ęe]cej\s+ni[żz]|maks(?:ymalnie|ymalnie)?\.?|max\.?|do)\s+"
+    rf"\b(?:poni[żz]ej|mniej\s+ni[żz]|ni[żz]sz\w*\s+ni[żz]|ta[ńn]sz\w*\s+ni[żz]|"
+    rf"nie\s+wi[ęe]cej\s+ni[żz]|maks(?:ymalnie)?\.?|max\.?|do|"
+    rf"below|under|less\s+than|at\s+most|up\s+to)\s+"
     rf"({_AMOUNT})\s*{_CURRENCY}",
     re.IGNORECASE,
 )
@@ -139,6 +145,11 @@ def extract_value_bounds(query: str) -> dict[str, float]:
     if span:
         low, high = _parse_amount(span.group(1)), _parse_amount(span.group(2))
         if low is not None and high is not None:
+            # One explicit range, so a backwards "od 100 zł do 50 zł" is a typo
+            # with an obvious meaning — read it as the range it describes. (Two
+            # bounds read from two SEPARATE patterns are different: backwards
+            # there means one of them picked up an unrelated number, and that
+            # pair is dropped below rather than guessed at.)
             return {"min_value": min(low, high), "max_value": max(low, high)}
     bounds: dict[str, float] = {}
     lower = _VALUE_MIN_RE.search(query)
@@ -151,9 +162,9 @@ def extract_value_bounds(query: str) -> dict[str, float]:
         amount = _parse_amount(upper.group(1))
         if amount is not None:
             bounds["max_value"] = amount
-    # "od 500 zł do 1000 zł" written the long way matches both patterns above;
-    # a pair that came out backwards means one of them read the wrong number,
-    # and half a filter is worse than none.
+    # Two bounds from two independent patterns that come out backwards mean one
+    # of them read a number belonging to something else in the sentence — half
+    # a filter, or a wrong one, is worse than none.
     if len(bounds) == 2 and bounds["min_value"] > bounds["max_value"]:
         return {}
     return bounds
