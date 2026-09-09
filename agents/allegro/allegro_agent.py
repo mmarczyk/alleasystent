@@ -24,7 +24,11 @@ from agents.allegro.allegro_tools import (
     resolve_output_format,
     tools_for_labels,
 )
-from agents.allegro.deterministic_dispatch import resolve_deterministic, wants_latest_order_details
+from agents.allegro.deterministic_dispatch import (
+    extract_value_bounds,
+    resolve_deterministic,
+    wants_latest_order_details,
+)
 from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
@@ -836,6 +840,7 @@ class AllegroAgent(BaseAgent):
                 det_match = resolve_deterministic(query, query_labels)
         if det_match is not None:
             det_tool, det_input = det_match
+            det_input = self._with_value_bounds(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
             try:
@@ -972,6 +977,7 @@ class AllegroAgent(BaseAgent):
                         tool_input = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         tool_input = {}
+                    tool_input = self._with_value_bounds(tool_name, tool_input, query)
                     if tool_name == "get_message_threads":
                         # The user's wording overrides whatever the model decided for
                         # count_only (see _wants_message_count_only above).
@@ -1214,6 +1220,30 @@ class AllegroAgent(BaseAgent):
         if not orders:
             return "get_new_orders", {"limit": 1}
         return "get_order_details", {"order_id": orders[0].order_id}
+
+    def _with_value_bounds(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
+        """Put an order amount the seller stated back onto an order listing the
+        model called without it.
+
+        The amount is the filter a model drops most readily, and dropping it is
+        invisible: the listing comes back full and reads like an answer ("ile
+        kosztowała dostawa zamówienia na kwotę ponad 2000 zł" → 100 unrelated
+        orders grouped by courier). The wording is unambiguous enough to read
+        in Python (see extract_value_bounds), so it is read there instead of
+        being left to the model's discretion.
+
+        Only ever ADDS: a bound the model passed itself stays untouched, and a
+        query stating no amount changes nothing.
+        """
+        if tool_name not in self._ORDERS_PRESETS:
+            return tool_input
+        if tool_input.get("min_value") is not None or tool_input.get("max_value") is not None:
+            return tool_input
+        bounds = extract_value_bounds(query)
+        if not bounds:
+            return tool_input
+        logger.info("[allegro] value bounds read from the query: %s (%s)", bounds, tool_name)
+        return {**tool_input, **bounds}
 
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:
