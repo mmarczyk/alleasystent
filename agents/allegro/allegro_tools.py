@@ -1139,8 +1139,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "or given directly by the user). If you don't have a concrete order_id in context, ask "
                 "the user for it or look it up first — never guess or invent one. "
                 "This creates a real, numbered invoice in inFakt — it is not easily reversible. "
-                "Returns a share link for manual review PLUS the invoice_uuid needed for the follow-up "
-                "delivery tools (attach_invoice_to_allegro_order, send_invoice_to_ksef)."
+                "It STOPS at inFakt: it does NOT attach the invoice to the Allegro order and does NOT "
+                "send it to KSeF, so the seller can check it first. Returns a share link for that "
+                "review PLUS the invoice_uuid needed for the follow-up delivery tools "
+                "(attach_invoice_to_allegro_order, send_invoice_to_ksef) — never call either of them "
+                "in the same turn as this one, even if the user asked for both at once."
             ),
             "parameters": {
                 "type": "object",
@@ -1158,18 +1161,29 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Download the invoice PDF from inFakt and attach it to the corresponding Allegro order, "
                 "so the buyer can see/download it directly from their Allegro order page. "
-                "Requires BOTH the Allegro order_id and the inFakt invoice_uuid returned by an earlier "
-                "issue_invoice_for_order call in this conversation — never guess either ID; ask or look "
-                "it up if missing. Allegro allows only ONE PDF invoice per order — calling this twice "
-                "for the same order will fail."
+                "IRREVERSIBLE and visible to the buyer immediately, so call it ONLY when the user asks "
+                "for it in the CURRENT message ('dołącz fakturę do zamówienia X') or confirms your own "
+                "question about attaching ('ok', 'wygląda dobrze'). Never on the same turn that issued "
+                "the invoice — the user has not read it yet — and never on your own initiative. "
+                "Requires the Allegro order_id; invoice_uuid is optional — pass the one an earlier "
+                "issue_invoice_for_order returned in this conversation, or leave it out and the invoice "
+                "recorded for that order is used. Never guess a UUID. "
+                "Allegro allows only ONE PDF invoice per order — calling this twice for the same order "
+                "will fail."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
-                    "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                    "invoice_uuid": {
+                        "type": "string",
+                        "description": (
+                            "inFakt invoice UUID from issue_invoice_for_order. Optional — omit it "
+                            "rather than guessing; the invoice recorded for this order is used."
+                        ),
+                    },
                 },
-                "required": ["order_id", "invoice_uuid"],
+                "required": ["order_id"],
             },
         },
     },

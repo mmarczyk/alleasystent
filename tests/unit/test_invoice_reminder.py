@@ -669,12 +669,115 @@ class TestSellerSaysItIsAlreadyIssued:
 
 class TestRemindingIsAllegrosCallAlone:
     """The reminder must never suppress itself from internal state — an invoice
-    can be attached to an order by anyone at any moment, and only Allegro knows."""
+    can be attached to an order by anyone at any moment, and only Allegro knows.
 
-    def test_the_reminder_does_not_consult_the_issuance_ledger(self):
-        import inspect
+    What our own record is allowed to decide is what the reminder ASKS FOR. An
+    invoice that exists in inFakt and is only waiting for the seller to confirm
+    it needs attaching, not issuing — and "wystawić je teraz?" for one of those
+    is how a second, irreversible VAT invoice gets created."""
 
+    @pytest.mark.asyncio
+    async def test_an_order_awaiting_confirmation_is_still_reminded_about(self):
+        """Allegro has no PDF on the order, so the order is still pending —
+        whatever our ledger says about it."""
         from services import invoice_reminder
 
-        source = inspect.getsource(invoice_reminder)
-        assert "invoice_ledger" not in source
+        with patch.object(invoice_reminder, "_notify", AsyncMock()) as notify:
+            await invoice_reminder._ask(
+                "u1", ["o1"], {"o1"}, again=False, awaiting_duration=False,
+            )
+
+        assert "`o1`" in notify.await_args.kwargs["chat_text"]
+
+    def test_the_ask_for_it_is_about_attaching_not_issuing(self):
+        from services.invoice_reminder import _build_ask_text
+
+        text = _build_ask_text(["o1"], {"o1"}, again=False, awaiting_duration=False)
+
+        assert "do dołączenia" in text
+        assert "Wystawić" not in text
+        assert "dołącz fakturę do zamówienia" in text
+
+    def test_a_mixed_batch_asks_for_each_half_separately(self):
+        from services.invoice_reminder import _build_ask_text
+
+        text = _build_ask_text(["o1", "o2"], {"o2"}, again=False, awaiting_duration=False)
+        issue_part, attach_part = text.split("📄")
+
+        assert "`o1`" in issue_part and "`o2`" not in issue_part
+        assert "Wystawić je teraz?" in issue_part
+        assert "`o2`" in attach_part
+
+    def test_an_empty_ledger_leaves_the_ask_exactly_as_it_was(self):
+        """The ledger is unreachable often enough (Redis down, no URL set) that
+        this has to degrade to the plain "wystawić?" ask, never to silence."""
+        from services.invoice_reminder import _build_ask_text
+
+        assert _build_ask_text(["o1"], set(), again=False, awaiting_duration=False) == (
+            _build_ask_text(["o1"], None, again=False, awaiting_duration=False)
+        )
+        assert "Wystawić je teraz?" in _build_ask_text(
+            ["o1"], set(), again=False, awaiting_duration=False
+        )
+
+    def test_the_attach_ask_reads_back_as_the_reminders_own_question(self):
+        """Otherwise the seller's "tak" to it falls through to normal routing
+        and the reminder keeps waiting for an answer it already got."""
+        from services.invoice_reminder import _build_ask_text, _reminder_owns_reply
+
+        text = _build_ask_text(["o1"], {"o1"}, again=False, awaiting_duration=False)
+
+        assert _reminder_owns_reply("tak", text) is True
+
+    @pytest.mark.asyncio
+    async def test_asking_to_attach_is_left_to_normal_routing(self):
+        """Attaching is the seller-confirmed step and belongs to the Allegro
+        agent's tool — this module classifying it as "issue" would answer a
+        request to attach with a message about issuing."""
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"]}
+        classify = AsyncMock(return_value=("issue", 0))
+        issue_all = AsyncMock()
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", classify), \
+             patch.object(invoice_reminder, "_issue_all", issue_all):
+            out = await invoice_reminder.handle_reply(
+                "user1", "dołącz fakturę do zamówienia o1", None
+            )
+
+        assert out is None
+        classify.assert_not_awaited()
+        issue_all.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_yes_to_the_attach_ask_is_handed_to_the_agent_not_reissued(self):
+        """The reminder asked for the seller's OK to attach; answering "tak"
+        with "faktura już jest wystawiona" would strand them in a loop."""
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1"]}
+        issue_all = AsyncMock()
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", AsyncMock(return_value=("issue", 0))), \
+             patch.object(invoice_reminder, "_awaiting_attach", AsyncMock(return_value={"o1"})), \
+             patch.object(invoice_reminder, "_issue_all", issue_all):
+            out = await invoice_reminder.handle_reply("user1", "tak", None)
+
+        assert out is None
+        issue_all.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_yes_still_issues_when_something_is_actually_missing(self):
+        from services import invoice_reminder
+
+        state = {"status": "awaiting_response", "order_ids": ["o1", "o2"]}
+        issue_all = AsyncMock(return_value="Wystawiam 2 faktury:")
+        with patch.object(invoice_reminder, "get_pending_state", AsyncMock(return_value=state)), \
+             patch.object(invoice_reminder, "_classify_reply", AsyncMock(return_value=("issue", 0))), \
+             patch.object(invoice_reminder, "_awaiting_attach", AsyncMock(return_value={"o2"})), \
+             patch.object(invoice_reminder, "_issue_all", issue_all):
+            out = await invoice_reminder.handle_reply("user1", "tak", None)
+
+        issue_all.assert_awaited_once()
+        assert out == "Wystawiam 2 faktury:"

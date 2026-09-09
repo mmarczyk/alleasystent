@@ -85,7 +85,8 @@ _ASK_DURATION_TEXT = "Jasne — na jak długo mam odłożyć przypomnienie o fak
 # identically-shaped follow-up (services/message_reminder.py), so a "2 godziny"
 # meant for that one was read here and snoozed the wrong reminder.
 _OWN_ASK_RE = re.compile(
-    r"niewystawion\w*\s+faktur|od[łl]o[żz]y[ćc]\s+przypomnienie\s+o\s+faktur",
+    r"niewystawion\w*\s+faktur|od[łl]o[żz]y[ćc]\s+przypomnienie\s+o\s+faktur|"
+    r"faktur\w*\s+do\s+do[łl][ąa]czenia",
     re.IGNORECASE,
 )
 
@@ -120,6 +121,18 @@ _READ_ONLY_RE = re.compile(
 # ("sprawdź i wystaw je"), because the seller did ask for the write.
 _ISSUE_COMMAND_RE = re.compile(
     r"\bwystaw\b|\bwystawcie\b|\bwystawmy\b|\bwystawia[jm]\b|\b(?:za)?fakturuj",
+    re.IGNORECASE,
+)
+
+
+# Attaching an already-issued invoice to the Allegro order is the one thing the
+# reminder must NOT do itself. It is the step the BUYER sees, it cannot be taken
+# back, and it is allowed only on the seller's explicit word — which is checked
+# against the seller's actual message in AllegroAgent._attach_invoice_to_allegro_order,
+# not inferred from a "tak" by this module's classifier. So a message that asks
+# for the attachment falls through to normal routing, where that tool runs.
+_ATTACH_COMMAND_RE = re.compile(
+    r"do[łl][ąa]cz|za[łl][ąa]cz|podepnij|wgraj",
     re.IGNORECASE,
 )
 
@@ -240,15 +253,19 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
         return
 
     order_ids = [o.order_id for o in orders]
+    awaiting_attach = await _awaiting_attach(user_id, order_ids)
 
     if status == _STATUS_IDLE:
-        await _ask(user_id, order_ids, again=False, awaiting_duration=False)
+        await _ask(user_id, order_ids, awaiting_attach, again=False, awaiting_duration=False)
         new_status = _STATUS_AWAITING_RESPONSE
         new_reminder_count = 1
     else:
         # Still waiting on a reply from last time — the seller either never
         # answered at all, or was asked "for how long?" and never said.
-        await _ask(user_id, order_ids, again=True, awaiting_duration=(status == _STATUS_AWAITING_DURATION))
+        await _ask(
+            user_id, order_ids, awaiting_attach,
+            again=True, awaiting_duration=(status == _STATUS_AWAITING_DURATION),
+        )
         new_status = status
         new_reminder_count = reminder_count + 1
 
@@ -260,6 +277,27 @@ async def _poll_user(r, user_id: str, now: datetime) -> None:
 
 
 # ── Messaging ────────────────────────────────────────────────────────────────
+
+async def _awaiting_attach(user_id: str, order_ids: list[str]) -> set[str]:
+    """Of the orders Allegro reports as having no invoice, the ones whose
+    invoice we already created in inFakt and that are only waiting for the
+    seller to confirm it before it goes to the buyer.
+
+    This never removes an order from the reminder — Allegro's answer is the
+    only thing that decides whether an order still needs an invoice, and an
+    order without the PDF on it genuinely still does (see the class comment in
+    tests/unit/test_invoice_reminder.py). What it decides is what to ASK for:
+    telling a seller to "wystaw fakturę" for an invoice that already exists is
+    how a second, irreversible VAT invoice gets created.
+    """
+    from services import invoice_ledger
+
+    records = await invoice_ledger.get_records(user_id, order_ids)
+    return {
+        oid for oid, rec in records.items()
+        if rec.get("invoice_uuid") and not rec.get("attached")
+    }
+
 
 def _pending_invoice_phrase(count: int) -> str:
     return "1 niewystawioną fakturę" if count == 1 else f"{count} niewystawionych faktur"
@@ -276,29 +314,77 @@ def _format_order_ids(order_ids: list[str]) -> str:
     return shown
 
 
-def _build_ask_text(order_ids: list[str], again: bool, awaiting_duration: bool) -> str:
+def _attach_only_text(order_ids: list[str]) -> str:
+    """Every pending order already has its invoice — all that is missing is the
+    seller's OK to put it on the order."""
+    ids_str = _format_order_ids(order_ids)
+    what = "Faktura jest" if len(order_ids) == 1 else "Faktury są"
+    return (
+        f"🧾 Masz faktury do dołączenia: {ids_str}. {what} już wystawione w inFakt, ale "
+        "Allegro nadal nie widzi ich na zamówieniu, bo czekają na Twoje potwierdzenie.\n\n"
+        "Sprawdź fakturę i napisz „dołącz fakturę do zamówienia `<id>`” — wtedy ją dołączę "
+        "i kupujący ją zobaczy."
+    )
+
+
+def _attach_block(order_ids: list[str]) -> str:
+    """The same thing, appended to an ask that is mostly about orders with no
+    invoice at all."""
+    return (
+        f"📄 Osobno — faktury do dołączenia: {_format_order_ids(order_ids)}. Te są już "
+        "wystawione w inFakt i czekają tylko na Twoje potwierdzenie („dołącz fakturę do "
+        "zamówienia `<id>`”)."
+    )
+
+
+def _build_ask_text(
+    order_ids: list[str],
+    awaiting_attach: set[str] | None,
+    again: bool,
+    awaiting_duration: bool,
+) -> str:
+    awaiting_attach = awaiting_attach or set()
+    to_attach = [oid for oid in order_ids if oid in awaiting_attach]
+    order_ids = [oid for oid in order_ids if oid not in awaiting_attach]
+
+    # Nothing left to issue — asking "wystawić je teraz?" here would be asking
+    # for a duplicate of an invoice that already exists.
+    if not order_ids:
+        return _attach_only_text(to_attach)
+
+    tail = "\n\n" + _attach_block(to_attach) if to_attach else ""
     phrase = _pending_invoice_phrase(len(order_ids))
     ids_str = _format_order_ids(order_ids)
 
     if not again:
         return (
             f"🧾 Masz {phrase} dla już wysłanych zamówień: {ids_str}.\n\n"
-            "Wystawić je teraz?"
+            "Wystawić je teraz?" + tail
         )
     if awaiting_duration:
         return (
             f"🧾 Ponownie Ci przypominam o {phrase} do wystawienia ({ids_str}) — "
             "na jak długo mam odłożyć to przypomnienie? Albo napisz „wystaw”, "
-            "jeśli chcesz zrobić to teraz."
+            "jeśli chcesz zrobić to teraz." + tail
         )
     return (
         f"🧾 Ponownie Ci przypominam: nadal masz {phrase} dla wysłanych zamówień "
-        f"({ids_str}). Wystawić je teraz?"
+        f"({ids_str}). Wystawić je teraz?" + tail
     )
 
 
-async def _ask(user_id: str, order_ids: list[str], again: bool, awaiting_duration: bool) -> None:
-    await _notify(user_id, chat_text=_build_ask_text(order_ids, again, awaiting_duration))
+async def _ask(
+    user_id: str,
+    order_ids: list[str],
+    awaiting_attach: set[str] | None = None,
+    *,
+    again: bool,
+    awaiting_duration: bool,
+) -> None:
+    await _notify(
+        user_id,
+        chat_text=_build_ask_text(order_ids, awaiting_attach, again, awaiting_duration),
+    )
 
 
 async def _notify(user_id: str, chat_text: str) -> None:
@@ -388,6 +474,7 @@ async def refresh_pending_message(user_id: str, queued_text: str) -> str | None:
     await _update_pending_orders(user_id, state, order_ids)
     return _build_ask_text(
         order_ids,
+        await _awaiting_attach(user_id, order_ids),
         again=state.get("reminder_count", 0) > 1,
         awaiting_duration=state.get("status") == _STATUS_AWAITING_DURATION,
     )
@@ -481,6 +568,16 @@ async def handle_reply(
         )
         return None
 
+    # "Dołącz fakturę do zamówienia X" is an answer to this reminder, but not one
+    # this module can carry out: attaching is the seller-confirmed step and lives
+    # in the Allegro agent's tool (see _ATTACH_COMMAND_RE above).
+    if _ATTACH_COMMAND_RE.search(text):
+        logger.info(
+            "Invoice reminder: user=%s asked to ATTACH an invoice — left to normal routing",
+            user_id,
+        )
+        return None
+
     # Asking to SEE the pending invoices is not asking for them to be issued.
     # Decided here rather than by the classifier because the classifier got
     # exactly this wrong ("Pokaż mi faktury do wystawienia" → ISSUE → 2 real
@@ -499,6 +596,18 @@ async def handle_reply(
         return None
 
     if action == "issue":
+        pending = state.get("order_ids", [])
+        awaiting_attach = await _awaiting_attach(user_id, pending)
+        if pending and set(pending) <= awaiting_attach:
+            # Every invoice already exists — what the reminder asked for was the
+            # seller's OK to ATTACH them, so "tak" here is that confirmation and
+            # belongs to the Allegro agent's tool, not to _issue_all (which
+            # would answer a confirmation with "faktura już jest wystawiona").
+            logger.info(
+                "Invoice reminder: user=%s confirmed attaching — left to normal routing",
+                user_id,
+            )
+            return None
         return await _issue_all(user_id, state)
 
     if action == "already_issued":
@@ -538,7 +647,13 @@ async def _issue_all(user_id: str, state: dict) -> str:
     results = [await issue_invoice_for_order(allegro, order_id, is_production) for order_id in order_ids]
 
     await _resolve_state(user_id, state)
-    return f"Wystawiam {_count_phrase(len(order_ids))}:\n\n" + "\n\n---\n\n".join(results)
+    return (
+        f"Wystawiam {_count_phrase(len(order_ids))}:\n\n"
+        + "\n\n---\n\n".join(results)
+        + "\n\n---\n\nŻadnej z nich nie dołączyłem jeszcze do zamówienia w Allegro — "
+        "kupujący ich na razie nie widzą. Sprawdź je pod linkami i napisz „dołącz fakturę do "
+        "zamówienia `<id>`” dla każdej, która jest w porządku."
+    )
 
 
 async def _accept_already_issued(user_id: str, state: dict) -> str:

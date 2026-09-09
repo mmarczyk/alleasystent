@@ -34,7 +34,7 @@ async def run_case(case: Case) -> dict:
     api_calls: list[str] = []
     try:
         async with tool_harness(monitors=case.monitors, empty=case.empty) as h:
-            output = await h.run(case.tool, dict(case.args))
+            output = await h.run(case.tool, dict(case.args), case.question)
             api_calls = [f"{m} {p}" for m, p, _ in h.allegro_api.calls]
             api_calls += [f"{m} inFakt{p}" for m, p in h.infakt_api.calls]
     except Exception as exc:  # noqa: BLE001 — the report wants the failure, not a traceback

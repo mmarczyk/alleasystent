@@ -56,6 +56,40 @@ _MESSAGE_LIST_OVERRIDE_RE = re.compile(
 _MESSAGE_QUESTION_WORD_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
 _MESSAGE_TOPIC_WORD_RE = re.compile(r"wiadomo", re.IGNORECASE)
 
+# ── Attaching an invoice to an Allegro order: the seller's word, every time ──
+# Attaching is the step the buyer sees: the PDF lands on their order page the
+# moment it uploads, Allegro takes one invoice per order, and nothing here can
+# take it back. So it never rides along with the issuance that produced the
+# invoice (see infakt_service.issue_invoice_for_order) and never happens on a
+# turn where the seller did not ask for it — the model's judgement of "the user
+# seemed happy with it" is exactly the guess this codebase has been bitten by
+# before (the ambiguous "tak" that issued two real invoices, see
+# services/invoice_reminder.py's module docstring).
+#
+# Two ways to authorize it, both the seller's own words:
+#   1. they name the action in THIS message ("dołącz fakturę do zamówienia X"),
+#   2. they confirm it ("ok", "zgadza się") right after the assistant asked
+#      about attaching — the same last-assistant-turn test the invoice reminder
+#      uses to tell its own question apart from everyone else's.
+_ATTACH_INSTRUCTION_RE = re.compile(
+    r"do[łl][ąa]cz|za[łl][ąa]cz|podepnij|wgraj|dodaj\s+(?:t[ęe]\s+|j[ąa]\s+)?faktur",
+    re.IGNORECASE,
+)
+_INVOICE_CONFIRMATION_RE = re.compile(
+    r"\b(ok|okej|oki|okey|dobrze|dobra|tak|potwierdzam|akceptuj[ęe]|zgadza\s+si[ęe]|"
+    r"wygl[ąa]da\s+(?:dobrze|ok)|jest\s+(?:ok|dobrze)|wszystko\s+(?:ok|dobrze|gra))\b",
+    re.IGNORECASE,
+)
+# The assistant's own "shall I attach it?" — either the ask the model makes
+# ("Dołączyć fakturę do zamówienia w Allegro?") or the "napisz „dołącz fakturę
+# do zamówienia …”" line every issuance ends with. Deliberately narrow: it must
+# name the ACTION, because "ok" against a message that merely mentions an
+# invoice and an order is not an answer to a question nobody asked.
+_ASSISTANT_ASKED_ATTACH_RE = re.compile(
+    r"(?:do[łl][ąa]cz|za[łl][ąa]cz|podepn)\w*\s+(?:j[ąa]\s+|t[ęe]\s+)?faktur",
+    re.IGNORECASE,
+)
+
 # ── "…z konta np1988": one named buyer vs the whole period ──────────────────
 # buyer_login is the only filter in the tool list that narrows an answer to ONE
 # buyer account, and these are the tools that answer for a whole PERIOD with no
@@ -505,22 +539,30 @@ class AllegroAgent(BaseAgent):
         "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
         "never issue_invoice_for_order or preview_pending_invoices for a yes/no question.\n"
         "AFTER ISSUING AN INVOICE (issue_invoice_for_order succeeded) — delivering it further:\n"
+        "  - issue_invoice_for_order creates the invoice in inFakt and STOPS THERE. It does NOT "
+        "attach anything to the Allegro order and does not send anything to KSeF. Say so in your "
+        "reply, show the share link, and ask the user to check the invoice.\n"
+        "  - NEVER call attach_invoice_to_allegro_order or send_invoice_to_ksef in the same turn as "
+        "issue_invoice_for_order — not even when the user's original request said 'wystaw i dodaj do "
+        "Allegro' or 'wystaw i wyślij do KSeF'. Delivery shows the invoice to the buyer / files it "
+        "with the tax office and cannot be undone, so it waits for the user to look at the issued "
+        "invoice first. Issue it, then ask; the code enforces this and will refuse a same-turn call.\n"
         "  - attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
-        "Allegro order, so the buyer sees it on their order page. Needs order_id + invoice_uuid "
-        "(invoice_uuid comes from the issue_invoice_for_order result earlier in this conversation — "
-        "never guess it, call ask_clarifying_question if it's not in context).\n"
+        "Allegro order, so the buyer sees it on their order page. Call it ONLY on a later turn in "
+        "which the user asks for it ('dołącz fakturę do zamówienia X') or confirms your question "
+        "about attaching ('ok', 'faktura jest ok', 'wygląda dobrze'). Needs order_id; invoice_uuid is "
+        "optional — pass it when the issue_invoice_for_order result earlier in this conversation gave "
+        "it to you, otherwise leave it out and it is looked up for that order. Never guess a UUID.\n"
         "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
-        "invoice_uuid, same rule — never guess it, call ask_clarifying_question instead.\n"
-        "  - If the user's ORIGINAL request already named the channel(s) ('wystaw i wyślij do KSeF i "
-        "Allegro', 'wystaw i dodaj do Allegro') — just call the matching tool(s) directly, no need to ask.\n"
-        "  - Otherwise: once the user confirms the issued invoice looks fine ('ok', 'faktura jest ok', "
-        "'wygląda dobrze') and hasn't named a channel yet, call get_order_invoice_data for that order to "
-        "check whether the buyer is a company or private person, then ASK in your reply: "
+        "invoice_uuid — never guess it, call ask_clarifying_question instead. Same rule: only after "
+        "the user asks for it on a later turn.\n"
+        "  - So: once the user confirms the issued invoice looks fine and hasn't named a channel yet, "
+        "call get_order_invoice_data for that order to check whether the buyer is a company or a "
+        "private person, then ASK in your reply: "
         "for a company buyer — 'Wysłać fakturę do KSeF i dołączyć ją do zamówienia w Allegro?'; "
         "for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' (don't default to KSeF for "
         "a private person — only call send_invoice_to_ksef for one if the user explicitly asks). "
-        "Only call the delivery tool(s) after the user answers that question, unless they already "
-        "specified the channel(s) upfront as above.\n"
+        "Only call the delivery tool(s) after the user answers that question.\n"
         "BILLING ROUTING: "
         "1) Specific order costs, delivery cost of a specific order included → ALWAYS "
         "get_order_details (uses order.id filter, exact results). "
@@ -740,6 +782,14 @@ class AllegroAgent(BaseAgent):
         super().__init__()
         self.model_override = self._settings.gemini_model_fast
         self._allegro = AllegroService.get_instance(user_id)
+        # Per-turn, reset at the top of run(): this instance is cached per user
+        # by the orchestrator, so anything left here would leak into the next
+        # turn — and one of these decides whether an invoice may be shown to a
+        # buyer (see _attach_invoice_to_allegro_order).
+        self._issued_this_turn: set[str] = set()
+        self._issued_an_invoice_this_turn: bool = False
+        self._current_query: str = ""
+        self._last_assistant_text: str = ""
 
     async def run(
         self,
@@ -750,6 +800,20 @@ class AllegroAgent(BaseAgent):
         from agents.base_agent import _call_for_reply, _call_with_retry
 
         perf = StageTimer("allegro_agent.run")
+
+        # What the seller actually said this turn, and what they were answering.
+        # Read by the attachment guard — never by anything that formats data.
+        self._issued_this_turn = set()
+        self._issued_an_invoice_this_turn = False
+        self._current_query = query
+        self._last_assistant_text = next(
+            (
+                m.get("content") or ""
+                for m in reversed(conversation_history or [])
+                if m.get("role") == "assistant"
+            ),
+            "",
+        )
 
         # ── Auth guard ────────────────────────────────────────────────────────
         with perf.stage("auth_check"):
@@ -2892,20 +2956,49 @@ class AllegroAgent(BaseAgent):
 
         Delegates to services.infakt_service.issue_invoice_for_order, which is
         also called (once per order, same one-at-a-time path) by the invoice
-        reminder's "issue now" action — see services/invoice_reminder.py.
+        reminder's "issue now" action — see services/invoice_reminder.py. That
+        function stops at inFakt: the invoice reaches the buyer's Allegro order
+        page only through _attach_invoice_to_allegro_order, and only once the
+        seller has looked at it and said so.
         """
         from services.infakt_service import issue_invoice_for_order
 
-        return await issue_invoice_for_order(self._allegro, order_id, self._settings.is_production)
+        result = await issue_invoice_for_order(self._allegro, order_id, self._settings.is_production)
+        # Remembered so that neither delivery step can happen on this same turn,
+        # whatever the model decides to call next — the seller has not seen the
+        # invoice yet.
+        self._issued_this_turn.add(order_id)
+        self._issued_an_invoice_this_turn = True
+        return result
 
-    async def _attach_invoice_to_allegro_order(self, order_id: str, invoice_uuid: str) -> str:
-        """Fetch the invoice PDF from inFakt and attach it to the Allegro order.
+    def _attach_authorized_by_seller(self) -> bool:
+        """Did the seller, in this turn, actually ask for the invoice to go to
+        the buyer? See _ATTACH_INSTRUCTION_RE for why this is decided here and
+        not left to the model."""
+        if _ATTACH_INSTRUCTION_RE.search(self._current_query or ""):
+            return True
+        return bool(
+            _INVOICE_CONFIRMATION_RE.search(self._current_query or "")
+            and _ASSISTANT_ASKED_ATTACH_RE.search(self._last_assistant_text or "")
+        )
+
+    async def _attach_invoice_to_allegro_order(
+        self, order_id: str, invoice_uuid: str | None = None
+    ) -> str:
+        """Fetch the invoice PDF from inFakt and attach it to the Allegro order,
+        once the seller has confirmed the invoice is correct.
 
         Allegro takes up to 10 PDF invoices per order (3 MB each) via a
         two-step API: POST registers the invoice metadata, PUT uploads the
         actual file bytes against the id from that response. Both steps need
         the SCOPE_ORDERS_WRITE scope — without it they answer 403, which is
         the "brak uprawnień" the seller sees.
+
+        The two guards in front of that are the point of this method: the buyer
+        sees the PDF as soon as it lands, so the upload waits for a turn in
+        which the seller asked for it, and never happens on the turn that issued
+        the invoice — the seller cannot have checked a document they were shown
+        a second ago.
         """
         from services import invoice_ledger
         from services.infakt_service import (
@@ -2913,6 +3006,38 @@ class AllegroAgent(BaseAgent):
             InvoiceTooLargeError,
             attach_invoice_to_order,
         )
+
+        user_id = invoice_ledger.user_id_of(self._allegro)
+
+        if order_id in self._issued_this_turn:
+            return (
+                f"⏸️ Nie dołączam faktury do zamówienia `{order_id}` w tej samej wiadomości, "
+                "w której ją wystawiłem — kupujący zobaczy ją natychmiast, a Allegro przyjmuje "
+                "jedną fakturę na zamówienie, więc pomyłki nie da się cofnąć. Sprawdź fakturę "
+                f"pod linkiem powyżej i napisz „dołącz fakturę do zamówienia `{order_id}`”."
+            )
+
+        if not self._attach_authorized_by_seller():
+            return (
+                f"⏸️ Nie dołączam faktury do zamówienia `{order_id}` bez Twojego wyraźnego "
+                "polecenia — to krok, który pokazuje fakturę kupującemu i jest nieodwracalny. "
+                f"Napisz „dołącz fakturę do zamówienia `{order_id}`”, kiedy ją sprawdzisz."
+            )
+
+        if not invoice_uuid:
+            # The seller says "dołącz fakturę do zamówienia X" without an ID —
+            # which is the normal case when the invoice was issued hours ago or
+            # from another conversation thread. The ledger knows which invoice
+            # belongs to this order; asking the model to remember it is how a
+            # wrong UUID gets attached to the wrong order.
+            record = await invoice_ledger.get_record(user_id, order_id) or {}
+            invoice_uuid = record.get("invoice_uuid") or ""
+            if not invoice_uuid:
+                return (
+                    f"❓ Nie mam zapisanej faktury dla zamówienia `{order_id}` — nie wiem, "
+                    "który plik miałbym dołączyć. Podaj ID faktury z inFakt albo wystaw ją "
+                    f"najpierw („wystaw fakturę dla zamówienia `{order_id}`”)."
+                )
 
         try:
             number = await attach_invoice_to_order(self._allegro, order_id, invoice_uuid)
@@ -2950,14 +3075,27 @@ class AllegroAgent(BaseAgent):
 
         # The ledger is what stops the invoice reminder nagging about an order
         # whose invoice only reached Allegro on this second, manual step.
-        await invoice_ledger.mark_attached(
-            invoice_ledger.user_id_of(self._allegro), order_id, number=number,
-        )
+        await invoice_ledger.mark_attached(user_id, order_id, number=number)
         return f"✅ Faktura {number or invoice_uuid} dołączona do zamówienia `{order_id}` w Allegro — kupujący zobaczy ją na stronie zamówienia."
 
     async def _send_invoice_to_ksef(self, invoice_uuid: str) -> str:
-        """Submit an already-issued inFakt invoice to KSeF."""
+        """Submit an already-issued inFakt invoice to KSeF.
+
+        Filing with the tax office is as final as showing the invoice to the
+        buyer, so it gets the same same-turn block as
+        _attach_invoice_to_allegro_order: an invoice issued a second ago has not
+        been read by anyone. Which invoices go to KSeF at all is still the
+        model's routing decision from the system prompt (companies yes, private
+        buyers only on request) — this only stops it happening unseen.
+        """
         from services.infakt_service import InfaktAPIError, InfaktService
+
+        if self._issued_an_invoice_this_turn:
+            return (
+                f"⏸️ Nie wysyłam faktury `{invoice_uuid}` do KSeF w tej samej wiadomości, "
+                "w której ją wystawiłem — do KSeF wysyła się raz. Sprawdź ją pod linkiem "
+                "powyżej i napisz „wyślij fakturę do KSeF”, kiedy będzie w porządku."
+            )
 
         infakt = InfaktService.get_instance()
         try:
@@ -4328,7 +4466,7 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "attach_invoice_to_allegro_order":
             return await self._attach_invoice_to_allegro_order(
-                tool_input["order_id"], tool_input["invoice_uuid"]
+                tool_input["order_id"], tool_input.get("invoice_uuid")
             )
 
         if tool_name == "send_invoice_to_ksef":
