@@ -891,8 +891,166 @@ class TestDeliveryCosts:
         assert "- Koszt dostawy: 14,99 PLN" in result
         assert (
             "- Koszt dostawy zapłacony przez kupujących: **24,98 PLN** "
-            "(bez 1 zamówień bez danych o koszcie dostawy)"
+            "(w 2 z 3 zamówień; 1 bez danych o koszcie dostawy)"
         ) in result
+
+    @pytest.mark.asyncio
+    async def test_a_smart_heavy_listing_says_how_few_buyers_paid_for_delivery(self):
+        """A bare total reads as broken when most buyers pay nothing (Allegro
+        Smart!): "119,07 PLN" across 100 orders looks like a bug until the line
+        says the sum comes from a handful of them."""
+        agent = _make_agent()
+        free = {"method": {"name": "Allegro Paczkomaty InPost"},
+                "cost": {"amount": "0.00", "currency": "PLN"}}
+        agent._allegro.get_orders = AsyncMock(return_value=[
+            self._make_order(order_id="ord-1"),
+            *[self._make_order(order_id=f"free-{i}", delivery=dict(free)) for i in range(3)],
+        ])
+
+        result = await agent._dispatch("get_orders_delivery", {})
+
+        assert (
+            "- Koszt dostawy zapłacony przez kupujących: **14,99 PLN** "
+            "(w 1 z 4 zamówień; w pozostałych dostawa 0,00)"
+        ) in result
+
+
+class TestOrderValueFilter:
+    """Allegro cannot filter orders by amount, so before min_value/max_value
+    existed a question naming one ("dostawa zamówienia z ostatnich dni na kwotę
+    ponad 2000 zł") had no parameter to carry it: the amount was dropped and the
+    seller got the whole unfiltered list — 100 orders grouped by courier — as if
+    it were the answer. Seen in production; this is that filter."""
+
+    def _order(self, order_id, total, **overrides):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        defaults = dict(
+            order_id=order_id,
+            buyer_login="jan_kowalski",
+            status="BOUGHT",
+            fulfillment_status="NEW",
+            total_price=total,
+            currency="PLN",
+            paid_at="2026-09-05T10:20:00Z",
+            delivery={"method": {"name": "Kurier DPD"},
+                      "cost": {"amount": "14.99", "currency": "PLN"}},
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Towar", quantity=1, price=total)],
+        )
+        defaults.update(overrides)
+        return AllegroOrder(**defaults)
+
+    def _agent(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=orders)
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_min_value_keeps_only_orders_at_or_above_it(self):
+        agent = self._agent([
+            self._order("big", 2400.00), self._order("small", 51.39),
+            self._order("exact", 2000.00),
+        ])
+
+        result = await agent._dispatch("get_orders", {"min_value": 2000})
+
+        assert "`big`" in result
+        assert "`exact`" in result, "the bound itself is inclusive"
+        assert "`small`" not in result
+
+    @pytest.mark.asyncio
+    async def test_max_value_and_a_range(self):
+        orders = [self._order("a", 40.00), self._order("b", 700.00), self._order("c", 2400.00)]
+
+        below = await self._agent(orders)._dispatch("get_orders", {"max_value": 100})
+        between = await self._agent(orders)._dispatch(
+            "get_orders", {"min_value": 500, "max_value": 1000}
+        )
+
+        assert "`a`" in below and "`b`" not in below and "`c`" not in below
+        assert "`b`" in between and "`a`" not in between and "`c`" not in between
+
+    @pytest.mark.asyncio
+    async def test_the_amount_filter_reaches_the_courier_view_too(self):
+        """The delivery question that started this: one order, identified by
+        its amount, with the delivery cost on it."""
+        agent = self._agent([self._order("big", 2400.00), self._order("small", 51.39)])
+
+        result = await agent._dispatch("get_orders_delivery", {"min_value": 2000})
+
+        assert "`big`" in result and "`small`" not in result
+        assert "- Koszt dostawy: 14,99 PLN" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_result_names_the_amount_it_filtered_on(self):
+        """"Brak zamówień spełniających podane kryteria." is indistinguishable
+        from "you had no orders at all" — see _filter_scope_note."""
+        agent = self._agent([self._order("small", 51.39)])
+
+        result = await agent._dispatch("get_orders", {"min_value": 2000})
+
+        assert result.startswith("Brak zamówień o wartości powyżej 2000,00 PLN")
+
+    @pytest.mark.asyncio
+    async def test_a_full_page_scanned_with_nothing_matching_says_how_far_it_looked(self):
+        """Allegro filters by date, not by amount, so "nothing over 2000 zł"
+        is only true of the page this call fetched. A seller told "brak
+        zamówień" about an order that exists just outside it would be told
+        something false."""
+        agent = self._agent([self._order(f"o{i}", 51.39) for i in range(100)])
+
+        result = await agent._dispatch("get_orders", {"min_value": 2000})
+
+        assert "(przeszukano 100 ostatnich zamówień)" in result
+
+    @pytest.mark.asyncio
+    async def test_a_count_off_a_full_page_says_so_too(self):
+        """A count is as wrong as a "brak": "masz 12 zamówień powyżej 500 zł"
+        read off a capped page is silently missing every match beyond it."""
+        agent = self._agent([self._order(f"o{i}", 900.00) for i in range(100)])
+
+        result = await agent._dispatch("get_orders", {"min_value": 500, "count_only": True})
+
+        assert "(przeszukano 100 ostatnich zamówień)" in result
+
+    @pytest.mark.asyncio
+    async def test_a_listing_off_a_full_page_opens_with_the_caveat(self):
+        agent = self._agent([self._order(f"o{i}", 900.00) for i in range(100)])
+
+        result = await agent._dispatch("get_orders", {"min_value": 500})
+
+        assert result.startswith("_Przeszukano 100 ostatnich zamówień._")
+        assert "**Zamówienie**" in result
+
+    @pytest.mark.asyncio
+    async def test_a_short_page_makes_no_such_claim(self):
+        agent = self._agent([self._order("small", 51.39)])
+
+        result = await agent._dispatch("get_orders", {"min_value": 2000})
+
+        assert "przeszukano" not in result
+
+    @pytest.mark.asyncio
+    async def test_count_only_names_the_amount_and_the_period(self):
+        agent = self._agent([self._order("big", 2400.00), self._order("small", 51.39)])
+
+        result = await agent._dispatch("get_orders", {
+            "min_value": 2000, "bought_after_local": "2026-09-01 00:00", "count_only": True,
+        })
+
+        assert result == (
+            "Masz łącznie **1** zamówienie o wartości powyżej 2000,00 PLN "
+            "w okresie od 2026-09-01."
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unparseable_bound_is_ignored_not_raised(self):
+        """A malformed argument must not turn the seller's question into an
+        error — answering about a wider set is recoverable."""
+        agent = self._agent([self._order("small", 51.39)])
+
+        result = await agent._dispatch("get_orders", {"min_value": "dużo"})
+
+        assert "`small`" in result
 
 
 class TestLeadInSanitising:

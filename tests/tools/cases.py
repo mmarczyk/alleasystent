@@ -91,6 +91,19 @@ CASES: list[Case] = [
          f"Szczegóły zamówienia {ds.ORD_1}",
          ("**Zamówienie**", "- Ilość:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),
          note="Zamówienie + wpisy rozliczeniowe + status faktury w jednym."),
+    Case("get_orders__min_value_delivery", "get_orders",
+         {"min_value": 200, "include_delivery": True, "limit": 50},
+         "Ile kosztowała dostawa zamówienia na kwotę ponad 200 zł?",
+         ("**Zamówienie**", "- Koszt dostawy: ", "Koszt dostawy zapłacony przez kupujących:"),
+         note="Kwota zamówienia jako filtr (min_value) + koszty dostawy w jednym wywołaniu. "
+              "Bez min_value pytanie o „zamówienie na kwotę ponad X” wracało pełną, "
+              "nieprzefiltrowaną listą — kwota ginęła po drodze."),
+    Case("get_orders__min_value_none", "get_orders",
+         {"min_value": 100000, "limit": 50},
+         "Czy miałem zamówienie na kwotę ponad 100 000 zł?",
+         ("Brak zamówień o wartości powyżej 100000,00 PLN",),
+         note="Puste zdanie nazywa kwotę, po której filtrowało — inaczej czyta się "
+              "jak „nie masz żadnych zamówień”."),
     Case("get_order_details__delivery_cost", "get_order_details", {"order_id": ds.ORD_3},
          "Ile kosztowała dostawa w tym zamówieniu?",
          ("- Koszt dostawy zapłacony przez kupującego: 12,99 PLN",
