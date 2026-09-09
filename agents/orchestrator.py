@@ -44,6 +44,7 @@ Routing model:
 import asyncio
 import logging
 import time
+from typing import NamedTuple
 
 from openai import (
     AsyncOpenAI,
@@ -201,6 +202,26 @@ _EMPTY_REPLY_FALLBACK = (
 )
 
 
+# ── Which branch of _classify decided ───────────────────────────────────────
+# Recorded per turn (AgentResponse.metadata["classify_path"] → the analytics
+# record) because the keyword/LLM split is the number that decides whether
+# replacing the LLM fallback with a local classifier is worth anything: only
+# the LLM branch costs a round-trip, and only its queries are worth learning
+# from. A corpus mixing in the keyword branch would teach a model to reproduce
+# the regex matcher that still runs in front of it — no gain, and it skews the
+# training distribution towards keyword-shaped queries, which are exactly the
+# ones the model would never be asked about.
+PATH_KEYWORD = "keyword"      # a domain noun matched — no LLM call was made
+PATH_LLM = "llm"              # no keyword; the LLM's own answer stands
+PATH_INHERITED = "inherited"  # LLM said "none"; overridden by the last turn's source
+
+
+class Classification(NamedTuple):
+    """What _classify decided, and which branch decided it."""
+    source: str
+    path: str
+
+
 def _normalize_source(source: str | None) -> str | None:
     """Map a stored pre-collapse label onto the current three.
 
@@ -331,7 +352,7 @@ class Orchestrator:
         # Classify the data source
         try:
             with perf.stage("classify"):
-                data_source = await self._classify(
+                data_source, classify_path = await self._classify(
                     message.text,
                     session.to_anthropic_messages(limit=_HISTORY_TURNS, max_age_hours=_HISTORY_MAX_AGE_HOURS),
                     last_source=_normalize_source(session.metadata.get("last_data_source")),
@@ -376,6 +397,14 @@ class Orchestrator:
                 text="Przepraszam, nie udało się przetworzyć tej wiadomości. Spróbuj sformułować pytanie inaczej.",
                 agent_type=data_source,
             )
+
+        # Which classifier branch decided this turn, carried out to the caller
+        # so the analytics record can store it (see PATH_* above and
+        # services/analytics_service.py.log_query). Set on every routing
+        # outcome including the two error responses above — a turn whose route
+        # failed was still classified, and dropping it would quietly bias the
+        # split towards whichever branch fails less often.
+        response.metadata["classify_path"] = classify_path
 
         # An agent can return an empty string (reply truncated by max_tokens, a
         # safety filter, or a tool round that produced no text). Never show that
@@ -492,8 +521,11 @@ class Orchestrator:
         query: str,
         history: list[dict[str, str]],
         last_source: str | None = None,
-    ) -> str:
+    ) -> Classification:
         """Classify query into a data_source using full conversation context.
+
+        Returns the label AND which branch produced it (see Classification) —
+        the caller records the branch so the keyword/LLM split is measurable.
 
         Strategy:
           1. Always compute a keyword-based source guess. Domain nouns like
@@ -521,9 +553,10 @@ class Orchestrator:
 
         if kw_source is not None:
             logger.info("Keyword fast-path: src=%s | %.60s", kw_source, query)
-            return kw_source
+            return Classification(kw_source, PATH_KEYWORD)
 
         source = await self._classify_with_llm(query, history, known_sources)
+        path = PATH_LLM
 
         # kw_source is always None here (the fast-path above already returned
         # otherwise), so the LLM's own answer stands unless overridden below.
@@ -538,9 +571,10 @@ class Orchestrator:
                 last_source, query,
             )
             source = last_source
+            path = PATH_INHERITED
 
         logger.info("LLM routing: src=%s | %.60s", source, query)
-        return source
+        return Classification(source, path)
 
     # ── Routing ────────────────────────────────────────────────────────────────
 

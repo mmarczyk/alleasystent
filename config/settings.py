@@ -144,6 +144,12 @@ class Settings(BaseSettings):
     # e.g. https://mmarczyk.github.io — added to the CORS allowlist alongside
     # frontend_url so the dashboard can call this API cross-origin.
     analytics_frontend_url: str = ""
+    # GCS bucket the routing-corpus export writes to (see
+    # services/analytics_service.py export_to_gcs). Leave empty and
+    # /admin/analytics/export still returns the redacted corpus inline — the
+    # bucket only adds the accumulating copy that outlives the Redis ring
+    # buffer, so nothing has to be provisioned to start collecting by hand.
+    analytics_export_bucket: str = ""
 
     def analytics_allowed_emails_set(self) -> set[str]:
         return {e.strip().lower() for e in self.analytics_allowed_emails.split(",") if e.strip()}

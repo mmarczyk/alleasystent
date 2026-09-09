@@ -513,6 +513,11 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
             # labels the query by, now that the intent's source half is a bare
             # "allegro" (see services/analytics_service.py._intent_label).
             tool=(response.metadata.get("tools") or [None])[0],
+            # Which classifier branch decided the route — "keyword", "llm" or
+            # "inherited" (agents/orchestrator.py PATH_*). Only the "llm" ones
+            # cost a round-trip, so this is what says whether a local
+            # classifier would be worth building.
+            path=response.metadata.get("classify_path"),
             response_len=len(response.text),
         )
     )
@@ -730,6 +735,36 @@ async def admin_analytics_perf(request: Request, hours: float | None = None) -> 
     _check_analytics_auth(request)
     from services.analytics_service import get_perf_stats
     return await get_perf_stats(hours=hours)
+
+
+@app.get("/admin/analytics/export", tags=["Analytics Admin"], include_in_schema=False)
+async def admin_analytics_export(request: Request, to_gcs: bool = False) -> dict:
+    """Return the redacted routing corpus — queries plus the label the current
+    pipeline gave them — for training a local intent classifier.
+
+    Only the branches worth learning from are included (the LLM ones; the
+    keyword branch reproduces a matcher that still runs in front of any model),
+    and every phone number, e-mail, ID and UUID is replaced with a placeholder
+    first. See services/analytics_service.py export_training_corpus.
+
+    `to_gcs=true` additionally writes the same rows to the configured bucket
+    (analytics_export_bucket) as a timestamped JSONL object. Redis keeps the
+    queries in a ring buffer capped at 2000, so a periodic call is what turns a
+    days-long window into an accumulating corpus — point Cloud Scheduler at
+    this endpoint the same way the order monitor is triggered.
+    """
+    _check_analytics_auth(request)
+    from services.analytics_service import export_training_corpus, export_to_gcs
+
+    rows = await export_training_corpus()
+    result: dict = {"count": len(rows), "rows": rows}
+    if to_gcs:
+        bucket = _orchestrator._settings.analytics_export_bucket
+        if not bucket:
+            result["gcs"] = {"written": 0, "reason": "analytics_export_bucket is not set"}
+        else:
+            result["gcs"] = await export_to_gcs(bucket)
+    return result
 
 
 @app.get("/allegro/order-event-stats", tags=["Allegro"])

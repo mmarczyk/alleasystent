@@ -5,6 +5,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agents.orchestrator import (
+    PATH_INHERITED,
+    PATH_KEYWORD,
+    PATH_LLM,
+    Classification,
+)
+
 
 @pytest.fixture(autouse=True)
 def set_env(monkeypatch):
@@ -126,9 +133,9 @@ class TestClassifySkipsLLMOnKeywordMatch:
         orc = _make_orchestrator()
         orc._classify_with_llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
 
-        source = await orc._classify("nowe zamówienia", [])
+        source, path = await orc._classify("nowe zamówienia", [])
 
-        assert source == "allegro"
+        assert (source, path) == ("allegro", PATH_KEYWORD)
         orc._classify_with_llm.assert_not_called()
 
     @pytest.mark.asyncio
@@ -136,9 +143,9 @@ class TestClassifySkipsLLMOnKeywordMatch:
         orc = _make_orchestrator()
         orc._classify_with_llm = AsyncMock(side_effect=AssertionError("LLM must not be called"))
 
-        source = await orc._classify("pokaż mi proszę wszystkie moje nowe zamówienia z dzisiaj", [])
+        source, path = await orc._classify("pokaż mi proszę wszystkie moje nowe zamówienia z dzisiaj", [])
 
-        assert source == "allegro"
+        assert (source, path) == ("allegro", PATH_KEYWORD)
         orc._classify_with_llm.assert_not_called()
 
     @pytest.mark.asyncio
@@ -146,9 +153,9 @@ class TestClassifySkipsLLMOnKeywordMatch:
         orc = _make_orchestrator()
         orc._classify_with_llm = AsyncMock(return_value="none")
 
-        source = await orc._classify("a teraz?", [])
+        source, path = await orc._classify("a teraz?", [])
 
-        assert source == "none"
+        assert (source, path) == ("none", PATH_LLM)
         orc._classify_with_llm.assert_called_once()
 
 
@@ -179,9 +186,12 @@ class TestLegacySourceInheritance:
         orc = _make_orchestrator()
         orc._classify_with_llm = AsyncMock(return_value="none")
 
-        source = await orc._classify("sprawdź jeszcze raz", [], last_source="allegro")
+        source, path = await orc._classify("sprawdź jeszcze raz", [], last_source="allegro")
 
-        assert source == "allegro"
+        # PATH_INHERITED, not PATH_LLM: the LLM said "none" and the previous
+        # turn's source overrode it, which is a third outcome worth counting
+        # separately from a plain LLM answer.
+        assert (source, path) == ("allegro", PATH_INHERITED)
 
 
 class TestEmptyReplyNeverPersisted:
@@ -209,7 +219,7 @@ class TestEmptyReplyNeverPersisted:
         from models.conversation import AgentResponse, MessageRole
 
         orc, session = self._orchestrator_with_session()
-        orc._classify = AsyncMock(return_value="allegro")
+        orc._classify = AsyncMock(return_value=Classification("allegro", PATH_KEYWORD))
         orc._route = AsyncMock(return_value=AgentResponse(text="   ", agent_type="allegro:chat"))
 
         response = await orc.handle(self._message("Czy są jakieś faktury do wystawienia"))
@@ -226,7 +236,7 @@ class TestEmptyReplyNeverPersisted:
         orc, session = self._orchestrator_with_session()
         session.add_message(MessageRole.USER, "pokaż zamówienia")
         session.add_message(MessageRole.ASSISTANT, "")
-        orc._classify = AsyncMock(return_value="allegro")
+        orc._classify = AsyncMock(return_value=Classification("allegro", PATH_KEYWORD))
         orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro:chat"))
 
         await orc.handle(self._message("a faktury?"))
@@ -243,7 +253,7 @@ class TestEmptyReplyNeverPersisted:
         for i in range(_HISTORY_TURNS * 2):
             session.add_message(MessageRole.USER, f"q{i}")
             session.add_message(MessageRole.ASSISTANT, f"a{i}")
-        orc._classify = AsyncMock(return_value="none")
+        orc._classify = AsyncMock(return_value=Classification("none", PATH_KEYWORD))
         orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="none:chat"))
 
         await orc.handle(self._message("i co dalej?"))
@@ -274,7 +284,7 @@ class TestReplyFormatStoredWithTheTurn:
         from models.conversation import AgentResponse, MessageRole
 
         orc, session = self._orchestrator_with_session()
-        orc._classify = AsyncMock(return_value="allegro")
+        orc._classify = AsyncMock(return_value=Classification("allegro", PATH_KEYWORD))
         orc._route = AsyncMock(
             return_value=AgentResponse(text="| nr |", agent_type="allegro:table"),
         )
@@ -350,7 +360,7 @@ class TestReminderGetsTheOpenQuestion:
             MessageRole.ASSISTANT,
             "Masz **1** nową wiadomość (od: Modelinarnia). Pokazać szczegóły?",
         )
-        orc._classify = AsyncMock(return_value="allegro")
+        orc._classify = AsyncMock(return_value=Classification("allegro", PATH_KEYWORD))
         orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro:chat"))
         handle_reply = AsyncMock(return_value=None)
 
@@ -367,7 +377,7 @@ class TestReminderGetsTheOpenQuestion:
 
         orc, session = self._orchestrator_with_session()
         session.add_message(MessageRole.ASSISTANT, "Masz **1** nową wiadomość. Pokazać szczegóły?")
-        orc._classify = AsyncMock(return_value="allegro")
+        orc._classify = AsyncMock(return_value=Classification("allegro", PATH_KEYWORD))
         orc._route = AsyncMock(
             return_value=AgentResponse(text="treść wiadomości", agent_type="allegro:chat"),
         )
@@ -383,7 +393,7 @@ class TestReminderGetsTheOpenQuestion:
         from models.conversation import AgentResponse
 
         orc, _ = self._orchestrator_with_session()
-        orc._classify = AsyncMock(return_value="none")
+        orc._classify = AsyncMock(return_value=Classification("none", PATH_KEYWORD))
         orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="none:chat"))
         handle_reply = AsyncMock(return_value=None)
 

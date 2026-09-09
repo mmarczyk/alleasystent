@@ -9,6 +9,7 @@ All functions are fire-and-forget safe (never raise to callers).
 
 import json
 import logging
+import re
 import time
 from collections import Counter, defaultdict
 
@@ -216,12 +217,21 @@ async def log_query(
     intent: str,
     response_len: int,
     tool: str | None = None,
+    path: str | None = None,
 ) -> None:
     """Append a query record to Redis. Non-blocking, never raises.
 
     `tool` is the first Allegro tool the turn called, and is what the dashboard
-    labels the query by — see _intent_label. Optional so a caller with no tool
-    to report (and any record written before this field existed) still works.
+    labels the query by — see _intent_label.
+
+    `path` is which branch of the routing classifier decided the turn —
+    "keyword", "llm" or "inherited" (agents/orchestrator.py PATH_*). It is the
+    field that answers whether the LLM classification call is worth replacing
+    with a local model: only the "llm" branch pays for a round-trip, and only
+    its queries belong in a training corpus (see export_training_corpus).
+
+    Both are optional so a caller with nothing to report — and every record
+    written before these fields existed — still works.
     """
     from config.settings import get_settings
     settings = get_settings()
@@ -237,6 +247,7 @@ async def log_query(
                 "text": text[:300],
                 "intent": intent,
                 "tool": tool,
+                "path": path,
                 "rlen": response_len,
             }, ensure_ascii=False)
             await r.lpush(_QUERY_KEY, entry)
@@ -333,12 +344,29 @@ async def get_stats() -> dict:
             "pct": round(count / total * 100) if total else 0,
         })
 
+    # Which classifier branch decided each turn. This is the whole point of
+    # recording `path`: "llm" is the only branch that costs an LLM round-trip,
+    # so its share is what says whether replacing that call with a local
+    # classifier would buy anything. Records written before the field existed
+    # count as "unknown" rather than being dropped, so the shares stay honest
+    # about how much of the window predates the measurement.
+    path_counts = Counter(q.get("path") or "unknown" for q in queries)
+    paths = [
+        {
+            "path": p,
+            "count": c,
+            "pct": round(c / total * 100) if total else 0,
+        }
+        for p, c in path_counts.most_common()
+    ]
+
     # Recent 30 queries
     recent = [
         {
             "text": q.get("text", ""),
             "intent": q.get("intent", ""),
             "tool": q.get("tool") or None,
+            "path": q.get("path") or None,
             "label": _intent_label(q.get("intent", ""), q.get("tool") or None),
             "ts": q.get("ts", 0),
         }
@@ -365,10 +393,177 @@ async def get_stats() -> dict:
     return {
         "total": total,
         "intents": intents,
+        "paths": paths,
         "recent": recent,
         "gaps": gaps[:20],
         "queries_sample": [q.get("text", "") for q in queries[:200]],
     }
+
+
+# ── Training-corpus export ──────────────────────────────────────────────────
+# The stored queries are the only source of real routing labels, but they are
+# also real seller traffic: buyer names, phone numbers, e-mail addresses, NIPs,
+# offer and order IDs. None of that is needed to learn an INTENT — "kto to jest
+# 601 220 118?" and "kto to jest 880 197 834?" are the same question — so every
+# such value is replaced with a placeholder before the corpus leaves Redis.
+#
+# Replaced, not deleted: the placeholder keeps the shape of the sentence, which
+# is itself the signal. A query that names a phone number routes differently
+# from one that doesn't, and blanking the number away entirely would destroy
+# exactly the feature a classifier should learn.
+#
+# Dates are the deliberate exception to "digits are PII": they are not personal
+# data and they ARE intent-bearing ("koszty od 2026-09-01 do 2026-09-09" is a
+# period question), so they collapse to their own placeholder rather than the
+# generic number one, keeping "this query names a date range" learnable.
+_RE_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+_RE_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?\b")
+_RE_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
+# Seven or more digits, counted ACROSS separators. A bare "\d{7,}" would miss
+# every phone number a human actually types — "880 197 834" and "601 220 118"
+# are three-digit groups, each far under any sane run-length threshold, so a
+# run-based rule would have published them untouched. Runs on the text only
+# after _RE_DATE has already consumed the date-shaped digits above.
+_RE_LONG_NUMBER = re.compile(r"\+?\d(?:[\s.\-()]*\d){6,}")
+_RE_POSTCODE = re.compile(r"\b\d{2}-\d{3}\b")
+# A buyer's Allegro login ("jan_kowalski88", "anna.kowalska88", "sklep-abc").
+# Matches a token that starts with a letter and carries a digit or underscore
+# somewhere in it — the shape agents/allegro/allegro_tools.py calls
+# "_LOOKS_LIKE_LOGIN", applied here WITHOUT that module's requirement that an
+# account word precede it. That requirement is right for a tool call, where a
+# false positive invents a filter and answers the wrong question; it is wrong
+# here, where a miss publishes a real person's account name. Redaction inverts
+# the trade: over-redacting costs a little signal ("covid-19" would go too),
+# under-redacting leaks, so this leans on recall.
+# The lookahead scans over dots and dashes too, so "anna.kowalska88" is caught
+# whole. Without that it anchored on the digit-bearing half only and published
+# "anna." — a first name, in the clear.
+_RE_LOGIN = re.compile(
+    r"\b(?=[\w.-]*[\d_])[^\W\d_][\w.-]{3,}\b",
+    re.UNICODE,
+)
+
+
+def redact(text: str) -> str:
+    """Strip personal data from a query, keeping its shape. See the note above.
+
+    Order matters: the identifier-shaped patterns run first, so a date, phone
+    number or e-mail is already a placeholder by the time the broader login
+    rules see the text and cannot be re-matched by them.
+    """
+    text = _RE_UUID.sub("<ID>", text)
+    text = _RE_DATE.sub("<DATA>", text)
+    text = _RE_EMAIL.sub("<EMAIL>", text)
+    text = _RE_POSTCODE.sub("<NUMER>", text)
+    text = _RE_LONG_NUMBER.sub("<NUMER>", text)
+
+    # A login with neither digit nor underscore ("z konta sklep-abc") is
+    # invisible to the shape rule below — its lookahead requires one, and
+    # dropping that requirement would swallow every hyphenated word in the
+    # language. The context-anchored extractor catches exactly this case: it
+    # keys off the account word in front ("konto", "login", "użytkownik"), so
+    # it needs no digit to be sure. Imported lazily to keep this module free of
+    # an import-time dependency on the agents package.
+    try:
+        from agents.allegro.allegro_tools import named_buyer_login
+        # A query can name more than one ("z konta a1 albo z konta b2"); each
+        # pass removes the leftmost, and the bound stops a pathological input
+        # from looping (a replacement that somehow still parses as a login).
+        for _ in range(4):
+            login = named_buyer_login(text)
+            if not login or login not in text:
+                break
+            text = text.replace(login, "<LOGIN>")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("login redaction unavailable (non-critical): %s", exc)
+
+    return _RE_LOGIN.sub("<LOGIN>", text)
+
+
+# Only these branches belong in a training corpus. A "keyword" record was
+# decided by the regex matcher that still runs IN FRONT of any model, so
+# learning from it teaches the model to reproduce a matcher whose answer it
+# will never be asked for — no gain, and it drags the training distribution
+# towards keyword-shaped queries, which are precisely the ones that never reach
+# the branch a local classifier would replace.
+_TRAINABLE_PATHS = ("llm", "inherited")
+
+
+async def export_training_corpus(
+    paths: tuple[str, ...] = _TRAINABLE_PATHS,
+    redact_pii: bool = True,
+) -> list[dict]:
+    """The stored queries as intent-classification training rows.
+
+    One row per query: the (redacted) text and the routing label the current
+    pipeline gave it. Rows are a DISTILLATION target — the label came from the
+    Gemini classifier, so a model trained on this learns to imitate that call,
+    which is exactly what replacing it requires.
+
+    `paths` filters to the branches worth learning from (see _TRAINABLE_PATHS);
+    pass an empty tuple to export everything, including the keyword branch and
+    the records written before the field existed.
+
+    `redact_pii=False` is for local inspection of your own data only — it
+    returns raw seller traffic and must not be written anywhere shared.
+    """
+    queries, _ = await _fetch_all()
+    rows = []
+    for q in queries:
+        path = q.get("path") or "unknown"
+        if paths and path not in paths:
+            continue
+        text = q.get("text", "")
+        if not text.strip():
+            continue
+        intent = q.get("intent", "")
+        rows.append({
+            "text": redact(text) if redact_pii else text,
+            # The routing label is the source half of "<source>:<format>" — the
+            # format is decided downstream by the tool and is not this
+            # classifier's job to predict.
+            "source": intent.split(":", 1)[0] if ":" in intent else intent,
+            "tool": q.get("tool") or None,
+            "path": path,
+            "ts": q.get("ts", 0),
+        })
+    # Deliberately no user id, not even hashed: this is a single-seller
+    # workload, so it would identify rather than group.
+    return rows
+
+
+async def export_to_gcs(bucket: str, prefix: str = "routing-corpus") -> dict:
+    """Write the redacted corpus to GCS as one timestamped JSONL object.
+
+    Redis holds the queries in a ring buffer capped at _MAX_QUERIES, so at any
+    real traffic level the window is days, not months — anything not copied out
+    before it rolls over is gone. Appending a dated object per run turns that
+    into an accumulating corpus.
+
+    Returns a summary; never raises (a failed export must not take down the
+    endpoint that triggered it).
+    """
+    rows = await export_training_corpus()
+    if not rows:
+        return {"written": 0, "reason": "no trainable rows in the current window"}
+    # Named for the run, not the data: consecutive runs overlap heavily (the
+    # ring buffer still holds what the last run saw), so these objects are
+    # append-only snapshots to be deduplicated on read, not disjoint shards.
+    name = f"{prefix}/{time.strftime('%Y-%m-%dT%H%M%SZ', time.gmtime())}.jsonl"
+    body = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows)
+    try:
+        # Imported lazily so a deployment without the dependency (or without a
+        # bucket configured) still imports this module fine.
+        from google.cloud import storage
+        client = storage.Client()
+        client.bucket(bucket).blob(name).upload_from_string(
+            body, content_type="application/x-ndjson",
+        )
+    except Exception as exc:
+        logger.error("analytics.export_to_gcs failed: %s", exc)
+        return {"written": 0, "error": str(exc), "object": name}
+    logger.info("Exported %d routing rows to gs://%s/%s", len(rows), bucket, name)
+    return {"written": len(rows), "object": f"gs://{bucket}/{name}"}
 
 
 async def analyze_with_llm(client, model_pool: list[str]) -> dict:
