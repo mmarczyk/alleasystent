@@ -6,17 +6,43 @@ import pytest
 from services import analytics_service as svc
 
 
-class TestLabelForPerf:
-    def test_prefers_specific_tool_over_data_source(self):
-        assert svc.label_for_perf("allegro_orders", ["get_new_orders"]) == "Nowe zamówienia"
-        assert svc.label_for_perf("allegro_orders", ["get_orders"]) == "Zamówienia"
+class TestIntentLabel:
+    """The dashboard's query-type label. Since the routing source collapsed to a
+    bare "allegro", the tool that actually ran is what tells one store query
+    from another — see _intent_label's docstring."""
 
-    def test_distinguishes_invoice_tools_from_generic_orders(self):
-        assert svc.label_for_perf("allegro_orders", ["get_orders_pending_invoice"]) == "Faktury do wystawienia"
-        assert svc.label_for_perf("allegro_orders", ["issue_invoice_for_order"]) == "Wystawianie faktury"
+    def test_tool_wins_over_the_source_half(self):
+        assert svc._intent_label("allegro:table", "get_new_orders") == "Nowe zamówienia"
+        # The wording says "zamówienia", the tool says billing — the tool is right.
+        assert svc._intent_label("allegro:chat", "get_billing_summary") == "Rozliczenia"
 
     def test_unknown_tool_falls_back_to_humanized_name(self):
-        assert svc.label_for_perf("allegro_orders", ["some_future_tool"]) == "Some future tool"
+        assert svc._intent_label("allegro:chat", "some_future_tool") == "Some future tool"
+
+    def test_no_tool_labels_off_the_intent(self):
+        assert svc._intent_label("none:chat") == "Chitchat / inne"
+        assert svc._intent_label("rag:document") == "Baza wiedzy [dokument]"
+        assert svc._intent_label("allegro:table") == "Allegro [tabela]"
+
+    def test_records_written_before_the_collapse_still_read(self):
+        """Both Redis lists are capped ring buffers, not wiped on deploy, so the
+        four old Allegro labels must stay readable until they age out."""
+        assert svc._intent_label("allegro_orders:table") == "Zamówienia [tabela]"
+        assert svc._intent_label("allegro_account:chat") == "Konto"
+        assert svc._intent_label("chitchat") == "Chitchat / inne"
+
+
+class TestLabelForPerf:
+    def test_prefers_specific_tool_over_data_source(self):
+        assert svc.label_for_perf("allegro", ["get_new_orders"]) == "Nowe zamówienia"
+        assert svc.label_for_perf("allegro", ["get_orders"]) == "Zamówienia"
+
+    def test_distinguishes_invoice_tools_from_generic_orders(self):
+        assert svc.label_for_perf("allegro", ["get_orders_pending_invoice"]) == "Faktury do wystawienia"
+        assert svc.label_for_perf("allegro", ["issue_invoice_for_order"]) == "Wystawianie faktury"
+
+    def test_unknown_tool_falls_back_to_humanized_name(self):
+        assert svc.label_for_perf("allegro", ["some_future_tool"]) == "Some future tool"
 
     def test_no_tools_falls_back_to_data_source_label(self):
         assert svc.label_for_perf("rag", None) == "Baza wiedzy"

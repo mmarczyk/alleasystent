@@ -22,15 +22,20 @@ _MAX_GAPS    = 500
 _MAX_PERF    = 2000
 
 _SOURCE_LABELS = {
-    "allegro_orders":    "Zamówienia",
-    "allegro_offers":    "Oferty",
-    "allegro_messaging": "Wiadomości",
-    "allegro_account":   "Konto",
+    "allegro":           "Allegro",
     "rag":               "Baza wiedzy",
     "none":              "Chitchat / inne",
     # legacy keys (pre-2D routing)
     "general_knowledge": "Baza wiedzy",
     "chitchat":          "Chitchat / inne",
+    # legacy keys (the four-way Allegro split, collapsed to "allegro" — see the
+    # routing-model note in agents/orchestrator.py). Kept because both Redis
+    # lists here are capped ring buffers, not wiped on deploy: records written
+    # by the previous version stay readable in the dashboard until they age out.
+    "allegro_orders":    "Zamówienia",
+    "allegro_offers":    "Oferty",
+    "allegro_messaging": "Wiadomości",
+    "allegro_account":   "Konto",
 }
 
 _FORMAT_LABELS = {
@@ -41,8 +46,24 @@ _FORMAT_LABELS = {
 }
 
 
-def _intent_label(intent: str) -> str:
-    """Convert 'source:format' (or legacy flat intent) to a human-readable label."""
+def _intent_label(intent: str, tool: str | None = None) -> str:
+    """Convert 'source:format' (or legacy flat intent) to a human-readable label.
+
+    `tool` is the first Allegro tool the turn actually called. When present it
+    names the query type far more precisely than the source half of `intent`
+    can — the source is decided before any tool runs, and since it collapsed to
+    a bare "allegro" (see agents/orchestrator.py) it no longer distinguishes
+    order questions from offer or billing ones at all. The tool does, and it is
+    right by construction rather than by guessing at the seller's wording: "ile
+    zapłaciłem prowizji od tego zamówienia" used to be filed under Zamówienia
+    because it says "zamówienia", though it is answered from the billing tools.
+
+    This mirrors label_for_perf() below, which has always preferred the tool.
+    Records written before this (and turns that ran no tool at all — chitchat,
+    RAG, auth prompts, errors) still label off `intent`.
+    """
+    if tool:
+        return _TOOL_LABELS.get(tool, tool.replace("_", " ").capitalize())
     if ":" in intent:
         source, fmt = intent.split(":", 1)
         src_label = _SOURCE_LABELS.get(source, source)
@@ -52,10 +73,12 @@ def _intent_label(intent: str) -> str:
 
 
 # ── Query-performance-by-phase chart ────────────────────────────────────────
-# Query-type label is derived from which Allegro tool actually ran — finer
-# grained than the data_source bucket above (e.g. "Nowe zamówienia" vs
-# "Zamówienia" are both allegro_orders, but different tools: get_new_orders
-# vs get_orders). See agents/allegro/allegro_tools.py for the full tool list.
+# Query-type label is derived from which Allegro tool actually ran — the only
+# thing that distinguishes one store query from another now that the routing
+# source is a bare "allegro" (e.g. "Nowe zamówienia" vs "Zamówienia": same
+# source, different tools — get_new_orders vs get_orders). Used by both
+# label_for_perf() and _intent_label(). See agents/allegro/allegro_tools.py
+# for the full tool list.
 _TOOL_LABELS = {
     "get_new_orders":                  "Nowe zamówienia",
     "get_orders":                      "Zamówienia",
@@ -146,10 +169,9 @@ _LLM_SYSTEM = (
 _LLM_PROMPT = """You are analyzing queries sent to an AI assistant for Allegro (Polish e-commerce) store owners.
 
 CURRENTLY HANDLED routing (source:format):
-- allegro_orders:{chat|table|document|dashboard}: order data, shipping, tracking, returns, invoices
-- allegro_offers:{chat|table|document|dashboard}: product listings, prices, stock levels
-- allegro_messaging:{chat|document}: messages to/from buyers
-- allegro_account:{chat|table|dashboard}: fees, billing, statistics
+- allegro:{chat|table|document|dashboard}: any live store data — orders, shipping,
+  tracking, returns, invoices, product listings, prices, stock levels, messages
+  to/from buyers, fees, billing, statistics
 - rag:{chat|document}: store FAQ, policies (static knowledge base)
 - none:chat: greetings, capability questions, chitchat (no data needed)
 
@@ -188,8 +210,19 @@ def _valid_redis_url(url: str | None) -> bool:
     return bool(url and url.startswith(("redis://", "rediss://", "unix://")))
 
 
-async def log_query(user_id: str, text: str, intent: str, response_len: int) -> None:
-    """Append a query record to Redis. Non-blocking, never raises."""
+async def log_query(
+    user_id: str,
+    text: str,
+    intent: str,
+    response_len: int,
+    tool: str | None = None,
+) -> None:
+    """Append a query record to Redis. Non-blocking, never raises.
+
+    `tool` is the first Allegro tool the turn called, and is what the dashboard
+    labels the query by — see _intent_label. Optional so a caller with no tool
+    to report (and any record written before this field existed) still works.
+    """
     from config.settings import get_settings
     settings = get_settings()
     if not _valid_redis_url(settings.redis_url):
@@ -203,6 +236,7 @@ async def log_query(user_id: str, text: str, intent: str, response_len: int) -> 
                 "uid": user_id[:40],
                 "text": text[:300],
                 "intent": intent,
+                "tool": tool,
                 "rlen": response_len,
             }, ensure_ascii=False)
             await r.lpush(_QUERY_KEY, entry)
@@ -278,15 +312,23 @@ async def get_stats() -> dict:
     """Return aggregated stats: intent counts, recent queries, gap summary."""
     queries, gaps_raw = await _fetch_all()
 
-    intent_counts = Counter(q.get("intent", "unknown") for q in queries)
+    # Grouped by (intent, tool), not by intent alone: the tool is what the row
+    # is labelled by when the turn called one (see _intent_label), so two turns
+    # sharing an intent but running different tools are different query types
+    # and must not be summed into one row. Turns with no tool keep tool=None
+    # and group exactly as before.
+    intent_counts = Counter(
+        (q.get("intent", "unknown"), q.get("tool") or None) for q in queries
+    )
     total = len(queries)
 
     # Intent rows with percentage
     intents = []
-    for intent, count in intent_counts.most_common():
+    for (intent, tool), count in intent_counts.most_common():
         intents.append({
             "intent": intent,
-            "label": _intent_label(intent),
+            "tool": tool,
+            "label": _intent_label(intent, tool),
             "count": count,
             "pct": round(count / total * 100) if total else 0,
         })
@@ -296,7 +338,8 @@ async def get_stats() -> dict:
         {
             "text": q.get("text", ""),
             "intent": q.get("intent", ""),
-            "label": _intent_label(q.get("intent", "")),
+            "tool": q.get("tool") or None,
+            "label": _intent_label(q.get("intent", ""), q.get("tool") or None),
             "ts": q.get("ts", 0),
         }
         for q in queries[:30]

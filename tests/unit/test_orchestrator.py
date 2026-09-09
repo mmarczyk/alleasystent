@@ -44,15 +44,17 @@ class TestKeywordSource:
         ("hi there", "none"),
         ("co potrafisz zrobić?", "none"),
         ("CZEŚĆ", "none"),                      # dopasowanie bez względu na wielkość liter
-        # Allegro
-        ("pokaż moje zamówień", "allegro_orders"),
-        ("show me my order status", "allegro_orders"),
-        ("gdzie jest moja paczka?", "allegro_orders"),
-        ("lista moich ofert", "allegro_offers"),
-        ("wiadomości od kupujących", "allegro_messaging"),
-        ("moje konto allegro", "allegro_account"),
-        # Baza wiedzy — sprawdzana przed zamówieniami, więc "polityka zwrotów"
-        # nie ląduje w zamówieniach mimo słowa "zwrot".
+        # Allegro — jedna etykieta dla wszystkich pod-systemów, bo wszystkie
+        # trafiają do tego samego AllegroAgent (patrz _route).
+        ("pokaż moje zamówień", "allegro"),
+        ("show me my order status", "allegro"),
+        ("gdzie jest moja paczka?", "allegro"),
+        ("lista moich ofert", "allegro"),
+        ("wiadomości od kupujących", "allegro"),
+        ("moje konto allegro", "allegro"),
+        ("czy mam klienta z nr telefonu 880197834?", "allegro"),
+        # Baza wiedzy — sprawdzana przed Allegro, więc "polityka zwrotów"
+        # nie ląduje w danych sklepu mimo słowa "zwrot".
         ("jaka jest polityka zwrotów?", "rag"),
     ])
     def test_keyword_decides_the_source(self, query, source):
@@ -126,7 +128,7 @@ class TestClassifySkipsLLMOnKeywordMatch:
 
         source = await orc._classify("nowe zamówienia", [])
 
-        assert source == "allegro_orders"
+        assert source == "allegro"
         orc._classify_with_llm.assert_not_called()
 
     @pytest.mark.asyncio
@@ -136,7 +138,7 @@ class TestClassifySkipsLLMOnKeywordMatch:
 
         source = await orc._classify("pokaż mi proszę wszystkie moje nowe zamówienia z dzisiaj", [])
 
-        assert source == "allegro_orders"
+        assert source == "allegro"
         orc._classify_with_llm.assert_not_called()
 
     @pytest.mark.asyncio
@@ -148,6 +150,38 @@ class TestClassifySkipsLLMOnKeywordMatch:
 
         assert source == "none"
         orc._classify_with_llm.assert_called_once()
+
+
+class TestLegacySourceInheritance:
+    """Sessions live 30 days, so for a month after the four-way Allegro split
+    collapsed, metadata["last_data_source"] can still hold one of the old
+    labels — and the keyword-less follow-up path feeds it straight back into
+    routing. _normalize_source maps it onto the current three; without it a
+    "sprawdź jeszcze raz" follow-up in an old thread reached _route as an
+    unknown source and was answered with chitchat."""
+
+    @pytest.mark.parametrize("stored,expected", [
+        ("allegro_orders", "allegro"),
+        ("allegro_offers", "allegro"),
+        ("allegro_messaging", "allegro"),
+        ("allegro_account", "allegro"),
+        ("allegro", "allegro"),
+        ("rag", "rag"),
+        ("none", "none"),
+        (None, None),
+    ])
+    def test_old_labels_map_onto_the_current_three(self, stored, expected):
+        from agents.orchestrator import _normalize_source
+        assert _normalize_source(stored) == expected
+
+    @pytest.mark.asyncio
+    async def test_followup_inherits_a_normalized_source(self):
+        orc = _make_orchestrator()
+        orc._classify_with_llm = AsyncMock(return_value="none")
+
+        source = await orc._classify("sprawdź jeszcze raz", [], last_source="allegro")
+
+        assert source == "allegro"
 
 
 class TestEmptyReplyNeverPersisted:
@@ -175,8 +209,8 @@ class TestEmptyReplyNeverPersisted:
         from models.conversation import AgentResponse, MessageRole
 
         orc, session = self._orchestrator_with_session()
-        orc._classify = AsyncMock(return_value="allegro_orders")
-        orc._route = AsyncMock(return_value=AgentResponse(text="   ", agent_type="allegro_orders:chat"))
+        orc._classify = AsyncMock(return_value="allegro")
+        orc._route = AsyncMock(return_value=AgentResponse(text="   ", agent_type="allegro:chat"))
 
         response = await orc.handle(self._message("Czy są jakieś faktury do wystawienia"))
 
@@ -192,8 +226,8 @@ class TestEmptyReplyNeverPersisted:
         orc, session = self._orchestrator_with_session()
         session.add_message(MessageRole.USER, "pokaż zamówienia")
         session.add_message(MessageRole.ASSISTANT, "")
-        orc._classify = AsyncMock(return_value="allegro_orders")
-        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro_orders:chat"))
+        orc._classify = AsyncMock(return_value="allegro")
+        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro:chat"))
 
         await orc.handle(self._message("a faktury?"))
 
@@ -240,15 +274,15 @@ class TestReplyFormatStoredWithTheTurn:
         from models.conversation import AgentResponse, MessageRole
 
         orc, session = self._orchestrator_with_session()
-        orc._classify = AsyncMock(return_value="allegro_orders")
+        orc._classify = AsyncMock(return_value="allegro")
         orc._route = AsyncMock(
-            return_value=AgentResponse(text="| nr |", agent_type="allegro_orders:table"),
+            return_value=AgentResponse(text="| nr |", agent_type="allegro:table"),
         )
 
         await orc.handle(self._message("pokaż zamówienia"))
 
         assistant = [m for m in session.messages if m.role == MessageRole.ASSISTANT]
-        assert assistant[-1].metadata["agent"] == "allegro_orders:table"
+        assert assistant[-1].metadata["agent"] == "allegro:table"
 
 
 class TestMarkRequest:
@@ -316,8 +350,8 @@ class TestReminderGetsTheOpenQuestion:
             MessageRole.ASSISTANT,
             "Masz **1** nową wiadomość (od: Modelinarnia). Pokazać szczegóły?",
         )
-        orc._classify = AsyncMock(return_value="allegro_messages")
-        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro_messages:chat"))
+        orc._classify = AsyncMock(return_value="allegro")
+        orc._route = AsyncMock(return_value=AgentResponse(text="ok", agent_type="allegro:chat"))
         handle_reply = AsyncMock(return_value=None)
 
         with patch("services.reminder_router.handle_reply", handle_reply):
@@ -333,9 +367,9 @@ class TestReminderGetsTheOpenQuestion:
 
         orc, session = self._orchestrator_with_session()
         session.add_message(MessageRole.ASSISTANT, "Masz **1** nową wiadomość. Pokazać szczegóły?")
-        orc._classify = AsyncMock(return_value="allegro_messages")
+        orc._classify = AsyncMock(return_value="allegro")
         orc._route = AsyncMock(
-            return_value=AgentResponse(text="treść wiadomości", agent_type="allegro_messages:chat"),
+            return_value=AgentResponse(text="treść wiadomości", agent_type="allegro:chat"),
         )
 
         with patch("services.reminder_router.handle_reply", AsyncMock(return_value=None)):

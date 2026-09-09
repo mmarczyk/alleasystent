@@ -509,6 +509,10 @@ async def query(request_body: DirectQueryRequest, request: Request) -> dict:
             user_id=user_sub,
             text=request_body.message,
             intent=response.agent_type,
+            # The first tool the turn actually called — what the dashboard
+            # labels the query by, now that the intent's source half is a bare
+            # "allegro" (see services/analytics_service.py._intent_label).
+            tool=(response.metadata.get("tools") or [None])[0],
             response_len=len(response.text),
         )
     )
