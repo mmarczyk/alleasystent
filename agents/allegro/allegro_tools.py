@@ -604,7 +604,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "date — use this tool instead whenever the user wants to read a message. "
                 "If thread_id isn't already known from earlier in the conversation, provide "
                 "buyer_login and/or date to find the matching thread automatically — no need to call "
-                "get_message_threads first."
+                "get_message_threads first. "
+                "The result also names the ORDER the message is about (the checkout-form id Allegro "
+                "attached to it, or the buyer's single order) — a buyer writing 'faktura do tej transakcji' "
+                "never names the order themselves, so take the id from here and pass it straight to "
+                "get_order_details / get_order_invoice_data / issue_invoice_for_order."
             ),
             "parameters": {
                 "type": "object",

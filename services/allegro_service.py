@@ -14,7 +14,13 @@ from typing import Any
 import httpx
 
 from config.settings import get_settings
-from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine, AllegroTokens
+from models.allegro import (
+    AllegroInvoiceBuyer,
+    AllegroOrder,
+    AllegroOrderLine,
+    AllegroTokens,
+    ThreadOrderMatch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +285,60 @@ def is_thread_unread(thread: dict[str, Any]) -> bool:
 def thread_last_message_at(thread: dict[str, Any]) -> str:
     """Timestamp of a thread's most recent message (Allegro: lastMessageDateTime)."""
     return thread.get("lastMessageDateTime") or ""
+
+
+# What a message can be "about" in Allegro's `relatedObject` tag. Only an order
+# tag carries a checkout-form id; OFFER and DISPUTE tags point at something else
+# entirely and must never be read as an order number.
+_RELATED_ORDER_TYPES = frozenset({"ORDER", "CHECKOUT_FORM"})
+
+
+def message_related_order_id(message: dict[str, Any]) -> str:
+    """The order a buyer message was written from, or "" when there is none.
+
+    A buyer who writes from an order page ("Napisz do sprzedającego" on a
+    bought item) sends a message Allegro tags with
+    `relatedObject: {"type": "ORDER", "id": "<checkoutFormId>"}`. That tag is
+    the only reliable order number attached to a message — the text itself
+    almost never has one ("czy jest możliwość wystawienia faktury do tej
+    transakcji" names no transaction at all; the tag does).
+
+    Messages written outside an order context carry no tag, or one pointing at
+    an offer or a dispute. Those return "" so the caller falls back to the
+    buyer's order history instead of quoting an offer id as an order number.
+    """
+    related = message.get("relatedObject") or {}
+    if isinstance(related, dict) and str(related.get("type") or "").upper() in _RELATED_ORDER_TYPES:
+        return str(related.get("id") or "")
+    # Some payloads nest the order directly instead of tagging it (this is the
+    # shape /messaging/threads accepts when WE start a thread — see
+    # create_thread), so it is worth reading here too.
+    order = message.get("order") or {}
+    if isinstance(order, dict) and order.get("id"):
+        return str(order["id"])
+    return ""
+
+
+def thread_related_order_id(messages: list[dict[str, Any]]) -> str:
+    """The order the most recent tagged message in a thread was written from.
+
+    Newest-first, because a long-running thread can start on one order and be
+    reused for the next one — the question being asked now is about the latest.
+    """
+    for message in sorted(messages, key=lambda m: str(m.get("createdAt") or ""), reverse=True):
+        order_id = message_related_order_id(message)
+        if order_id:
+            return order_id
+    return ""
+
+
+def thread_buyer_login(messages: list[dict[str, Any]]) -> str:
+    """The buyer's login, taken from the first message they wrote in the thread."""
+    for message in messages:
+        author = message.get("author") or {}
+        if author.get("isInterlocutor") and author.get("login"):
+            return str(author["login"])
+    return ""
 
 
 class AllegroService:
@@ -1074,6 +1134,66 @@ class AllegroService:
     async def get_thread_messages(self, thread_id: str, limit: int = 20) -> list[dict[str, Any]]:
         data = await self._get(f"/messaging/threads/{thread_id}/messages", params={"limit": min(limit, 20)})
         return data.get("messages", [])
+
+    async def resolve_thread_order(
+        self,
+        thread_id: str,
+        messages: list[dict[str, Any]] | None = None,
+        buyer_login: str = "",
+        history_limit: int = 10,
+    ) -> ThreadOrderMatch:
+        """Work out which order a message thread is about.
+
+        The buyer's own wording is no help here — "faktura do tej transakcji"
+        points at an order the seller then has to find by hand. Two sources
+        answer it instead, in order of certainty:
+
+        1. Allegro's `relatedObject` tag on the messages (see
+           message_related_order_id) — the checkout-form id the buyer wrote
+           from, exact and free: it is already in the payload this thread was
+           read with, so pass `messages` in and this costs no extra call.
+        2. The buyer's order history, when nothing is tagged. One order means
+           one possible transaction; several stay unresolved with the list
+           attached, because attaching an invoice to the wrong checkout form is
+           worse than asking which one it was.
+
+        Never raises for an unreachable order or history — a thread that can't
+        be matched comes back unresolved, so reading a message never fails on
+        account of the lookup bolted onto it.
+        """
+        if messages is None:
+            messages = await self.get_thread_messages(thread_id)
+
+        login = buyer_login or thread_buyer_login(messages)
+
+        order_id = thread_related_order_id(messages)
+        if order_id:
+            match = ThreadOrderMatch(buyer_login=login, order_id=order_id, source="message")
+            try:
+                match.candidates = [await self.get_order(order_id)]
+            except AllegroAPIError as exc:
+                # The tag is the answer even when the order itself can't be
+                # read right now — losing the details must not lose the number.
+                logger.warning("resolve_thread_order: order %s unreadable: %s", order_id, exc)
+            return match
+
+        if not login:
+            return ThreadOrderMatch()
+
+        try:
+            orders = await self.get_orders(buyer_login=login, limit=history_limit)
+        except AllegroAPIError as exc:
+            logger.warning("resolve_thread_order: history for %s unreadable: %s", login, exc)
+            return ThreadOrderMatch(buyer_login=login)
+
+        if len(orders) == 1:
+            return ThreadOrderMatch(
+                buyer_login=login,
+                order_id=orders[0].order_id,
+                source="buyer_history",
+                candidates=orders,
+            )
+        return ThreadOrderMatch(buyer_login=login, candidates=orders)
 
     async def send_message(self, thread_id: str, text: str) -> dict[str, Any]:
         body = {"text": text, "type": "ANSWER"}
