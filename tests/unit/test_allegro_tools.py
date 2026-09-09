@@ -54,6 +54,17 @@ class TestAllegroTools:
         for name in expected:
             assert name in names, f"Expected tool '{name}' not found"
 
+    def test_order_listings_can_filter_by_order_value(self):
+        """A question naming an amount ("zamówienie na kwotę ponad 2000 zł")
+        has to have a parameter to land in — otherwise the amount is dropped
+        and the seller gets the whole unfiltered list (seen in production)."""
+        by_name = {t["function"]["name"]: t for t in self.tools}
+        for name in ("get_orders", "get_orders_delivery"):
+            props = by_name[name]["function"]["parameters"]["properties"]
+            assert "min_value" in props, f"{name} cannot filter by order value"
+            assert "max_value" in props, f"{name} cannot filter by order value"
+            assert props["min_value"]["type"] == "number"
+
     def test_names_are_unique(self):
         names = [t["function"]["name"] for t in self.tools]
         assert len(names) == len(set(names)), "Duplicate tool names found"

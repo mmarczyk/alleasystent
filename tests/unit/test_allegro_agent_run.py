@@ -428,6 +428,90 @@ class TestFormatInstruction:
         assert len(last_system["content"]) < len(first_system["content"]) / 2
 
 
+class TestValueBoundsReachTheTool:
+    """The amount the seller stated is put back onto the listing call in
+    Python, whichever layer chose it — see AllegroAgent._with_value_bounds.
+    A dropped amount is invisible: the listing comes back full and reads like
+    an answer, which is how "dostawa zamówienia na kwotę ponad 2000 zł" turned
+    into 100 unrelated orders grouped by courier."""
+
+    @pytest.mark.asyncio
+    async def test_the_llm_path_gets_the_amount_the_model_omitted(self):
+        agent = _agent({"get_orders": "**Zamówienie** `big`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {"include_delivery": True})]),
+            _resp(),
+        ])
+
+        await agent.run(
+            "Ile kosztowała dostawa zamówienia z ostatnich dni które było na kwotę ponad 2000zl"
+        )
+
+        agent._execute_tool.assert_awaited_once_with(
+            "get_orders", {"include_delivery": True, "min_value": 2000.0}
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_deterministic_path_gets_it_too(self):
+        """The stage matchers resolve "ile mam nowych zamówień" without an LLM
+        at all, so an amount in the same sentence had nothing to catch it."""
+        agent = _agent({"get_new_orders": "Masz **1** nowe zamówienie."})
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match")
+        )
+
+        await agent.run("ile mam nowych zamówień powyżej 500 zł")
+
+        agent._execute_tool.assert_awaited_once_with(
+            "get_new_orders", {"count_only": True, "min_value": 500.0}
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_bound_the_model_passed_itself_is_left_alone(self):
+        """Only ever adds — the model reading "ponad 2 tysiące" as 2000 must
+        not be second-guessed by a regex that read nothing."""
+        agent = _agent({"get_orders": "**Zamówienie** `big`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {"min_value": 2000})]),
+            _resp(),
+        ])
+
+        await agent.run("zamówienia powyżej 500 zł")
+
+        agent._execute_tool.assert_awaited_once_with("get_orders", {"min_value": 2000})
+
+    @pytest.mark.asyncio
+    async def test_a_query_with_no_amount_changes_nothing(self):
+        agent = _agent({"get_orders": "**Zamówienie** `x`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {})]),
+            _resp(),
+        ])
+
+        await agent.run("pokaż wszystkie zamówienia")
+
+        agent._execute_tool.assert_awaited_once_with("get_orders", {})
+
+    @pytest.mark.asyncio
+    async def test_tools_that_are_not_order_listings_are_untouched(self):
+        """calculate_order_profit's own number is a per-unit purchase cost —
+        an order-value filter has no meaning there and no business appearing
+        in its arguments."""
+        agent = _agent({"calculate_order_profit": "- Zysk: 100,00 PLN"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call(
+                "c1", "calculate_order_profit", {"order_id": "abc", "unit_cost": 8.1}
+            )]),
+            _resp(),
+        ])
+
+        await agent.run("dla tego zamówienia policz zysk przy koszcie 8,10 zł za sztukę")
+
+        agent._execute_tool.assert_awaited_once_with(
+            "calculate_order_profit", {"order_id": "abc", "unit_cost": 8.1}
+        )
+
+
 class TestOrderDetailsLeadIn:
     """A details block answers a question the seller asked in their own words
     ("ile kosztowała dostawa?"), but on its own it opens with an order id and
