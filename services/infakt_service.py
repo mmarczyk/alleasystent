@@ -64,6 +64,27 @@ class InvoiceTooLargeError(Exception):
         super().__init__(f"invoice PDF is {size_bytes} bytes, Allegro accepts {limit_bytes}")
 
 
+class KsefNotAllowedError(Exception):
+    """The invoice may not go to KSeF, and no caller may override that.
+
+    KSeF (Krajowy System e-Faktur) carries structured invoices between
+    BUSINESSES, addressed by NIP. An invoice issued to a private person has no
+    NIP to address it by; sending one is a filing that should never have been
+    made and that nobody here can withdraw. So the ban is enforced at the last
+    point before the request leaves (InfaktService.send_to_ksef) and not only
+    where the tool is chosen — a future caller, a retry or a model that reads
+    its instructions loosely all end up here.
+    """
+
+    def __init__(self, invoice_uuid: str, number: str = ""):
+        self.invoice_uuid = invoice_uuid
+        self.number = number
+        super().__init__(
+            f"invoice {number or invoice_uuid} is issued to a private person — KSeF is for "
+            "business (NIP) invoices only"
+        )
+
+
 class InfaktTaskError(Exception):
     """Raised when an async invoice-creation task finishes with a failure code."""
 
@@ -210,11 +231,43 @@ class InfaktService:
         Submission is asynchronous on inFakt's side — this call only confirms
         the request was accepted (status "sent"), not that KSeF finished
         processing it. Final status must be checked in the inFakt panel.
+
+        A private-person invoice never gets that far: the invoice is read back
+        from inFakt first and the request is refused here, on the last line
+        before it leaves this process, with KsefNotAllowedError. The tool layer
+        checks the same thing earlier and with a friendlier message — this one
+        exists because that check can be bypassed (a new caller, a retry, a
+        model that decided the rule did not apply this time) and a filing made
+        by mistake cannot be withdrawn.
         """
+        invoice = await self.get_invoice(invoice_uuid)
+        if is_private_person_invoice(invoice):
+            raise KsefNotAllowedError(invoice_uuid, invoice.get("number", "") or "")
         return await self._post(f"/invoices/{invoice_uuid}/send_to_ksef.json")
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def is_private_person_invoice(invoice: dict[str, Any]) -> bool:
+    """Whether this inFakt invoice was issued to a private person rather than a
+    business — the one fact that decides whether KSeF is allowed at all.
+
+    Two signals, either of which is enough, because they are two sides of the
+    same payload build_invoice_payload() writes: the explicit
+    client_business_activity_kind = "private_person" it sets for a person, and
+    the client_tax_code (NIP) it only ever sets for a company.
+
+    A missing NIP counts as a private person on purpose. KSeF addresses the
+    buyer BY NIP, so an invoice without one cannot be filed correctly whatever
+    the rest of the record says — and if inFakt ever answers with a shape this
+    cannot read, refusing is the recoverable mistake (the seller can still send
+    it from the inFakt panel) while sending is not.
+    """
+    kind = str(invoice.get("client_business_activity_kind") or "").strip().lower()
+    if kind == "private_person":
+        return True
+    return not str(invoice.get("client_tax_code") or "").strip()
 
 
 # ── Invoice payload builder ──────────────────────────────────────────────────
@@ -354,9 +407,21 @@ def _confirm_prompt(order_id: str) -> str:
     """
     return (
         f"Sprawdź ją pod linkiem. Jeśli wszystko się zgadza, napisz „dołącz fakturę do "
-        f"zamówienia `{order_id}`” — dopiero wtedy dołączę ją do zamówienia. "
-        "Do KSeF też wysyłam wyłącznie na Twoje wyraźne polecenie."
+        f"zamówienia `{order_id}`” — dopiero wtedy dołączę ją do zamówienia."
     )
+
+
+def _ksef_note(is_private_person: bool) -> str:
+    """What can happen to this invoice in KSeF, said at issuance — that is where
+    the seller decides what to ask for next, and asking for something that is
+    forbidden wastes a round trip and reads like the assistant changed its mind.
+    """
+    if is_private_person:
+        return (
+            " Do KSeF ta faktura NIE pójdzie i nie mogę jej tam wysłać: nabywcą jest osoba "
+            "prywatna, a KSeF przyjmuje faktury dla firm, adresowane NIP-em."
+        )
+    return " Do KSeF też wysyłam wyłącznie na Twoje wyraźne polecenie."
 
 
 async def _report_earlier_issuance(order_id: str, known: dict) -> str:
@@ -441,7 +506,8 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
         return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
 
-    buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
+    is_private_person = not address.get("company_name")
+    buyer_kind = "osoba prywatna" if is_private_person else "firma"
     link_line = await _share_link_suffix(infakt, invoice_uuid)
 
     await invoice_ledger.record_issued(
@@ -453,5 +519,5 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         f"ID faktury w inFakt: `{invoice_uuid}`\n"
         f"Nabywca: {buyer_kind}.\n"
         f"⏸️ NIE dołączyłem jej do zamówienia w Allegro — kupujący jej na razie nie widzi. "
-        f"{_confirm_prompt(order_id)}"
+        f"{_confirm_prompt(order_id)}{_ksef_note(is_private_person)}"
     )

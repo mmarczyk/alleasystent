@@ -160,6 +160,14 @@ async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
     assert result["duration_ms"] < 1000, f"still waiting up front: {result['duration_ms']} ms"
 
 
+async def test_a_private_person_invoice_never_reaches_the_ksef_endpoint():
+    """The refusal has to be a refusal, not a well-worded message written after
+    the request already went out — a KSeF filing cannot be withdrawn."""
+    result = await run_case(CASES_BY_ID["send_invoice_to_ksef__private_person"])
+    assert not [c for c in result["api_calls"] if "send_to_ksef" in c], result["api_calls"]
+    assert result["output"].startswith("🚫"), result["output"]
+
+
 async def test_issue_invoice_waits_out_infakts_mid_processing_status():
     """inFakt answers 140 "Zlecenie jest w trakcie przetwarzania" while it is
     still building the invoice. Only 100 counted as pending, so a task caught

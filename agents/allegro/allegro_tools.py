@@ -1197,8 +1197,13 @@ ALLEGRO_TOOLS: list[dict] = [
                 "earlier issue_invoice_for_order call in this conversation — never guess it. "
                 "Submission is asynchronous — this only confirms the request was accepted, final "
                 "processing must be checked in the inFakt panel. "
-                "Typically relevant for company (B2B) buyers; don't call it for a private-person buyer "
-                "unless the user explicitly asks for it."
+                "ONLY for a COMPANY (B2B) buyer, identified by a NIP. An invoice issued to a PRIVATE "
+                "PERSON must NEVER be sent to KSeF — KSeF addresses the buyer by NIP and a private "
+                "person has none, so the filing would be wrong and cannot be withdrawn. This is not a "
+                "default the user can override: if they ask for it anyway, say why it is impossible "
+                "instead of calling this tool. The buyer type comes from get_order_invoice_data / the "
+                "issue_invoice_for_order result ('Nabywca: firma' vs 'osoba prywatna'); the call is "
+                "refused for a private person whatever you pass."
             ),
             "parameters": {
                 "type": "object",

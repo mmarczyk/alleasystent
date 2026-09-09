@@ -145,6 +145,83 @@ class TestCreateInvoicePolling:
         await svc.aclose()
 
 
+class TestKsefIsForBusinessInvoicesOnly:
+    """KSeF carries invoices between BUSINESSES and addresses the buyer by NIP.
+    An invoice made out to a private person has no NIP to be addressed by, so
+    filing one is a mistake that cannot be withdrawn — the ban is enforced on
+    the last line before the request leaves this process, not only where the
+    tool is chosen."""
+
+    @staticmethod
+    async def _service(invoice: dict):
+        """An InfaktService that answers GET /invoices/{uuid} with `invoice` and
+        records every request, so a POST that should never happen is visible."""
+        from services.infakt_service import InfaktService
+
+        calls: list[tuple[str, str]] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            calls.append((request.method, request.url.path))
+            if request.method == "GET":
+                return httpx.Response(200, json=invoice)
+            return httpx.Response(200, json={"status": "sent"})
+
+        svc = InfaktService()
+        await svc._client.aclose()
+        svc._client = httpx.AsyncClient(
+            base_url="https://api.infakt.pl/api/v3",
+            transport=httpx.MockTransport(handle),
+        )
+        return svc, calls
+
+    def test_the_explicit_private_person_marker_is_read(self):
+        from services.infakt_service import is_private_person_invoice
+
+        assert is_private_person_invoice({
+            "client_business_activity_kind": "private_person",
+            "client_first_name": "Anna",
+        }) is True
+
+    def test_a_company_with_a_nip_is_not_a_private_person(self):
+        from services.infakt_service import is_private_person_invoice
+
+        assert is_private_person_invoice({
+            "client_company_name": "Firma sp. z o.o.", "client_tax_code": "5252445767",
+        }) is False
+
+    def test_no_nip_counts_as_a_private_person(self):
+        """KSeF addresses the buyer by NIP, so an invoice without one cannot be
+        filed correctly whatever else the record says — and an unreadable shape
+        must fail the safe way."""
+        from services.infakt_service import is_private_person_invoice
+
+        assert is_private_person_invoice({"client_company_name": "Firma", "client_tax_code": ""}) is True
+        assert is_private_person_invoice({}) is True
+
+    async def test_the_request_is_refused_before_it_is_sent(self):
+        from services.infakt_service import KsefNotAllowedError
+
+        svc, calls = await self._service({
+            "number": "FV/1/2026", "client_business_activity_kind": "private_person",
+        })
+        with pytest.raises(KsefNotAllowedError) as exc_info:
+            await svc.send_to_ksef("inv-1")
+        await svc.aclose()
+
+        assert not [c for c in calls if c[0] == "POST"], calls
+        assert exc_info.value.number == "FV/1/2026"
+
+    async def test_a_company_invoice_still_goes_through(self):
+        svc, calls = await self._service({
+            "number": "FV/2/2026", "client_company_name": "Firma", "client_tax_code": "5252445767",
+        })
+        result = await svc.send_to_ksef("inv-2")
+        await svc.aclose()
+
+        assert result == {"status": "sent"}
+        assert [c for c in calls if c[0] == "POST"]
+
+
 class TestIssueInvoiceForOrderMessages:
     async def test_timeout_warns_against_reissuing(self):
         """A task inFakt accepted but hasn't confirmed must not read like
@@ -248,6 +325,26 @@ class TestIssuingStopsBeforeTheBuyerSeesIt:
 
         assert record.await_args.kwargs["attached"] is False
         assert record.await_args.kwargs["invoice_uuid"] == "inv-9"
+
+    async def test_a_private_person_invoice_says_ksef_is_not_an_option(self):
+        """Said at issuance so the seller does not ask for something that will
+        be refused two messages later."""
+        from unittest.mock import AsyncMock
+
+        allegro = self._allegro()
+        allegro.get_order_invoice_data.return_value = {"first_name": "Anna", "last_name": "Kowalska"}
+        out = await self._issue(allegro, self._infakt(), AsyncMock())
+
+        assert "osoba prywatna" in out
+        assert "Do KSeF ta faktura NIE pójdzie" in out
+
+    async def test_a_company_invoice_still_offers_ksef_on_request(self):
+        from unittest.mock import AsyncMock
+
+        out = await self._issue(self._allegro(), self._infakt(), AsyncMock())
+
+        assert "Nabywca: firma" in out
+        assert "Do KSeF też wysyłam wyłącznie na Twoje wyraźne polecenie" in out
 
     async def test_a_missing_share_link_does_not_fail_the_issuance(self):
         from unittest.mock import AsyncMock

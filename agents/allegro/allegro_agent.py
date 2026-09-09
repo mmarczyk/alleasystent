@@ -556,12 +556,20 @@ class AllegroAgent(BaseAgent):
         "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
         "invoice_uuid — never guess it, call ask_clarifying_question instead. Same rule: only after "
         "the user asks for it on a later turn.\n"
+        "  - KSeF IS FOR COMPANY BUYERS ONLY. An invoice for a PRIVATE PERSON ('osoba prywatna', no "
+        "NIP) must NEVER go to KSeF: KSeF addresses the buyer by NIP, so the filing would be wrong "
+        "and cannot be withdrawn. This is a hard rule, not a default — if the user asks for it "
+        "anyway, do NOT call send_invoice_to_ksef; answer that the invoice is made out to a private "
+        "person, that KSeF only takes NIP-addressed business invoices, and that if the buyer really "
+        "is a company they should fix the NIP on the invoice in the inFakt panel first. The tool "
+        "refuses such a call regardless, so calling it only wastes a turn.\n"
         "  - So: once the user confirms the issued invoice looks fine and hasn't named a channel yet, "
         "call get_order_invoice_data for that order to check whether the buyer is a company or a "
         "private person, then ASK in your reply: "
         "for a company buyer — 'Wysłać fakturę do KSeF i dołączyć ją do zamówienia w Allegro?'; "
-        "for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' (don't default to KSeF for "
-        "a private person — only call send_invoice_to_ksef for one if the user explicitly asks). "
+        "for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' and nothing about KSeF, "
+        "which is not available for that invoice at all (see the hard rule above — do not offer it, "
+        "and do not call the tool if the user asks for it anyway). "
         "Only call the delivery tool(s) after the user answers that question.\n"
         "BILLING ROUTING: "
         "1) Specific order costs, delivery cost of a specific order included → ALWAYS "
@@ -3044,11 +3052,7 @@ class AllegroAgent(BaseAgent):
         except InfaktAPIError as exc:
             logger.error("attach_invoice_to_allegro_order: fetch from inFakt failed for %s: %s", invoice_uuid, exc)
             if exc.status_code == 404:
-                return (
-                    f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
-                    "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
-                    "zamówienia ponownie przez issue_invoice_for_order."
-                )
+                return self._unknown_infakt_invoice(invoice_uuid)
             return f"❌ Nie udało się pobrać faktury `{invoice_uuid}` z inFakt: {exc}"
         except InvoiceTooLargeError as exc:
             return (
@@ -3078,17 +3082,46 @@ class AllegroAgent(BaseAgent):
         await invoice_ledger.mark_attached(user_id, order_id, number=number)
         return f"✅ Faktura {number or invoice_uuid} dołączona do zamówienia `{order_id}` w Allegro — kupujący zobaczy ją na stronie zamówienia."
 
+    @staticmethod
+    def _unknown_infakt_invoice(invoice_uuid: str) -> str:
+        """inFakt's 404 for an invoice ID — the same answer wherever it comes up."""
+        return (
+            f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
+            "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
+            "zamówienia ponownie przez issue_invoice_for_order."
+        )
+
+    @staticmethod
+    def _ksef_refused_for_private_person(invoice_uuid: str, number: str) -> str:
+        """One wording for both layers of the private-person ban, so the seller
+        gets the same explanation wherever it was caught."""
+        return (
+            f"🚫 Faktury {number or invoice_uuid} nie wyślę do KSeF — jest wystawiona dla osoby "
+            "prywatnej, a KSeF przyjmuje faktury dla firm, adresowane NIP-em. Nabywca bez NIP-u "
+            "nie ma tam swojego miejsca, więc takie zgłoszenie byłoby błędne i nie da się go "
+            "wycofać.\n"
+            "Jeśli to pomyłka i nabywcą jest firma, popraw dane nabywcy (NIP) w panelu inFakt — "
+            "wtedy wyślę ją bez problemu."
+        )
+
     async def _send_invoice_to_ksef(self, invoice_uuid: str) -> str:
         """Submit an already-issued inFakt invoice to KSeF.
 
-        Filing with the tax office is as final as showing the invoice to the
-        buyer, so it gets the same same-turn block as
-        _attach_invoice_to_allegro_order: an invoice issued a second ago has not
-        been read by anyone. Which invoices go to KSeF at all is still the
-        model's routing decision from the system prompt (companies yes, private
-        buyers only on request) — this only stops it happening unseen.
+        Two things are refused here before anything is sent. Filing with the tax
+        office is as final as showing the invoice to the buyer, so it gets the
+        same same-turn block as _attach_invoice_to_allegro_order: an invoice
+        issued a second ago has not been read by anyone. And an invoice made out
+        to a private person may not go to KSeF at all — that is not a
+        preference the seller or the model can override, so it is read off the
+        invoice itself here and refused again inside
+        InfaktService.send_to_ksef, on the last line before the request leaves.
         """
-        from services.infakt_service import InfaktAPIError, InfaktService
+        from services.infakt_service import (
+            InfaktAPIError,
+            InfaktService,
+            KsefNotAllowedError,
+            is_private_person_invoice,
+        )
 
         if self._issued_an_invoice_this_turn:
             return (
@@ -3098,16 +3131,38 @@ class AllegroAgent(BaseAgent):
             )
 
         infakt = InfaktService.get_instance()
+
+        # Who the invoice is FOR decides whether KSeF is possible at all, and
+        # that is read from the invoice rather than taken from the tool call:
+        # the caller (the model, or the seller insisting) has no say in it. The
+        # service refuses the same invoice again on the way out — this check is
+        # here to say why in a sentence the seller can act on, and to spend no
+        # API call on a request that cannot be granted.
+        try:
+            invoice = await infakt.get_invoice(invoice_uuid)
+        except InfaktAPIError as exc:
+            logger.error("send_invoice_to_ksef: cannot read invoice %s: %s", invoice_uuid, exc)
+            if exc.status_code == 404:
+                return self._unknown_infakt_invoice(invoice_uuid)
+            return (
+                f"❌ Nie udało się sprawdzić, dla kogo jest faktura `{invoice_uuid}` ({exc}), "
+                "więc nie wysyłam jej do KSeF. Spróbuj ponownie za chwilę."
+            )
+
+        if is_private_person_invoice(invoice):
+            return self._ksef_refused_for_private_person(invoice_uuid, invoice.get("number", ""))
+
         try:
             result = await infakt.send_to_ksef(invoice_uuid)
+        except KsefNotAllowedError as exc:
+            # The service said no after this method said yes — the two disagree
+            # only if the invoice changed under us, and the service wins.
+            logger.error("send_invoice_to_ksef: refused at the API boundary: %s", exc)
+            return self._ksef_refused_for_private_person(invoice_uuid, exc.number)
         except InfaktAPIError as exc:
             logger.error("send_invoice_to_ksef: invoice %s failed: %s", invoice_uuid, exc)
             if exc.status_code == 404:
-                return (
-                    f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
-                    "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
-                    "zamówienia ponownie przez issue_invoice_for_order."
-                )
+                return self._unknown_infakt_invoice(invoice_uuid)
             return f"❌ Nie udało się wysłać faktury `{invoice_uuid}` do KSeF: {exc}"
 
         status = result.get("status", "?")
