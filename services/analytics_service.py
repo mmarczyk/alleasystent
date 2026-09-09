@@ -426,6 +426,18 @@ _RE_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 # after _RE_DATE has already consumed the date-shaped digits above.
 _RE_LONG_NUMBER = re.compile(r"\+?\d(?:[\s.\-()]*\d){6,}")
 _RE_POSTCODE = re.compile(r"\b\d{2}-\d{3}\b")
+# An amount, which is neither personal data nor an identifier — it is the
+# intent. Since order value became a real filter (min_value/max_value), "czy
+# miałem zamówienie na kwotę ponad X" is a question shape a classifier has to
+# recognise, and the digits are the least interesting part of it: 200, 2000 and
+# 100 000 are one question, not three. It needs its own placeholder rather than
+# falling through to the number rule below, which would label a seven-digit
+# amount "<NUMER>" — an identifier, the one thing it is not. Anchored on the
+# currency marker, so it can never swallow a phone number or a NIP.
+_RE_AMOUNT = re.compile(
+    r"\b\d[\d\s.,]*\s*(?:z[łl](?:otych|ote|ot[ey])?|pln)\b",
+    re.IGNORECASE,
+)
 # A buyer's Allegro login ("jan_kowalski88", "anna.kowalska88", "sklep-abc").
 # Matches a token that starts with a letter and carries a digit or underscore
 # somewhere in it — the shape agents/allegro/allegro_tools.py calls
@@ -454,6 +466,9 @@ def redact(text: str) -> str:
     text = _RE_UUID.sub("<ID>", text)
     text = _RE_DATE.sub("<DATA>", text)
     text = _RE_EMAIL.sub("<EMAIL>", text)
+    # Before the number rules: an amount must be claimed by its own placeholder
+    # rather than read as an identifier by the digit-run rule below.
+    text = _RE_AMOUNT.sub("<KWOTA>", text)
     text = _RE_POSTCODE.sub("<NUMER>", text)
     text = _RE_LONG_NUMBER.sub("<NUMER>", text)
 

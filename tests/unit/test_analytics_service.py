@@ -255,6 +255,29 @@ class TestRedact:
     def test_postcode(self):
         assert svc.redact("wyślij na 00-950 Warszawa") == "wyślij na <NUMER> Warszawa"
 
+    def test_amount_gets_its_own_placeholder_not_the_number_one(self):
+        """Order value is a real filter (min_value/max_value), so "na kwotę
+        ponad X" is a question shape the classifier has to recognise. A large
+        amount falling through to the digit-run rule would be labelled
+        "<NUMER>" — an identifier, the one thing an amount is not."""
+        assert svc.redact("zamówienie na kwotę ponad 1 000 000 zł") == (
+            "zamówienie na kwotę ponad <KWOTA>"
+        )
+        assert svc.redact("faktura na 1 234 567,89 PLN") == "faktura na <KWOTA>"
+
+    def test_amounts_of_any_size_read_the_same(self):
+        """200, 2000 and 100 000 are one question, not three — the digits are
+        the least interesting part of an amount question."""
+        assert (
+            svc.redact("zamówienia powyżej 200 zł")
+            == svc.redact("zamówienia powyżej 100 000 zł")
+            == "zamówienia powyżej <KWOTA>"
+        )
+
+    def test_amount_rule_cannot_swallow_a_phone_number(self):
+        """It is anchored on the currency marker; a phone number never has one."""
+        assert svc.redact("Kto to jest 880 197 834?") == "Kto to jest <NUMER>?"
+
     @pytest.mark.parametrize("query", [
         "ile mam nowych zamówień?",
         "pokaż ostatnie 3 zamówienia",
@@ -263,7 +286,6 @@ class TestRedact:
         "top 10 ofert",
         "podsumuj sprzedaż z tego roku z podziałem na miesiące",
         "czy mam wiadomości od kupujących",
-        "zmień cenę oferty na 49,99 zł",
         "Ile paczek muszę dziś nadać?",
         "włącz powiadomienia o zwrotach",
     ])
