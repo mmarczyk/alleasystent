@@ -87,6 +87,23 @@ CASES: list[Case] = [
          ("Brak zamówień od kupującego **np1988**",),
          note="Konto, które nic nie kupiło — jednoznaczne „nie”, a nie „brak zamówień "
               "spełniających kryteria”, które czyta się jak brak zamówień w ogóle."),
+    Case("get_orders__unsent", "get_orders",
+         {"exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]},
+         "Pokaż zamówienia, które nie zostały wysłane",
+         (f"`{ds.ORD_1}`", f"`{ds.ORD_3}`", f"`{ds.ORD_4}`"),
+         note="Negacja etapu = wykluczenie: wszystko, co jeszcze nie wyszło — "
+              "zarówno spakowane, jak i nietknięte. ORD_6 (wysłane) wypada."),
+    Case("get_orders__unsent_over_400", "get_orders",
+         {"exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"],
+          "min_value": 400},
+         "Pokaż mi zamówienie jeszcze nie wysłane o wartości powyżej 400 zł",
+         (f"`{ds.ORD_1}`", f"`{ds.ORD_2}`"),
+         note="Negacja + próg kwotowy w jednym pytaniu — dokładnie to zdanie "
+              "odpowiadało wcześniej listą zamówień JUŻ wysłanych, bez filtra kwoty."),
+    Case("get_orders__value_range", "get_orders", {"min_value": 100, "max_value": 300},
+         "Pokaż zamówienia od 100 do 300 zł",
+         (f"`{ds.ORD_3}`", f"`{ds.ORD_4}`"),
+         note="Widełki kwotowe; 74,98 i 429,98 zł wypadają."),
     Case("get_order_details", "get_order_details", {"order_id": ds.ORD_1},
          f"Szczegóły zamówienia {ds.ORD_1}",
          ("**Zamówienie**", "- Ilość:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),
