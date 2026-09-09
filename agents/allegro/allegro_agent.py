@@ -298,12 +298,12 @@ class AllegroAgent(BaseAgent):
         "   – NOWE: 'nowe', 'świeże', 'do obsłużenia', 'złożone', 'zarejestrowane', "
         "'oczekujące na potwierdzenie', 'co nowego wpadło', 'co mam zacząć', 'co czeka na start', "
         "'nietknięte', 'ile w kolejce' — and the still-to-pack wording 'do spakowania' / "
-        "'co mam spakować' / 'niespakowane' → get_new_orders (fulfillment_status=NEW)\n"
+        "'co mam spakować' → get_new_orders (fulfillment_status=NEW)\n"
         "   – W REALIZACJI: 'w trakcie', 'w realizacji', 'przetwarzane', 'w toku', 'kompletowane', "
         "'co teraz kompletuję', 'co mam w robocie', 'nad czym siedzę', 'nieskończone', "
         "'do dokończenia' → get_orders with fulfillment_status=PROCESSING\n"
         "   – DO WYSŁANIA: 'gotowe do wysyłki', 'oczekujące/czekają na wysyłkę', 'do wysłania', "
-        "'niewysłane', 'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
+        "'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
         "'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania' → get_orders_delivery "
         "(its default filter is already fulfillment_status=READY_FOR_SHIPMENT)\n"
         "   – WYSŁANE: 'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', "
@@ -313,6 +313,21 @@ class AllegroAgent(BaseAgent):
         "   – ODEBRANE: 'odebrane', 'dostarczone', 'zrealizowane', 'zakończone', 'co już dotarło', "
         "'co klient odebrał', 'ile dostarczonych', 'ile zamkniętych' → get_orders with "
         "fulfillment_status=PICKED_UP\n"
+        "   – NEGACJA etapu ('niewysłane', 'jeszcze nie wysłane', 'które nie zostały wysłane', "
+        "'nieodebrane', 'niespakowane') is NEVER one of the stages above: a negation means EVERY "
+        "status other than the one negated, so it goes to get_orders with "
+        "exclude_fulfillment_status — 'niewysłane' → exclude ['SENT', 'IN_TRANSIT', "
+        "'READY_FOR_PICKUP', 'PICKED_UP'] (everything still on your side, packed or not, "
+        "in realizacji included), 'nieodebrane' → exclude ['PICKED_UP'], 'niespakowane' → exclude "
+        "['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. Answering "
+        "'niewysłane' with fulfillment_status=READY_FOR_SHIPMENT hides every order nobody has "
+        "packed yet, and answering it with SENT lists the exact opposite of what was asked.\n"
+        "   – WARTOŚĆ ('powyżej 400 zł', 'ponad 1000', 'poniżej 50 zł', 'od 100 do 300 zł') → "
+        "min_value / max_value on the same listing call, together with whatever stage or negation "
+        "the question also names ('niewysłane powyżej 400 zł' → get_orders with "
+        "exclude_fulfillment_status + min_value=400). These are the ONLY parameters that carry an "
+        "amount — never answer a question naming one without them, the unfiltered listing would "
+        "reach the seller as if it were the filtered answer.\n"
         "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → "
         "get_orders with no fulfillment_status — it is the fallback for every order question the "
         "stages above do not cover, never the first choice when a stage IS named.\n"
@@ -1426,6 +1441,25 @@ class AllegroAgent(BaseAgent):
                 return match.group(1)
         return ""
 
+    @staticmethod
+    def _value_bounds(tool_input: dict[str, Any]) -> tuple[float | None, float | None]:
+        """min_value/max_value as numbers, or None where absent or unusable.
+
+        A malformed bound is dropped rather than raised on, like every other
+        optional filter here — but unlike a bad date it cannot pass silently:
+        _filter_scope_note names the bounds that actually ran, so a dropped one
+        never reads as if the amount had been applied.
+        """
+        bounds: list[float | None] = []
+        for key in ("min_value", "max_value"):
+            raw = tool_input.get(key)
+            try:
+                bounds.append(None if raw is None or raw == "" else float(raw))
+            except (TypeError, ValueError):
+                logger.warning("_value_bounds: unusable %s=%r, ignoring", key, raw)
+                bounds.append(None)
+        return bounds[0], bounds[1]
+
     @classmethod
     def _filter_scope_note(cls, tool_input: dict[str, Any]) -> str:
         """The buyer/period filters an order listing actually ran with, as a
@@ -1451,6 +1485,23 @@ class AllegroAgent(BaseAgent):
             parts.append(f"w okresie od {date_from}")
         elif date_to:
             parts.append(f"w okresie do {date_to}")
+        min_value, max_value = cls._value_bounds(tool_input)
+        if min_value is not None and max_value is not None:
+            parts.append(
+                f"o wartości od {cls._format_price(min_value)} do {cls._format_price(max_value)}"
+            )
+        elif min_value is not None:
+            parts.append(f"o wartości od {cls._format_price(min_value)}")
+        elif max_value is not None:
+            parts.append(f"o wartości do {cls._format_price(max_value)}")
+        excluded = [str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())]
+        if excluded:
+            # "Brak zamówień w innym statusie niż wysłane" — a negated question
+            # answered with the generic "brak zamówień spełniających kryteria"
+            # is indistinguishable from having no orders at all, exactly like
+            # the buyer/period case this note exists for.
+            names = ", ".join(cls._fulfillment_pl(status).lower() for status in excluded)
+            parts.append(f"w innym statusie niż {names}")
         return (" " + " ".join(parts)) if parts else ""
 
     @staticmethod
@@ -3201,12 +3252,25 @@ class AllegroAgent(BaseAgent):
         dispatch_before = self._optional_local_to_utc(
             tool_input.get("dispatch_before_local") or preset.get("dispatch_before_local")
         )
-        exclude_fulfillment = preset.get("exclude_fulfillment") or frozenset()
-        # Both the deadline filter and the status exclusion run client-side (the
-        # Allegro API has no parameter for either — see _dispatch_within), so
-        # fetch a full page and narrow afterwards; filtering a limit=1 fetch
-        # would usually leave nothing at all.
-        fetch_limit = 100 if (dispatch_after or dispatch_before or exclude_fulfillment) else limit
+        # A NEGATED stage ("niewysłane") is an exclusion, never one positive
+        # status: it covers every stage before the one named, so the caller
+        # passes the statuses to drop instead of the single one to keep — see
+        # exclude_fulfillment_status in allegro_tools.py. The presets use the
+        # same mechanism (get_orders_due_today excludes everything already
+        # dispatched), hence one field feeding both.
+        exclude_fulfillment = frozenset(
+            str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())
+        ) or preset.get("exclude_fulfillment") or frozenset()
+        min_value, max_value = self._value_bounds(tool_input)
+        # The deadline filter, the status exclusion and the value bounds all run
+        # client-side (the Allegro API has a parameter for none of them — see
+        # _dispatch_within), so fetch a full page and narrow afterwards;
+        # filtering a limit=1 fetch would usually leave nothing at all.
+        narrows_after_fetch = (
+            dispatch_after or dispatch_before or exclude_fulfillment
+            or min_value is not None or max_value is not None
+        )
+        fetch_limit = 100 if narrows_after_fetch else limit
 
         orders = await self._allegro.get_orders(
             status=status,
@@ -3223,6 +3287,10 @@ class AllegroAgent(BaseAgent):
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
         if dispatch_after or dispatch_before:
             orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)]
+        if min_value is not None:
+            orders = [o for o in orders if (o.total_price or 0) >= min_value]
+        if max_value is not None:
+            orders = [o for o in orders if (o.total_price or 0) <= max_value]
         if preset.get("sort_by_dispatch"):
             # Soonest deadline first — the order the parcels have to be dealt
             # with, not the order they were bought in.

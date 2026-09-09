@@ -23,11 +23,54 @@ _ORDER_PARAMS: dict[str, dict] = {
     "fulfillment_status": {
         "type": "string",
         "description": (
-            "Filter by fulfillment status: NEW = not packed yet ('niespakowane', "
-            "'do spakowania'), READY_FOR_SHIPMENT = packed, awaiting carrier handoff "
-            "('do wysłania', 'niewysłane'), SENT = already handed over."
+            "Filter by fulfillment status — ONE positive stage: NEW = not packed yet "
+            "('do spakowania'), READY_FOR_SHIPMENT = packed, awaiting carrier handoff "
+            "('do wysłania', 'gotowe do wysyłki', 'zapakowane'), SENT = already handed over. "
+            "NEVER use it for a NEGATED question ('niewysłane', 'jeszcze nie wysłane', 'nie "
+            "odebrane'): 'not sent' covers every stage before the handoff, not just the packed "
+            "one, so it is exclude_fulfillment_status that answers it."
         ),
         "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
+    },
+    "exclude_fulfillment_status": {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": [
+                "NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT",
+                "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED",
+            ],
+        },
+        "description": (
+            "NEGATED stage filter — return every order whose fulfillment status is NOT one of "
+            "these. A negated question is never one status, it is everything except one: "
+            "'niewysłane' / 'jeszcze nie wysłane' / 'które nie zostały wysłane' means every "
+            "order that has not left yet (NEW, PROCESSING, READY_FOR_SHIPMENT alike), NOT only "
+            "the packed ones — so pass exclude_fulfillment_status=['SENT', 'IN_TRANSIT', "
+            "'READY_FOR_PICKUP', 'PICKED_UP'] rather than fulfillment_status=READY_FOR_SHIPMENT, "
+            "which silently drops everything nobody has packed yet. Same for any other negation: "
+            "'nieodebrane' → exclude ['PICKED_UP'], 'niespakowane' → exclude "
+            "['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. "
+            "Combine with fulfillment_status only when the question really names both sides."
+        ),
+    },
+    "min_value": {
+        "type": "number",
+        "description": (
+            "Only orders worth AT LEAST this much (the order total the buyer paid, delivery "
+            "included, in the order's own currency). Pass it whenever the question names a "
+            "floor: 'zamówienia powyżej 400 zł', 'ponad 1000 zł', 'od 250 zł w górę', "
+            "'droższe niż 99,99'. Without it the amount the user just said is silently "
+            "ignored and the listing comes back unfiltered, which reads like an answer."
+        ),
+    },
+    "max_value": {
+        "type": "number",
+        "description": (
+            "Only orders worth AT MOST this much (same figure as min_value). For a ceiling: "
+            "'zamówienia poniżej 50 zł', 'do 100 zł', 'tańsze niż 20 zł'. Pass both bounds "
+            "for a range ('od 100 do 300 zł')."
+        ),
     },
     "buyer_login": {
         "type": "string",
@@ -160,7 +203,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "('Wysyłka do' — when the parcel must be handed to the carrier), and totals."
             ),
             "parameters": _order_params(
-                "buyer_login", "dispatch_before_local", "count_only", "limit",
+                "buyer_login", "dispatch_before_local", "min_value", "max_value",
+                "count_only", "limit",
                 limit={
                     "description": (
                         "Max orders to return (1–100). Set to 1 when the user asks about "
@@ -198,6 +242,17 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'zakończone' / 'co już dotarło' / 'co klient odebrał' → fulfillment_status=PICKED_UP. "
                 "For the NOWE stage use get_new_orders and for DO WYSŁANIA / WYSŁANE use "
                 "get_orders_delivery (it adds the courier and tracking details those questions want). "
+                "NEGATED STAGE — only this tool can serve it, via exclude_fulfillment_status: "
+                "'niewysłane' / 'jeszcze nie wysłane' / 'które nie zostały wysłane' → exclude "
+                "['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'] (every order still on your "
+                "side, packed or not); 'nieodebrane' → exclude ['PICKED_UP']; 'niespakowane' → "
+                "exclude ['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', "
+                "'PICKED_UP']. A negation is never one positive status: answering 'niewysłane' with "
+                "fulfillment_status=READY_FOR_SHIPMENT hides every order nobody has packed yet. "
+                "VALUE FILTERS: min_value/max_value are the ONLY way to answer a question that names "
+                "an amount — 'zamówienia powyżej 400 zł' → min_value=400, 'poniżej 50 zł' → "
+                "max_value=50, 'od 100 do 300 zł' → both. Never answer such a question without them: "
+                "the listing would come back unfiltered and read as if it were the answer. "
                 "TIME FILTERS: bought_after/before_local = order PLACEMENT time; "
                 "paid_after/before_local = PAYMENT time ('opłacone po X', 'zapłacone po X'); "
                 "dispatch_after/before_local = DISPATCH DEADLINE ('do kiedy trzeba wysłać'). "
@@ -210,10 +265,12 @@ ALLEGRO_TOOLS: list[dict] = [
                 "('Wysyłka do' — when the parcel must be handed to the carrier)."
             ),
             "parameters": _order_params(
-                "status", "fulfillment_status", "buyer_login", "line_items_sent",
+                "status", "fulfillment_status", "exclude_fulfillment_status",
+                "buyer_login", "line_items_sent",
                 "bought_after_local", "bought_before_local",
                 "paid_after_local", "paid_before_local",
                 "dispatch_after_local", "dispatch_before_local",
+                "min_value", "max_value",
                 "include_delivery", "count_only", "limit",
             ),
         },
@@ -669,9 +726,14 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Default (no filters): orders with fulfillment_status=READY_FOR_SHIPMENT "
                 "(packed and awaiting carrier handoff). "
                 "STAGE 'DO WYSŁANIA' — leave fulfillment_status EMPTY for any wording meaning the "
-                "parcel still has to go out: 'do wysłania', 'gotowe do wysyłki', 'czekają/oczekujące "
-                "na wysyłkę', 'niewysłane', 'do nadania', 'przygotowane do nadania', 'zapakowane' "
-                "(already packed), 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania'. "
+                "parcel is PACKED and still has to go out: 'do wysłania', 'gotowe do wysyłki', "
+                "'czekają/oczekujące na wysyłkę', 'do nadania', 'przygotowane do nadania', "
+                "'zapakowane', 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania'. "
+                "NEGATION 'NIEWYSŁANE' IS NOT THIS STAGE — 'niewysłane', 'jeszcze nie wysłane', "
+                "'które nie zostały wysłane' mean every order that has not left yet, including the "
+                "ones nobody has packed: that is get_orders with "
+                "exclude_fulfillment_status=['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. "
+                "Answering it with this preset silently hides every unpacked order. "
                 "STAGE 'WYSŁANE' — set fulfillment_status=SENT for wording meaning it already left: "
                 "'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', 'co już poszło', "
                 "'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało'. "
@@ -680,7 +742,8 @@ ALLEGRO_TOOLS: list[dict] = [
             ),
             "parameters": _order_params(
                 "status", "fulfillment_status", "buyer_login",
-                "dispatch_after_local", "dispatch_before_local", "count_only", "limit",
+                "dispatch_after_local", "dispatch_before_local",
+                "min_value", "max_value", "count_only", "limit",
                 status={"description": "Order status filter. Default: READY_FOR_PROCESSING."},
                 fulfillment_status={
                     "description": (

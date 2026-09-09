@@ -606,6 +606,148 @@ class TestBuyerLoginScopedListing:
         )
 
 
+class TestNegatedStageAndValueFilters:
+    """The two filters a "pokaż zamówienia jeszcze nie wysłane powyżej 400 zł"
+    question needs. Before them the negation was read as one positive stage
+    (answering with the opposite listing) and the amount had nowhere to go at
+    all, so it was dropped and the whole listing came back as the answer."""
+
+    def _order(self, order_id, total, fulfillment):
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        return AllegroOrder(
+            order_id=order_id,
+            buyer_login="jan_kowalski",
+            buyer_email="jan@example.com",
+            status="READY_FOR_PROCESSING",
+            fulfillment_status=fulfillment,
+            total_price=total,
+            currency="PLN",
+            paid_at="2026-08-27T10:20:00Z",
+            delivery={"method": {"name": "Kurier DPD"}},
+            line_items=[AllegroOrderLine(offer_id="1", offer_name="Sweter", quantity=1, price=total)],
+        )
+
+    def _agent(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=orders)
+        agent._allegro.get_carriers = AsyncMock(return_value=[])
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_excluded_statuses_are_dropped_not_kept(self):
+        agent = self._agent([
+            self._order("nowe-1", 100.0, "NEW"),
+            self._order("w-realizacji-1", 100.0, "PROCESSING"),
+            self._order("spakowane-1", 100.0, "READY_FOR_SHIPMENT"),
+            self._order("wyslane-1", 100.0, "SENT"),
+            self._order("odebrane-1", 100.0, "PICKED_UP"),
+        ])
+
+        result = await agent._dispatch("get_orders", {
+            "exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"],
+        })
+
+        # Everything still on the seller's side survives — including the orders
+        # nobody has packed yet, which the old READY_FOR_SHIPMENT reading hid.
+        assert "`nowe-1`" in result
+        assert "`w-realizacji-1`" in result
+        assert "`spakowane-1`" in result
+        assert "`wyslane-1`" not in result
+        assert "`odebrane-1`" not in result
+
+    @pytest.mark.asyncio
+    async def test_min_value_keeps_only_orders_at_or_above_it(self):
+        agent = self._agent([
+            self._order("male", 399.99, "NEW"),
+            self._order("rowne", 400.0, "NEW"),
+            self._order("duze", 512.30, "NEW"),
+        ])
+
+        result = await agent._dispatch("get_orders", {"min_value": 400})
+
+        assert "`male`" not in result
+        assert "`rowne`" in result
+        assert "`duze`" in result
+
+    @pytest.mark.asyncio
+    async def test_max_value_and_a_range(self):
+        orders = [
+            self._order("a", 30.0, "NEW"),
+            self._order("b", 150.0, "NEW"),
+            self._order("c", 700.0, "NEW"),
+        ]
+
+        below = await self._agent(orders)._dispatch("get_orders", {"max_value": 100})
+        assert "`a`" in below and "`b`" not in below and "`c`" not in below
+
+        between = await self._agent(orders)._dispatch(
+            "get_orders", {"min_value": 100, "max_value": 300}
+        )
+        assert "`b`" in between and "`a`" not in between and "`c`" not in between
+
+    @pytest.mark.asyncio
+    async def test_both_filters_together_on_one_listing(self):
+        agent = self._agent([
+            self._order("tani-niewyslany", 120.0, "NEW"),
+            self._order("drogi-niewyslany", 640.0, "READY_FOR_SHIPMENT"),
+            self._order("drogi-wyslany", 900.0, "SENT"),
+        ])
+
+        result = await agent._dispatch("get_orders", {
+            "exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"],
+            "min_value": 400,
+        })
+
+        assert "`drogi-niewyslany`" in result
+        assert "`tani-niewyslany`" not in result
+        assert "`drogi-wyslany`" not in result
+
+    @pytest.mark.asyncio
+    async def test_empty_result_names_both_filters_instead_of_looking_like_no_orders(self):
+        agent = self._agent([self._order("wyslany", 900.0, "SENT")])
+
+        result = await agent._dispatch("get_orders", {
+            "exclude_fulfillment_status": ["SENT"],
+            "min_value": 400,
+        })
+
+        assert result == (
+            "Brak zamówień o wartości od 400,00 PLN w innym statusie niż wysłane."
+        )
+
+    @pytest.mark.asyncio
+    async def test_count_only_counts_what_was_filtered(self):
+        agent = self._agent([
+            self._order("a", 500.0, "NEW"),
+            self._order("b", 100.0, "NEW"),
+        ])
+
+        result = await agent._dispatch("get_orders", {"min_value": 400, "count_only": True})
+
+        assert "1" in result and "500" not in result
+
+    def test_scope_note_spells_out_the_bounds(self):
+        agent = _make_agent()
+
+        assert agent._filter_scope_note({"min_value": 400}) == " o wartości od 400,00 PLN"
+        assert agent._filter_scope_note({"max_value": 50}) == " o wartości do 50,00 PLN"
+        assert agent._filter_scope_note({"min_value": 100, "max_value": 300}) == (
+            " o wartości od 100,00 PLN do 300,00 PLN"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unusable_bound_is_ignored_and_not_claimed(self):
+        """A bound that cannot be read is dropped like every other malformed
+        filter — and then must not appear in the sentence either, or the seller
+        is told a filter ran that never did."""
+        agent = self._agent([self._order("a", 10.0, "NEW")])
+
+        result = await agent._dispatch("get_orders", {"min_value": "cztery stówy"})
+
+        assert "`a`" in result
+        assert "wartości" not in result
+
+
 class TestGetOrderDetailsDispatch:
     """_dispatch's get_order_details branch now builds the final, ready-to-
     display plain-text bullet list directly in Python instead of handing
