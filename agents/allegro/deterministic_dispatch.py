@@ -60,6 +60,116 @@ def _is_count_only(query: str, topic_re: re.Pattern) -> bool:
     return bool(_COUNT_QUESTION_RE.search(query) and topic_re.search(query))
 
 
+# ── Order value: "na kwotę ponad 2000 zł" ───────────────────────────────────
+# Unlike everything else in this module, this is not a tool matcher: it pulls
+# ONE argument out of the query so the caller can put it back on whatever tool
+# was chosen. It exists because the amount is the filter a model drops most
+# readily — "ile kosztowała dostawa zamówienia z ostatnich dni na kwotę ponad
+# 2000 zł" came back as 100 unrelated orders grouped by courier, the amount
+# gone without a trace, which reads like a real answer to a question nobody
+# asked.
+#
+# Conservative in the same way as the matchers above: a bound is only read
+# when the number carries a CURRENCY (so "ponad 5 sztuk" and "do jutra" are
+# not amounts) AND a direction word says which way it points (so a bare "na
+# kwotę 2000 zł" — an exact amount no order will match to the grosz — yields
+# nothing rather than an empty listing).
+_AMOUNT = r"\d{1,3}(?:[  .]\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+_CURRENCY = r"(?:z[łl]\w*|pln)"
+
+# The same digits mean a per-unit purchase cost, not an order value, in the
+# profit question ("koszt 1 szt. na poziomie 8,10 zł", "kupiłem po 8 zł za
+# sztukę") — reading a bound there would filter the listing by the wrong
+# number entirely.
+_UNIT_COST_CONTEXT_RE = re.compile(
+    r"za\s+(?:1\s+)?szt|/\s*szt|szt\.?\s*(?:po|za)\b|na\s+poziomie|"
+    r"koszt\w*\s+(?:zakupu|1\s+szt|jednostk)|cen[aęy]\s+zakupu|kupi[łl]em\s+po",
+    re.IGNORECASE,
+)
+_VALUE_RANGE_RE = re.compile(
+    rf"\b(?:mi[ęe]dzy|od|between|from)\s+({_AMOUNT})\s*(?:{_CURRENCY})?\s+"
+    rf"(?:a|do|and|to)\s+({_AMOUNT})\s*{_CURRENCY}",
+    re.IGNORECASE,
+)
+# \b on the direction word is not cosmetic: without it "min" matched inside
+# "termin" and "od" inside "przychód", so "jaki mam termin 500 zł" silently
+# grew a min_value=500 filter.
+_VALUE_MIN_RE = re.compile(
+    rf"\b(?:ponad|powy[żz]ej|wi[ęe]cej\s+ni[żz]|wy[żz]sz\w*\s+ni[żz]|dro[żz]sz\w*\s+ni[żz]|"
+    rf"przekracza\w*|co\s+najmniej|nie\s+mniej\s+ni[żz]|min(?:imum)?\.?|od|"
+    rf"above|over|more\s+than|at\s+least)\s+"
+    rf"({_AMOUNT})\s*{_CURRENCY}",
+    re.IGNORECASE,
+)
+_VALUE_MAX_RE = re.compile(
+    rf"\b(?:poni[żz]ej|mniej\s+ni[żz]|ni[żz]sz\w*\s+ni[żz]|ta[ńn]sz\w*\s+ni[żz]|"
+    rf"nie\s+wi[ęe]cej\s+ni[żz]|maks(?:ymalnie)?\.?|max\.?|do|"
+    rf"below|under|less\s+than|at\s+most|up\s+to)\s+"
+    rf"({_AMOUNT})\s*{_CURRENCY}",
+    re.IGNORECASE,
+)
+
+
+def _parse_amount(raw: str) -> float | None:
+    """"2 000", "1.500,50", "2000zl" → a number.
+
+    Polish writes thousands with a space or a dot and decimals with a comma,
+    but sellers type all of it inconsistently, so both separators are resolved
+    by shape: a dot followed by exactly three digits is a thousands separator,
+    anything else is the decimal point.
+    """
+    text = raw.replace(" ", "").replace(" ", "")
+    if "." in text and "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif "," in text:
+        text = text.replace(",", ".")
+    elif "." in text:
+        head, _, tail = text.rpartition(".")
+        if head and len(tail) == 3:
+            text = head.replace(".", "") + tail
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def extract_value_bounds(query: str) -> dict[str, float]:
+    """min_value/max_value the query states outright, as order-listing args.
+
+    Returns {} whenever nothing is stated with enough confidence — the caller
+    then leaves the model's own arguments exactly as they were.
+    """
+    if _UNIT_COST_CONTEXT_RE.search(query):
+        return {}
+    span = _VALUE_RANGE_RE.search(query)
+    if span:
+        low, high = _parse_amount(span.group(1)), _parse_amount(span.group(2))
+        if low is not None and high is not None:
+            # One explicit range, so a backwards "od 100 zł do 50 zł" is a typo
+            # with an obvious meaning — read it as the range it describes. (Two
+            # bounds read from two SEPARATE patterns are different: backwards
+            # there means one of them picked up an unrelated number, and that
+            # pair is dropped below rather than guessed at.)
+            return {"min_value": min(low, high), "max_value": max(low, high)}
+    bounds: dict[str, float] = {}
+    lower = _VALUE_MIN_RE.search(query)
+    if lower:
+        amount = _parse_amount(lower.group(1))
+        if amount is not None:
+            bounds["min_value"] = amount
+    upper = _VALUE_MAX_RE.search(query)
+    if upper:
+        amount = _parse_amount(upper.group(1))
+        if amount is not None:
+            bounds["max_value"] = amount
+    # Two bounds from two independent patterns that come out backwards mean one
+    # of them read a number belonging to something else in the sentence — half
+    # a filter, or a wrong one, is worse than none.
+    if len(bounds) == 2 and bounds["min_value"] > bounds["max_value"]:
+        return {}
+    return bounds
+
+
 # ── zamowienia: the order-stage vocabulary ──────────────────────────────────
 # An order moves through five stages, and a seller names the stage they mean
 # in almost every order question they ask — but with wildly different wording
@@ -301,26 +411,6 @@ _ORDER_CONTENTS_UNIT_RE = re.compile(
     r"\bsztuk\w*\b|\bszt\.?\b|motk[óo]w|\bpozycj\w*|produkt[óo]w|towar[óo]w|przedmiot[óo]w",
     re.IGNORECASE,
 )
-
-
-# An AMOUNT in an order question is a filter no matcher here extracts: every
-# one of them resolves stage wording alone, and the listing they return is
-# passed straight to the seller (see _PASSTHROUGH_TOOLS), so a dropped "powyżej
-# 400 zł" reads as if it had been applied — the whole store's list presented as
-# the answer to a filtered question. Bailing hands the turn to the LLM, which
-# can pass min_value/max_value to get_orders.
-_AMOUNT_RE = re.compile(
-    r"\d[\d\s.,]*\s*(?:z[łl]\b|zlot\w*|z[łl]ot\w*|pln\b)|"
-    r"\b(?:powy[żz]ej|poni[żz]ej|ponad|co\s+najmniej|przynajmniej|maksymalnie|"
-    r"wi[ęe]cej\s+ni[żz]|mniej\s+ni[żz]|dro[żz]sz\w*\s+ni[żz]|ta[ńn]sz\w*\s+ni[żz])\s+\d",
-    re.IGNORECASE,
-)
-
-
-def names_an_amount(query: str) -> bool:
-    """True when an order question names a money amount — this layer's bail,
-    see _AMOUNT_RE."""
-    return bool(_AMOUNT_RE.search(query))
 
 
 def refers_to_one_known_order(query: str) -> bool:
@@ -708,7 +798,7 @@ def resolve_deterministic(query: str, labels: set[str]) -> tuple[str, dict] | No
     # a follow-up about one already-shown order is unservable HERE whichever
     # listing preset the wording would otherwise resolve to, and a matcher
     # added later inherits the bail instead of having to repeat it.
-    if label == "zamowienia" and (refers_to_one_known_order(query) or names_an_amount(query)):
+    if label == "zamowienia" and refers_to_one_known_order(query):
         return None
     for tool_name, matcher in _LABEL_MATCHERS.get(label, []):
         result = matcher(query)

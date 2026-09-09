@@ -86,6 +86,25 @@ _ORDER_PARAMS: dict[str, dict] = {
             "ask for the login rather than guessing it."
         ),
     },
+    "min_value": {
+        "type": "number",
+        "description": (
+            "Return only orders whose VALUE (the total the buyer paid, delivery included) is "
+            "AT LEAST this many PLN. This is the ONLY way to answer a question that names an "
+            "order amount — 'zamówienie na kwotę ponad 2000 zł', 'zamówienia powyżej 500 zł', "
+            "'najdroższe zamówienie z tego tygodnia', 'czy było coś za więcej niż 1000 zł'. "
+            "Without it the amount is silently dropped and the reply is the whole unfiltered "
+            "list, which reads like an answer to a question nobody asked."
+        ),
+    },
+    "max_value": {
+        "type": "number",
+        "description": (
+            "Return only orders whose VALUE (the total the buyer paid, delivery included) is "
+            "AT MOST this many PLN — 'zamówienia poniżej 100 zł', 'drobne zamówienia do 50 zł'. "
+            "Combine with min_value for a range ('między 500 a 1000 zł')."
+        ),
+    },
     "line_items_sent": {
         "type": "array",
         "items": {"type": "string", "enum": ["NONE", "SOME", "ALL"]},
@@ -266,7 +285,14 @@ ALLEGRO_TOOLS: list[dict] = [
                 "return an unrelated list of unrelated orders. Use get_order_details instead for any "
                 "question (status, contents, invoice, cost) about one already-identified order. "
                 "Every order returned carries its current status and its dispatch deadline "
-                "('Wysyłka do' — when the parcel must be handed to the carrier)."
+                "('Wysyłka do' — when the parcel must be handed to the carrier). "
+                "ORDER VALUE: min_value/max_value filter by the amount the buyer paid, and are "
+                "the ONLY way to answer a question that names one — 'zamówienie na kwotę ponad "
+                "2000 zł', 'zamówienia powyżej 500 zł z tego tygodnia', 'najdroższe zamówienie z "
+                "ostatnich dni', 'coś poniżej 100 zł'. Pass them together with the period filters "
+                "the question names, and add include_delivery=true when the question is about "
+                "that order's DELIVERY (courier, tracking, koszt dostawy) — then this one call "
+                "answers it. Never drop the amount and return an unfiltered list."
             ),
             "parameters": _order_params(
                 "status", "fulfillment_status", "exclude_fulfillment_status",
@@ -727,6 +753,12 @@ ALLEGRO_TOOLS: list[dict] = [
                 "combining orders with shipping/courier/delivery. "
                 "For the delivery cost of ONE already-identified order use get_order_details "
                 "instead — this tool has no order_id filter. "
+                "For the delivery cost of ONE order the user describes by its AMOUNT or by WHEN "
+                "it was placed ('dostawa zamówienia z ostatnich dni na kwotę ponad 2000 zł') use "
+                "get_orders with min_value/bought_after_local + include_delivery=true instead: "
+                "this tool defaults to the packed-and-waiting stage, so an order already sent — "
+                "or not yet packed — would be silently excluded and the seller would get the "
+                "whole courier list instead of their order (a real bug seen in production). "
                 "Default (no filters): orders with fulfillment_status=READY_FOR_SHIPMENT "
                 "(packed and awaiting carrier handoff). "
                 "STAGE 'DO WYSŁANIA' — leave fulfillment_status EMPTY for any wording meaning the "
@@ -746,6 +778,7 @@ ALLEGRO_TOOLS: list[dict] = [
             ),
             "parameters": _order_params(
                 "status", "fulfillment_status", "buyer_login",
+                "bought_after_local", "bought_before_local",
                 "dispatch_after_local", "dispatch_before_local",
                 "min_value", "max_value", "count_only", "limit",
                 status={"description": "Order status filter. Default: READY_FOR_PROCESSING."},

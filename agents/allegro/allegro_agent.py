@@ -24,7 +24,11 @@ from agents.allegro.allegro_tools import (
     resolve_output_format,
     tools_for_labels,
 )
-from agents.allegro.deterministic_dispatch import resolve_deterministic, wants_latest_order_details
+from agents.allegro.deterministic_dispatch import (
+    extract_value_bounds,
+    resolve_deterministic,
+    wants_latest_order_details,
+)
 from agents.base_agent import BaseAgent
 from agents.perf import StageTimer
 from models.conversation import AgentResponse
@@ -404,8 +408,24 @@ class AllegroAgent(BaseAgent):
         "(what the buyer paid — already inside the order value — and what Allegro charged you for "
         "the shipment, plus the balance), so never answer a delivery-cost question with "
         "get_orders_delivery: that tool lists MANY orders and has no order_id filter, so it "
-        "answers a different question entirely. Delivery costs ACROSS several orders (no single "
-        "order named) are get_orders_delivery — its summary totals what the buyers paid.\n"
+        "answers a different question entirely.\n"
+        "• DELIVERY COST OF ONE ORDER YOU HAVE NO ID FOR, described by its AMOUNT and/or WHEN it "
+        "was placed — 'ile kosztowała dostawa zamówienia z ostatnich dni na kwotę ponad 2000 zł', "
+        "'koszt dostawy tego najdroższego zamówienia z tego tygodnia' → get_orders with EVERY "
+        "filter the question names (min_value=2000, bought_after_local=<the period>) plus "
+        "include_delivery=true, which puts the delivery cost on each order it returns. "
+        "Do NOT answer this with get_orders_delivery: it defaults to the PACKED-AND-WAITING "
+        "stage, so an order already sent (or not yet packed) is silently excluded, and it has no "
+        "amount filter in its preset wording — a real bug seen in production, where 'dostawa "
+        "zamówienia ponad 2000 zł' came back as 100 unrelated orders grouped by courier.\n"
+        "• ORDER AMOUNT IS A FILTER, NEVER A HINT — any question naming a value ('powyżej 2000 "
+        "zł', 'ponad 500 zł', 'poniżej 100 zł', 'między 500 a 1000 zł', 'najdroższe/największe "
+        "zamówienie') MUST pass min_value and/or max_value on the order listing. Never fetch an "
+        "unfiltered list and hope the right order is in it — the listing is handed to the seller "
+        "as-is, nothing filters it afterwards.\n"
+        "• Delivery costs ACROSS several orders — the courier/packing view ('jakich kurierów mam "
+        "w paczkach do wysłania', 'ile kosztowały dostawy w tych zamówieniach') → "
+        "get_orders_delivery; its summary totals what the buyers paid.\n"
         "• ZYSK/MARŻA ON ONE ORDER WITH A PURCHASE COST THE USER GIVES — 'dla tego zamówienia "
         "policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł', 'ile na tym zarobiłem przy "
         "zakupie po 8 zł/szt', 'jaka marża, jak towar kosztował mnie 12 zł' → "
@@ -839,6 +859,7 @@ class AllegroAgent(BaseAgent):
                 det_match = resolve_deterministic(query, query_labels)
         if det_match is not None:
             det_tool, det_input = det_match
+            det_input = self._with_value_bounds(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
             try:
@@ -975,6 +996,7 @@ class AllegroAgent(BaseAgent):
                         tool_input = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         tool_input = {}
+                    tool_input = self._with_value_bounds(tool_name, tool_input, query)
                     if tool_name == "get_message_threads":
                         # The user's wording overrides whatever the model decided for
                         # count_only (see _wants_message_count_only above).
@@ -1218,6 +1240,30 @@ class AllegroAgent(BaseAgent):
             return "get_new_orders", {"limit": 1}
         return "get_order_details", {"order_id": orders[0].order_id}
 
+    def _with_value_bounds(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
+        """Put an order amount the seller stated back onto an order listing the
+        model called without it.
+
+        The amount is the filter a model drops most readily, and dropping it is
+        invisible: the listing comes back full and reads like an answer ("ile
+        kosztowała dostawa zamówienia na kwotę ponad 2000 zł" → 100 unrelated
+        orders grouped by courier). The wording is unambiguous enough to read
+        in Python (see extract_value_bounds), so it is read there instead of
+        being left to the model's discretion.
+
+        Only ever ADDS: a bound the model passed itself stays untouched, and a
+        query stating no amount changes nothing.
+        """
+        if tool_name not in self._ORDERS_PRESETS:
+            return tool_input
+        if tool_input.get("min_value") is not None or tool_input.get("max_value") is not None:
+            return tool_input
+        bounds = extract_value_bounds(query)
+        if not bounds:
+            return tool_input
+        logger.info("[allegro] value bounds read from the query: %s (%s)", bounds, tool_name)
+        return {**tool_input, **bounds}
+
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:
             return await self._dispatch(tool_name, tool_input)
@@ -1445,25 +1491,6 @@ class AllegroAgent(BaseAgent):
                 return match.group(1)
         return ""
 
-    @staticmethod
-    def _value_bounds(tool_input: dict[str, Any]) -> tuple[float | None, float | None]:
-        """min_value/max_value as numbers, or None where absent or unusable.
-
-        A malformed bound is dropped rather than raised on, like every other
-        optional filter here — but unlike a bad date it cannot pass silently:
-        _filter_scope_note names the bounds that actually ran, so a dropped one
-        never reads as if the amount had been applied.
-        """
-        bounds: list[float | None] = []
-        for key in ("min_value", "max_value"):
-            raw = tool_input.get(key)
-            try:
-                bounds.append(None if raw is None or raw == "" else float(raw))
-            except (TypeError, ValueError):
-                logger.warning("_value_bounds: unusable %s=%r, ignoring", key, raw)
-                bounds.append(None)
-        return bounds[0], bounds[1]
-
     @classmethod
     def _filter_scope_note(cls, tool_input: dict[str, Any]) -> str:
         """The buyer/period filters an order listing actually ran with, as a
@@ -1481,6 +1508,15 @@ class AllegroAgent(BaseAgent):
         login = str(tool_input.get("buyer_login") or "").strip()
         if login:
             parts.append(f"od kupującego **{login}**")
+        min_value, max_value = cls._value_bounds(tool_input)
+        if min_value is not None and max_value is not None:
+            parts.append(
+                f"o wartości od {cls._format_price(min_value)} do {cls._format_price(max_value)}"
+            )
+        elif min_value is not None:
+            parts.append(f"o wartości powyżej {cls._format_price(min_value)}")
+        elif max_value is not None:
+            parts.append(f"o wartości poniżej {cls._format_price(max_value)}")
         date_from = cls._local_date(tool_input, "bought_after_local", "paid_after_local")
         date_to = cls._local_date(tool_input, "bought_before_local", "paid_before_local")
         if date_from and date_to:
@@ -1489,15 +1525,6 @@ class AllegroAgent(BaseAgent):
             parts.append(f"w okresie od {date_from}")
         elif date_to:
             parts.append(f"w okresie do {date_to}")
-        min_value, max_value = cls._value_bounds(tool_input)
-        if min_value is not None and max_value is not None:
-            parts.append(
-                f"o wartości od {cls._format_price(min_value)} do {cls._format_price(max_value)}"
-            )
-        elif min_value is not None:
-            parts.append(f"o wartości od {cls._format_price(min_value)}")
-        elif max_value is not None:
-            parts.append(f"o wartości do {cls._format_price(max_value)}")
         excluded = [str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())]
         if excluded:
             # "Brak zamówień w innym statusie niż wysłane" — a negated question
@@ -3233,6 +3260,22 @@ class AllegroAgent(BaseAgent):
             return False
         return True
 
+    @staticmethod
+    def _value_bounds(tool_input: dict[str, Any]) -> tuple[float | None, float | None]:
+        """min_value/max_value as numbers, or None where the model passed
+        nothing usable. A malformed bound is dropped rather than raising —
+        answering about a wider set is recoverable, erroring out on the
+        seller's question is not."""
+        bounds: list[float | None] = []
+        for key in ("min_value", "max_value"):
+            raw = tool_input.get(key)
+            try:
+                bounds.append(float(raw) if raw is not None and raw != "" else None)
+            except (TypeError, ValueError):
+                logger.warning("_value_bounds: unparseable %s=%r, ignoring", key, raw)
+                bounds.append(None)
+        return bounds[0], bounds[1]
+
     async def _orders_listing(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """The one order-listing implementation, shared by all three order
         tools. `tool_name` only picks the preset defaults in _ORDERS_PRESETS;
@@ -3281,13 +3324,13 @@ class AllegroAgent(BaseAgent):
         }
         if not asked_for_cancelled:
             exclude_fulfillment = frozenset(exclude_fulfillment) | {"CANCELLED"}
-        # The deadline filter, the status exclusion and the value bounds all run
-        # client-side (the Allegro API has a parameter for none of them — see
-        # _dispatch_within), so fetch a full page and narrow afterwards;
-        # filtering a limit=1 fetch would usually leave nothing at all.
-        # A listing pinned to one fulfillment stage cannot contain a cancelled
-        # order, so the cancelled drop alone does not widen the fetch there —
-        # "ostatnie nowe zamówienie" (limit=1) still costs one small page.
+        # The deadline filter, the status exclusion and the order-value bounds
+        # all run client-side (the Allegro API has no parameter for any of them
+        # — see _dispatch_within), so fetch a full page and narrow afterwards;
+        # filtering a limit=1 fetch would usually leave nothing at all. The
+        # cancelled drop alone does not widen the fetch on a listing pinned to
+        # one fulfillment stage, which cannot contain a cancelled order anyway
+        # — "ostatnie nowe zamówienie" (limit=1) still costs one small page.
         narrows_after_fetch = (
             dispatch_after or dispatch_before
             or (exclude_fulfillment - {"CANCELLED"}) or not fulfillment_status
@@ -3306,6 +3349,11 @@ class AllegroAgent(BaseAgent):
             paid_at_lte=self._optional_local_to_utc(tool_input.get("paid_before_local")),
             limit=fetch_limit,
         )
+        # A value filter narrows to a handful of orders out of a page of 100,
+        # so an answer built on it has to be able to say "out of the 100 most
+        # recent" rather than implying it saw everything — see value_scan_note
+        # below.
+        scanned = len(orders)
         if exclude_fulfillment:
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
         if not asked_for_cancelled:
@@ -3344,12 +3392,20 @@ class AllegroAgent(BaseAgent):
         scope = self._filter_scope_note(tool_input)
         if scope:
             empty_msg = count_none = f"Brak zamówień{stage_note}{scope}."
+        # Allegro cannot filter by amount, so a value question is answered from
+        # the page this call fetched. When that page came back full, EVERY
+        # answer built on it is about those orders only — "nothing matched" may
+        # miss an order just outside the page, and so may a count ("masz 12"
+        # when the store had 40). Both say how far the search reached.
+        value_scan_note = ""
+        if (min_value is not None or max_value is not None) and scanned >= fetch_limit:
+            value_scan_note = f" (przeszukano {scanned} ostatnich zamówień)"
         if tool_input.get("count_only"):
             return self._count_sentence(
                 len(orders), count_lead, count_forms, count_none, scope=scope
-            ) + suffix
+            ) + value_scan_note + suffix
         if not orders:
-            return empty_msg + suffix
+            return empty_msg + value_scan_note + suffix
 
         carrier_map: dict[str, str] = {}
         if include_delivery:
@@ -3383,13 +3439,30 @@ class AllegroAgent(BaseAgent):
             if known:
                 currency = known[0][1]
                 total_delivery = sum(amount for amount, _ in known)
+                paid = sum(1 for amount, _ in known if amount > 0)
                 missing = len(delivery_costs) - len(known)
+                # A bare total reads as broken on a Smart!-heavy list: 119,07 PLN
+                # across 100 orders looks like a bug until you know that in 88 of
+                # them the buyer paid nothing for delivery. So the line says how
+                # many orders the sum actually comes from.
+                detail = ""
+                if paid < len(orders):
+                    detail = f"w {paid} z {len(orders)} zamówień"
+                    if paid < len(known):
+                        detail += "; w pozostałych dostawa 0,00"
+                    if missing:
+                        detail += f"; {missing} bez danych o koszcie dostawy"
+                    detail = f" ({detail})"
                 summary += (
                     f"\n- Koszt dostawy zapłacony przez kupujących: "
-                    f"**{self._format_price(total_delivery, currency)}**"
-                    + (f" (bez {missing} zamówień bez danych o koszcie dostawy)" if missing else "")
+                    f"**{self._format_price(total_delivery, currency)}**{detail}"
                 )
             body = summary + "\n\n---\n\n" + body
+        if value_scan_note:
+            # Leading, not trailing: a listing ends with the last order's link,
+            # and a caveat about what the search covered belongs before the
+            # results, not tacked on where it reads as part of that order.
+            body = f"_Przeszukano {scanned} ostatnich zamówień._\n\n" + body
         return body + suffix
 
     # ── Tool dispatch ─────────────────────────────────────────────────────────

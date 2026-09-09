@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from agents.allegro.allegro_tools import matched_labels
-from agents.allegro.deterministic_dispatch import resolve_deterministic, wants_latest_order_details
+from agents.allegro.deterministic_dispatch import (
+    extract_value_bounds,
+    resolve_deterministic,
+    wants_latest_order_details,
+)
 
 
 def _resolve(query: str):
@@ -228,24 +232,22 @@ class TestNegatedStage:
         assert _resolve("nie mam nic do wysłania") == ("get_orders_delivery", {})
 
 
-class TestAmountBail:
-    """An amount is a filter no matcher here extracts, and the listing goes to
-    the seller unchanged — so a question naming one is handed to the LLM, which
-    can pass min_value/max_value, instead of being answered with an unfiltered
-    list that reads like the answer."""
+class TestNegationAndAmountTogether:
+    """The seller's own sentence, which used to come back as a list of orders
+    that had ALREADY been sent, with the amount silently dropped. The stage
+    resolves here; the amount is read out of the same sentence and put on the
+    call by AllegroAgent._with_value_bounds (see extract_value_bounds)."""
 
-    @pytest.mark.parametrize("query", [
-        "Pokaż mi zamówienie jeszcze nie wysłane o wartości powyżej 400zl",
-        "zamówienia powyżej 400 zł",
-        "pokaż zamówienia do wysłania poniżej 50 zł",
-        "ile mam nowych zamówień ponad 1000 zł",
-        "zamówienia droższe niż 250 zł",
-    ])
-    def test_amount_questions_bail(self, query):
-        assert _resolve(query) is None
+    QUERY = "Pokaż mi zamówienie jeszcze nie wysłane o wartości powyżej 400zl"
 
-    def test_a_plain_stage_question_still_resolves(self):
-        assert _resolve("pokaż zamówienia do wysłania") == ("get_orders_delivery", {})
+    def test_the_stage_resolves_to_an_exclusion(self):
+        assert _resolve(self.QUERY) == (
+            "get_orders",
+            {"exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]},
+        )
+
+    def test_the_amount_is_read_from_the_same_sentence(self):
+        assert extract_value_bounds(self.QUERY) == {"min_value": 400.0}
 
 
 class TestOrdersDueToday:
@@ -485,6 +487,92 @@ class TestFollowUpAboutOneKnownOrder:
     ])
     def test_listing_questions_still_resolve(self, query):
         assert _resolve(query) is not None
+
+
+class TestExtractValueBounds:
+    """The order amount is the filter a model drops most readily, and dropping
+    it is invisible — the listing comes back full and reads like an answer. It
+    is stated plainly enough in Polish to read in Python, so it is."""
+
+    def test_the_production_question(self):
+        assert extract_value_bounds(
+            "Ile kosztowała dostawa zamówienia z ostatnich dni które było na kwotę ponad 2000zl"
+        ) == {"min_value": 2000.0}
+
+    @pytest.mark.parametrize("query,expected", [
+        ("zamówienia powyżej 500 zł", {"min_value": 500.0}),
+        ("coś za więcej niż 2 000 zł", {"min_value": 2000.0}),
+        ("zamówienia co najmniej 300 zł", {"min_value": 300.0}),
+        ("zamówienia poniżej 100 zł", {"max_value": 100.0}),
+        ("zamówienia mniej niż 50 zł", {"max_value": 50.0}),
+        ("zamówienia do 80 zł", {"max_value": 80.0}),
+        ("zamówienia między 500 a 1000 zł", {"min_value": 500.0, "max_value": 1000.0}),
+        ("zamówienia od 500 do 1000 zł", {"min_value": 500.0, "max_value": 1000.0}),
+    ])
+    def test_direction_words(self, query, expected):
+        assert extract_value_bounds(query) == expected
+
+    @pytest.mark.parametrize("query,expected", [
+        ("zamówienia ponad 2000zl", 2000.0),
+        ("zamówienia ponad 2 000 zł", 2000.0),
+        ("zamówienia ponad 2000 PLN", 2000.0),
+        ("zamówienia ponad 2000 złotych", 2000.0),
+        ("zamówienia ponad 1.500,50 zł", 1500.5),
+        ("zamówienia ponad 99,90 zł", 99.9),
+        ("zamówienia ponad 1.5 zł", 1.5),
+    ])
+    def test_polish_amount_spellings(self, query, expected):
+        assert extract_value_bounds(query) == {"min_value": expected}
+
+    @pytest.mark.parametrize("query", [
+        "ile mam nowych zamówień",
+        # No currency — not an amount.
+        "zamówienia z ponad 5 sztukami",
+        "co muszę wysłać do jutra",
+        "zamówienia od 5 sierpnia",
+        # An exact amount, no direction: no order matches a value to the grosz,
+        # so a bound here would answer with an empty listing.
+        "zamówienie na kwotę 2000 zł",
+    ])
+    def test_reads_nothing_when_nothing_is_stated(self, query):
+        assert extract_value_bounds(query) == {}
+
+    @pytest.mark.parametrize("query", [
+        # "min" lives inside "termin" and "od" inside "przychód" — without a
+        # word boundary on the direction word, both grew a filter out of a
+        # number that had nothing to do with an order value.
+        "jaki mam termin 500 zł",
+        "przychód 500 zł w tym tygodniu",
+        "dochód 2000 zł",
+    ])
+    def test_a_direction_word_inside_another_word_is_not_a_direction(self, query):
+        assert extract_value_bounds(query) == {}
+
+    @pytest.mark.parametrize("query,expected", [
+        ("orders above 500 zł", {"min_value": 500.0}),
+        ("orders under 100 zł", {"max_value": 100.0}),
+        ("orders between 500 and 1000 zł", {"min_value": 500.0, "max_value": 1000.0}),
+    ])
+    def test_english_wording_too(self, query, expected):
+        """The assistant answers English questions as well, and the amount is
+        dropped just as readily there."""
+        assert extract_value_bounds(query) == expected
+
+    def test_a_backwards_explicit_range_is_read_as_the_range_it_describes(self):
+        """One range, one typo, one obvious meaning."""
+        assert extract_value_bounds("zamówienia od 100 zł do 50 zł") == {
+            "min_value": 50.0, "max_value": 100.0,
+        }
+
+    @pytest.mark.parametrize("query", [
+        "dla tego zamówienia policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł",
+        "ile zarobiłem, jeśli kupiłem po 8 zł za sztukę",
+        "jaka marża przy koszcie zakupu 12 zł",
+    ])
+    def test_a_per_unit_purchase_cost_is_not_an_order_value(self, query):
+        """Same digits, entirely different number — filtering the listing by
+        the cost of one item would answer a question nobody asked."""
+        assert extract_value_bounds(query) == {}
 
 
 class TestMultiTopicAndUnrelatedQueries:
