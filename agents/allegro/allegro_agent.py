@@ -322,6 +322,10 @@ class AllegroAgent(BaseAgent):
         "['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. Answering "
         "'niewysłane' with fulfillment_status=READY_FOR_SHIPMENT hides every order nobody has "
         "packed yet, and answering it with SENT lists the exact opposite of what was asked.\n"
+        "   – ANULOWANE zamówienia nie trafiają do ŻADNEGO listowania (nie ma czego pakować, "
+        "wysyłać ani fakturować) — nie musisz ich odfiltrowywać, dzieje się to samo. Pytaj o nie "
+        "tylko wtedy, gdy sprzedawca prosi wprost ('pokaż anulowane zamówienia' → "
+        "fulfillment_status=CANCELLED) — to jedyny przypadek, w którym są pokazywane.\n"
         "   – WARTOŚĆ ('powyżej 400 zł', 'ponad 1000', 'poniżej 50 zł', 'od 100 do 300 zł') → "
         "min_value / max_value on the same listing call, together with whatever stage or negation "
         "the question also names ('niewysłane powyżej 400 zł' → get_orders with "
@@ -3262,12 +3266,31 @@ class AllegroAgent(BaseAgent):
             str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())
         ) or preset.get("exclude_fulfillment") or frozenset()
         min_value, max_value = self._value_bounds(tool_input)
+        # A cancelled order is never part of an answer: there is nothing to
+        # pack, send, invoice or count, so listing one only adds a line the
+        # seller has to recognise and skip. It is dropped on BOTH statuses
+        # Allegro can cancel on — the checkout form (status=CANCELLED, the
+        # buyer withdrew before payment) and the fulfillment stage
+        # (fulfillment.status=CANCELLED, cancelled while being handled) — and
+        # this matters most for a negated listing, whose whole point is
+        # "everything other than X" and which would otherwise sweep them in.
+        # The one exception is a question that explicitly asks for cancelled
+        # ones; nothing else could answer it.
+        asked_for_cancelled = "CANCELLED" in {
+            str(status or "").upper(), str(fulfillment_status or "").upper()
+        }
+        if not asked_for_cancelled:
+            exclude_fulfillment = frozenset(exclude_fulfillment) | {"CANCELLED"}
         # The deadline filter, the status exclusion and the value bounds all run
         # client-side (the Allegro API has a parameter for none of them — see
         # _dispatch_within), so fetch a full page and narrow afterwards;
         # filtering a limit=1 fetch would usually leave nothing at all.
+        # A listing pinned to one fulfillment stage cannot contain a cancelled
+        # order, so the cancelled drop alone does not widen the fetch there —
+        # "ostatnie nowe zamówienie" (limit=1) still costs one small page.
         narrows_after_fetch = (
-            dispatch_after or dispatch_before or exclude_fulfillment
+            dispatch_after or dispatch_before
+            or (exclude_fulfillment - {"CANCELLED"}) or not fulfillment_status
             or min_value is not None or max_value is not None
         )
         fetch_limit = 100 if narrows_after_fetch else limit
@@ -3285,6 +3308,8 @@ class AllegroAgent(BaseAgent):
         )
         if exclude_fulfillment:
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
+        if not asked_for_cancelled:
+            orders = [o for o in orders if str(o.status or "").upper() != "CANCELLED"]
         if dispatch_after or dispatch_before:
             orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)]
         if min_value is not None:
