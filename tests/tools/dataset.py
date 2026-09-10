@@ -334,8 +334,12 @@ THREAD_MESSAGES: dict[str, list[dict]] = {
          "text": "Świetnie, proszę o wysyłkę na paczkomat POZ01A. Czy zdąży dziś wyjść?"},
     ],
     THREAD_2: [
+        # Written from the order page, so Allegro tags it with the checkout
+        # form — this is what lets "do tej transakcji" resolve to an order id
+        # without asking the seller which one (see message_related_order_id).
         {"id": "msg-4", "createdAt": hours_ago(5),
          "author": {"login": "marek_zielinski", "isInterlocutor": True},
+         "relatedObject": {"type": "ORDER", "id": ORD_2},
          "text": "Kiedy planowana jest wysyłka odkurzacza? Zależy mi na czasie."},
     ],
     THREAD_3: [

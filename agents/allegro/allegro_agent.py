@@ -336,12 +336,12 @@ class AllegroAgent(BaseAgent):
         "   – NOWE: 'nowe', 'świeże', 'do obsłużenia', 'złożone', 'zarejestrowane', "
         "'oczekujące na potwierdzenie', 'co nowego wpadło', 'co mam zacząć', 'co czeka na start', "
         "'nietknięte', 'ile w kolejce' — and the still-to-pack wording 'do spakowania' / "
-        "'co mam spakować' / 'niespakowane' → get_new_orders (fulfillment_status=NEW)\n"
+        "'co mam spakować' → get_new_orders (fulfillment_status=NEW)\n"
         "   – W REALIZACJI: 'w trakcie', 'w realizacji', 'przetwarzane', 'w toku', 'kompletowane', "
         "'co teraz kompletuję', 'co mam w robocie', 'nad czym siedzę', 'nieskończone', "
         "'do dokończenia' → get_orders with fulfillment_status=PROCESSING\n"
         "   – DO WYSŁANIA: 'gotowe do wysyłki', 'oczekujące/czekają na wysyłkę', 'do wysłania', "
-        "'niewysłane', 'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
+        "'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
         "'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania' → get_orders_delivery "
         "(its default filter is already fulfillment_status=READY_FOR_SHIPMENT)\n"
         "   – WYSŁANE: 'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', "
@@ -351,6 +351,25 @@ class AllegroAgent(BaseAgent):
         "   – ODEBRANE: 'odebrane', 'dostarczone', 'zrealizowane', 'zakończone', 'co już dotarło', "
         "'co klient odebrał', 'ile dostarczonych', 'ile zamkniętych' → get_orders with "
         "fulfillment_status=PICKED_UP\n"
+        "   – NEGACJA etapu ('niewysłane', 'jeszcze nie wysłane', 'które nie zostały wysłane', "
+        "'nieodebrane', 'niespakowane') is NEVER one of the stages above: a negation means EVERY "
+        "status other than the one negated, so it goes to get_orders with "
+        "exclude_fulfillment_status — 'niewysłane' → exclude ['SENT', 'IN_TRANSIT', "
+        "'READY_FOR_PICKUP', 'PICKED_UP'] (everything still on your side, packed or not, "
+        "in realizacji included), 'nieodebrane' → exclude ['PICKED_UP'], 'niespakowane' → exclude "
+        "['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. Answering "
+        "'niewysłane' with fulfillment_status=READY_FOR_SHIPMENT hides every order nobody has "
+        "packed yet, and answering it with SENT lists the exact opposite of what was asked.\n"
+        "   – ANULOWANE zamówienia nie trafiają do ŻADNEGO listowania (nie ma czego pakować, "
+        "wysyłać ani fakturować) — nie musisz ich odfiltrowywać, dzieje się to samo. Pytaj o nie "
+        "tylko wtedy, gdy sprzedawca prosi wprost ('pokaż anulowane zamówienia' → "
+        "fulfillment_status=CANCELLED) — to jedyny przypadek, w którym są pokazywane.\n"
+        "   – WARTOŚĆ ('powyżej 400 zł', 'ponad 1000', 'poniżej 50 zł', 'od 100 do 300 zł') → "
+        "min_value / max_value on the same listing call, together with whatever stage or negation "
+        "the question also names ('niewysłane powyżej 400 zł' → get_orders with "
+        "exclude_fulfillment_status + min_value=400). These are the ONLY parameters that carry an "
+        "amount — never answer a question naming one without them, the unfiltered listing would "
+        "reach the seller as if it were the filtered answer.\n"
         "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → "
         "get_orders with no fulfillment_status — it is the fallback for every order question the "
         "stages above do not cover, never the first choice when a stage IS named.\n"
@@ -482,7 +501,10 @@ class AllegroAgent(BaseAgent):
         "(buyer, read status, last-message date), never the message text. Pass buyer_login and/or "
         "date ('dzisiaj'/'today' or 'YYYY-MM-DD') if you don't already have a thread_id from earlier "
         "in this conversation — the tool finds the matching thread for you, no need to call "
-        "get_message_threads first.\n"
+        "get_message_threads first. Its result also names the ORDER the message concerns, so a "
+        "buyer asking about 'ta transakcja' / 'to zamówienie' (a faktura, a return, a shipment) "
+        "is answered by calling get_thread_messages FIRST and then the order tool with THAT id — "
+        "never by asking the user for a UUID the message already carries.\n"
         "• New/recent customer returns, ANY status — 'nowe zwroty', 'jakie mam zwroty', 'czy są "
         "jakieś zwroty', 'ile zwrotów' → get_new_returns (count_only=true for a plain number "
         "question). NEVER confuse this with complaints/disputes even if the user's wording is loose.\n"
@@ -1578,6 +1600,14 @@ class AllegroAgent(BaseAgent):
             parts.append(f"w okresie od {date_from}")
         elif date_to:
             parts.append(f"w okresie do {date_to}")
+        excluded = [str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())]
+        if excluded:
+            # "Brak zamówień w innym statusie niż wysłane" — a negated question
+            # answered with the generic "brak zamówień spełniających kryteria"
+            # is indistinguishable from having no orders at all, exactly like
+            # the buyer/period case this note exists for.
+            names = ", ".join(cls._fulfillment_pl(status).lower() for status in excluded)
+            parts.append(f"w innym statusie niż {names}")
         return (" " + " ".join(parts)) if parts else ""
 
     @staticmethod
@@ -1941,6 +1971,94 @@ class AllegroAgent(BaseAgent):
             if carrier_upper.startswith(prefix):
                 return template.format(code=code)
         return None
+
+    async def _thread_order_block(
+        self,
+        thread_id: str,
+        messages: list[dict[str, Any]],
+        buyer_login: str = "",
+    ) -> str:
+        """Which order a message thread is about, appended under its text.
+
+        A buyer asking "czy jest jeszcze możliwość wystawienia faktury do tej
+        transakcji" names no transaction. Until the seller knows WHICH order
+        that is, they can do nothing about it — so reading the message and
+        hunting down the order number were two separate jobs, the second one
+        manual. AllegroService.resolve_thread_order does it from Allegro's own
+        `relatedObject` tag on the message (or, failing that, the buyer's order
+        history) and this block puts the answer where the question is.
+
+        It also puts the checkout-form id into the RENDERED text, which is the
+        only thing a later turn can see — conversation history carries the
+        rendered view, never tool arguments (see ConversationSession) — so
+        "wystaw do tego fakturę" as a follow-up has a real id to pass to
+        issue_invoice_for_order instead of a UUID the model would have to
+        invent.
+
+        Returns "" rather than raising: a lookup bolted onto message reading
+        must never cost the seller the message itself.
+        """
+        try:
+            match = await self._allegro.resolve_thread_order(
+                thread_id, messages=messages, buyer_login=buyer_login
+            )
+        except AllegroAPIError as exc:
+            logger.warning("thread order lookup failed for %s: %s", thread_id, exc)
+            return ""
+
+        if match.source == "message":
+            if match.candidates:
+                return "📦 **Zamówienie z tej wiadomości:** " + self._order_one_liner(
+                    match.candidates[0]
+                )
+            # The tag is the answer even when the order details would not load.
+            return (
+                f"📦 **Zamówienie z tej wiadomości:** `{match.order_id}` "
+                "(nie udało się pobrać szczegółów)"
+            )
+
+        if match.source == "buyer_history":
+            return (
+                "📦 **Zamówienie kupującego:** "
+                + self._order_one_liner(match.candidates[0])
+                + f"\nWiadomość nie ma podpiętego zamówienia — to jedyne zamówienie konta "
+                f"**{match.buyer_login}**."
+            )
+
+        if match.candidates:
+            shown = match.candidates[:5]
+            listing = "\n".join(f"- {self._order_one_liner(o)}" for o in shown)
+            more = "" if len(match.candidates) == len(shown) else f" (pokazuję {len(shown)} najnowszych)"
+            return (
+                "📦 **Wiadomość nie ma podpiętego zamówienia.** Konto "
+                f"**{match.buyer_login}** ma {len(match.candidates)} "
+                f"{self._plural_pl(len(match.candidates), 'zamówienie', 'zamówienia', 'zamówień')}"
+                f"{more} — którego dotyczy pytanie?\n{listing}"
+            )
+
+        # Nothing tagged and nothing bought: a pre-purchase question, or a buyer
+        # whose orders are outside what this token can read. Say so plainly —
+        # silence here reads as "there is no order", which is a different claim.
+        who = f" konta **{match.buyer_login}**" if match.buyer_login else ""
+        return (
+            f"📦 Nie udało się ustalić zamówienia dla tej wiadomości — brak "
+            f"podpiętego zamówienia i brak zamówień{who}."
+        )
+
+    def _order_one_liner(self, order: Any) -> str:
+        """One order as a single line: id, what it was, how much, when — enough
+        for the seller to recognise it, short enough to sit under a message."""
+        parts = [f"`{order.order_id}`"]
+        items = list(getattr(order, "line_items", []) or [])
+        if items:
+            what = items[0].offer_name
+            if len(items) > 1:
+                what += f" + {len(items) - 1} inne"
+            parts.append(what)
+        parts.append(self._format_price(order.total_price, order.currency))
+        if order.created_at:
+            parts.append(self._format_dt_pl(order.created_at))
+        return " — ".join(parts)
 
     async def _monitoring_status_block(self) -> str:
         """Deterministic (non-LLM) status + action button for automatic order checking.
@@ -3465,16 +3583,44 @@ class AllegroAgent(BaseAgent):
         dispatch_before = self._optional_local_to_utc(
             tool_input.get("dispatch_before_local") or preset.get("dispatch_before_local")
         )
-        exclude_fulfillment = preset.get("exclude_fulfillment") or frozenset()
+        # A NEGATED stage ("niewysłane") is an exclusion, never one positive
+        # status: it covers every stage before the one named, so the caller
+        # passes the statuses to drop instead of the single one to keep — see
+        # exclude_fulfillment_status in allegro_tools.py. The presets use the
+        # same mechanism (get_orders_due_today excludes everything already
+        # dispatched), hence one field feeding both.
+        exclude_fulfillment = frozenset(
+            str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())
+        ) or preset.get("exclude_fulfillment") or frozenset()
         min_value, max_value = self._value_bounds(tool_input)
+        # A cancelled order is never part of an answer: there is nothing to
+        # pack, send, invoice or count, so listing one only adds a line the
+        # seller has to recognise and skip. It is dropped on BOTH statuses
+        # Allegro can cancel on — the checkout form (status=CANCELLED, the
+        # buyer withdrew before payment) and the fulfillment stage
+        # (fulfillment.status=CANCELLED, cancelled while being handled) — and
+        # this matters most for a negated listing, whose whole point is
+        # "everything other than X" and which would otherwise sweep them in.
+        # The one exception is a question that explicitly asks for cancelled
+        # ones; nothing else could answer it.
+        asked_for_cancelled = "CANCELLED" in {
+            str(status or "").upper(), str(fulfillment_status or "").upper()
+        }
+        if not asked_for_cancelled:
+            exclude_fulfillment = frozenset(exclude_fulfillment) | {"CANCELLED"}
         # The deadline filter, the status exclusion and the order-value bounds
         # all run client-side (the Allegro API has no parameter for any of them
         # — see _dispatch_within), so fetch a full page and narrow afterwards;
-        # filtering a limit=1 fetch would usually leave nothing at all.
-        fetch_limit = 100 if (
-            dispatch_after or dispatch_before or exclude_fulfillment
+        # filtering a limit=1 fetch would usually leave nothing at all. The
+        # cancelled drop alone does not widen the fetch on a listing pinned to
+        # one fulfillment stage, which cannot contain a cancelled order anyway
+        # — "ostatnie nowe zamówienie" (limit=1) still costs one small page.
+        narrows_after_fetch = (
+            dispatch_after or dispatch_before
+            or (exclude_fulfillment - {"CANCELLED"}) or not fulfillment_status
             or min_value is not None or max_value is not None
-        ) else limit
+        )
+        fetch_limit = 100 if narrows_after_fetch else limit
 
         orders = await self._allegro.get_orders(
             status=status,
@@ -3494,12 +3640,14 @@ class AllegroAgent(BaseAgent):
         scanned = len(orders)
         if exclude_fulfillment:
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
+        if not asked_for_cancelled:
+            orders = [o for o in orders if str(o.status or "").upper() != "CANCELLED"]
+        if dispatch_after or dispatch_before:
+            orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)]
         if min_value is not None:
             orders = [o for o in orders if (o.total_price or 0) >= min_value]
         if max_value is not None:
             orders = [o for o in orders if (o.total_price or 0) <= max_value]
-        if dispatch_after or dispatch_before:
-            orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)]
         if preset.get("sort_by_dispatch"):
             # Soonest deadline first — the order the parcels have to be dealt
             # with, not the order they were bought in.
@@ -4322,6 +4470,11 @@ class AllegroAgent(BaseAgent):
                 # buyer actually wrote.
                 lines.append(f"„{m.get('text', '')}”")
                 lines.append("")
+            # "N/A" is _dispatch's placeholder for a thread whose interlocutor
+            # Allegro did not name — not a login to look orders up by.
+            lines.append(await self._thread_order_block(
+                thread_id, messages, matched_buyer if matched_buyer not in (None, "N/A") else ""
+            ))
             return "\n".join(lines).rstrip()
 
         if tool_name == "get_account_info":

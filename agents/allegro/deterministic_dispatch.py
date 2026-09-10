@@ -208,7 +208,10 @@ _STATUS_NEW_RE = re.compile(
     # TO-DO forms ('do spakowania', 'co mam spakować') are asking for orders
     # that are still NEW — only the DONE forms ('spakowane', 'zapakowane',
     # below) mean the parcel is already waiting for the courier.
-    r"do\s+spakowania|spakowa[ćc]|niespakowan\w*",
+    # 'niespakowane' is NOT here: a negation covers every stage other than the
+    # one negated (see _negated_stage), and reading it as NOWE hid every order
+    # that was already in realizacji but still unpacked.
+    r"do\s+spakowania|spakowa[ćc]",
     re.IGNORECASE,
 )
 
@@ -226,7 +229,9 @@ _STATUS_TO_SHIP_RE = re.compile(
     r"do\s+wys[łl]ania|do\s+wysy[łl]ki|do\s+nadania|do\s+wyw[óo]zki|"
     r"(?:o?czekaj\w*|o?czeka|oczekuj\w*)\s+na\s+(?:wysy[łl]k\w*|kuriera|nadanie)|"
     r"na\s+kuriera|przygotowan\w*\s+do\s+nadania|"
-    r"\b(?:za|s)pakowan(?:e|ych|ymi|y|a)\b|niewys[łl]an\w*",
+    # 'niewysłane' is NOT here — see _negated_stage: it means every order that
+    # has not left yet, packed or not, which is an exclusion, not this stage.
+    r"\b(?:za|s)pakowan(?:e|ych|ymi|y|a)\b",
     re.IGNORECASE,
 )
 
@@ -263,21 +268,109 @@ _ORDER_STAGE_SIGNALS: tuple[tuple[str, re.Pattern], ...] = (
 )
 
 
+# ── Negacja etapu ─────────────────────────────────────────────────────────
+# "Niewysłane" is not a stage, it is the ABSENCE of one: logically it means
+# every order whose status is anything other than SENT — the packed ones AND
+# the ones nobody has touched yet. Read as a positive stage it answered with
+# READY_FOR_SHIPMENT alone and silently hid the rest, and (worse) the spaced
+# spelling 'nie wysłane' fell through to the WYSŁANE pattern, answering the
+# exact opposite question. So a negated stage resolves to an EXCLUSION, which
+# get_orders takes as exclude_fulfillment_status.
+#
+# Written either way — 'niewysłane' or 'nie wysłane' — so the compact form is
+# split apart first and both spellings then go through one code path.
+_COMPACT_NEGATION_RE = re.compile(r"\bnie(?=[a-ząćęłńóśźż]{4,})", re.IGNORECASE)
+
+# What sits between the "nie" and the stage word: nothing ('nie wysłane'), or
+# the auxiliary of a passive/perfect form ('nie zostały wysłane', 'nie są
+# spakowane'). Anything else ('nie mam nic do wysłania') is not a negated
+# stage — the negation there belongs to the verb, not to the stage.
+_NEGATION_LEAD_RE = re.compile(
+    r"\bnie\s+(?:zosta[łl]\w*\s+|zostan\w*\s+|by[łl]\w*\s+|s[ąa]\s+|jest\s+|"
+    r"maj[ąa]\s+|zd[ąa][żz]y\w*\s+|jeszcze\s+)*$",
+    re.IGNORECASE,
+)
+
+# Statuses a negated stage drops. The parcel-has-left family is one unit: an
+# order IN_TRANSIT or PICKED_UP is every bit as "wysłane" as a SENT one, so
+# "niewysłane" has to exclude all four or the answer quietly includes parcels
+# that are already at the buyer's.
+_DISPATCHED_STATUSES = ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]
+_STAGE_EXCLUDES: dict[str, list[str]] = {
+    "shipped":     list(_DISPATCHED_STATUSES),
+    "delivered":   ["PICKED_UP"],
+    "to_ship":     ["READY_FOR_SHIPMENT", *_DISPATCHED_STATUSES],
+    "in_progress": ["PROCESSING"],
+    "new":         ["NEW"],
+}
+
+
+def _split_compact_negations(query: str) -> str:
+    """'niewysłane' → 'nie wysłane', so both spellings reach _NEGATION_LEAD_RE.
+
+    Two kinds of word must survive intact, and both are recognised by asking
+    the stage patterns themselves rather than by a word list:
+
+    * a negation-shaped word that IS a stage's own vocabulary — 'nietknięte'
+      (NOWE), 'nieskończone' (W REALIZACJI): a stage pattern matches it from
+      the 'nie', so splitting it would destroy the very wording it names;
+    * a word that merely starts with those letters — 'niedziela': nothing
+      matches after the split either, so there is nothing to negate.
+    """
+    out: list[str] = []
+    last = 0
+    for match in _COMPACT_NEGATION_RE.finditer(query):
+        if any(pattern.match(query, match.start()) for _, pattern in _ORDER_STAGE_SIGNALS):
+            continue
+        split = query[:match.end()] + " " + query[match.end():]
+        if not any(pattern.match(split, match.end() + 1) for _, pattern in _ORDER_STAGE_SIGNALS):
+            continue
+        out.append(query[last:match.end()] + " ")
+        last = match.end()
+    out.append(query[last:])
+    return "".join(out)
+
+
+def _stage_hits(query: str) -> tuple[set[str], set[str]]:
+    """(stages named positively, stages named under a negation)."""
+    q = _split_compact_negations(query)
+    positive: set[str] = set()
+    negated: set[str] = set()
+    for stage, pattern in _ORDER_STAGE_SIGNALS:
+        for match in pattern.finditer(q):
+            target = negated if _NEGATION_LEAD_RE.search(q[:match.start()]) else positive
+            target.add(stage)
+    return positive, negated
+
+
 def _order_stage(query: str) -> str | None:
-    """The single order stage `query` names, or None when it names none or
-    several — an ambiguous or mixed question is exactly the case this layer
-    hands to the LLM rather than guessing at."""
-    hits = {stage for stage, pattern in _ORDER_STAGE_SIGNALS if pattern.search(query)}
-    # 'do wysłania' / 'niewysłane' are shipping PLANS, but they share their
-    # stem with the shipped-already wording ('wysłane'), so this one pair
-    # co-fires on a query that names only the DO WYSŁANIA stage. Blanking out
-    # the plan phrases tells the two cases apart: if a shipped wording is
-    # still there afterwards, the query really did name both stages ("które
-    # są spakowane, a które już wysłane") and stays ambiguous. Every other
-    # overlap is a genuinely mixed question and bails below.
+    """The single order stage `query` names POSITIVELY, or None when it names
+    none, several, or names one under a negation — an ambiguous, mixed or
+    negated question is exactly the case the positive matchers must not
+    guess at (a negation goes to _negated_stage instead)."""
+    hits, negated = _stage_hits(query)
+    if negated:
+        return None
+    # 'do wysłania' is a shipping PLAN, but it shares its stem with the
+    # shipped-already wording ('wysłane'), so this one pair co-fires on a
+    # query that names only the DO WYSŁANIA stage. Blanking out the plan
+    # phrases tells the two cases apart: if a shipped wording is still there
+    # afterwards, the query really did name both stages ("które są spakowane,
+    # a które już wysłane") and stays ambiguous. Every other overlap is a
+    # genuinely mixed question and bails below.
     if hits == {"to_ship", "shipped"}:
         return None if _STATUS_SHIPPED_RE.search(_STATUS_TO_SHIP_RE.sub(" ", query)) else "to_ship"
     return next(iter(hits)) if len(hits) == 1 else None
+
+
+def _negated_stage(query: str) -> str | None:
+    """The single stage `query` NEGATES ('niewysłane', 'nie zostały wysłane'),
+    or None. A query that also names a stage positively ("spakowane, ale
+    jeszcze nie wysłane") is two questions at once and goes to the LLM."""
+    hits, negated = _stage_hits(query)
+    if hits or len(negated) != 1:
+        return None
+    return next(iter(negated))
 
 
 # ── zamowienia: the follow-up question about ONE already-shown order ───────
@@ -349,7 +442,7 @@ _ORDER_STAGE_BAIL_RE = re.compile(
 
 
 def _match_get_new_orders(query: str) -> dict | None:
-    if _ORDERS_BAIL_RE.search(query):
+    if _ORDERS_BAIL_RE.search(query) or _negated_stage(query):
         return None
     stage = _order_stage(query)
     if stage is not None and stage != "new":
@@ -378,6 +471,22 @@ def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
             args["count_only"] = True
         return args
     return _match
+
+
+def _match_negated_stage(query: str) -> dict | None:
+    """"Niewysłane" / "nie zostały wysłane" / "nieodebrane" → get_orders with
+    the negated stage's statuses excluded (see _STAGE_EXCLUDES)."""
+    if _ORDER_STAGE_BAIL_RE.search(query):
+        return None
+    stage = _negated_stage(query)
+    if stage is None:
+        return None
+    if _ORDERS_SINGULAR_RE.search(query):
+        return None  # "ostatnie niewysłane" — a limit=1 guess isn't worth the risk
+    args: dict = {"exclude_fulfillment_status": _STAGE_EXCLUDES[stage]}
+    if _is_count_only(query, _ORDERS_COUNT_TOPIC_RE):
+        args["count_only"] = True
+    return args
 
 
 # ── zamowienia: get_orders_due_today ───────────────────────────────────────
@@ -419,6 +528,11 @@ def _match_get_orders_due_today(query: str) -> dict | None:
 # _match_get_new_orders' count-only branch fires on a stage-less question.
 _ORDERS_MATCHERS: list[tuple[str, Callable[[str], dict | None]]] = [
     ("get_orders_due_today", _match_get_orders_due_today),
+    # Negation first: it and the positive matchers are mutually exclusive by
+    # construction (_order_stage bails on a negated query), so the order only
+    # decides which one gets asked first — and the negated reading is the one
+    # a plain stage matcher used to answer with the opposite listing.
+    ("get_orders", _match_negated_stage),
     *((tool, _stage_matcher(stage)) for stage, (tool, _) in _ORDER_STAGE_TOOLS.items()),
     ("get_new_orders", _match_get_new_orders),
 ]
