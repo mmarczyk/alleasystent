@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from time import monotonic
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -157,6 +157,85 @@ class TestAllegroServiceParsing:
         data = {"id": "o3", "buyer": {"login": "b"}, "status": "BOUGHT"}
         order = svc._parse_order(data)
         assert order.line_items == []
+
+    def test_parse_order_survives_explicit_nulls(self, monkeypatch):
+        """An order nobody has paid for yet comes back with `finishedAt: null`
+        and an empty `buyer.email` — a null, not a missing key, so `.get(k, "")`
+        hands it straight to a `str` field. That used to raise a
+        ValidationError and take the whole listing down with it ("An internal
+        error occurred") because one order out of a hundred was unpaid."""
+        svc = self._make_service(monkeypatch)
+        data = {
+            "id": "o4",
+            "buyer": {"login": "b", "email": None, "phoneNumber": None},
+            "status": "FILLED_IN",
+            "fulfillment": {"status": None},
+            "payment": {"type": None, "finishedAt": None},
+            "summary": {"totalToPay": {"amount": "300.00", "currency": None}},
+            "lineItems": [
+                {"offer": {"id": "off-1", "name": None}, "quantity": None,
+                 "price": {"amount": "300.00", "currency": None}}
+            ],
+            "boughtAt": None,
+        }
+        order = svc._parse_order(data)
+        assert order.buyer_email == ""
+        assert order.paid_at == ""
+        assert order.payment_status == ""
+        assert order.fulfillment_status == ""
+        assert order.created_at == ""
+        assert order.total_price == pytest.approx(300.0)
+        # A null where the field declares a real default falls back to THAT,
+        # not to an empty string — a currency-less price is still PLN.
+        assert order.currency == "PLN"
+        assert order.line_items[0].offer_name == ""
+        assert order.line_items[0].currency == "PLN"
+
+    def test_parse_order_keeps_values_allegro_did_send(self, monkeypatch):
+        """Only nulls are rewritten: a wrong TYPE must still fail loudly rather
+        than be quietly blanked."""
+        from pydantic import ValidationError
+
+        svc = self._make_service(monkeypatch)
+        data = {"id": "o5", "buyer": {"login": ["not", "a", "login"]}, "status": "BOUGHT"}
+        with pytest.raises(ValidationError):
+            svc._parse_order(data)
+
+    async def test_unfiltered_page_with_an_unpaid_order_still_lists_everything(
+        self, monkeypatch
+    ):
+        """The whole point of the null tolerance above: a listing that does NOT
+        pin status=READY_FOR_PROCESSING (a negated-stage question — "zamówienia
+        jeszcze nie wysłane") gets BOUGHT/FILLED_IN checkout forms on the same
+        page, and one of those must not cost the seller every other order."""
+        svc = self._make_service(monkeypatch)
+        svc._get = AsyncMock(return_value={
+            "totalCount": 2,
+            "checkoutForms": [
+                {
+                    "id": "oplacone",
+                    "buyer": {"login": "b", "email": "b@example.com"},
+                    "status": "READY_FOR_PROCESSING",
+                    "fulfillment": {"status": "READY_FOR_SHIPMENT"},
+                    "payment": {"type": "ONLINE", "finishedAt": "2026-09-01T10:00:00Z"},
+                    "summary": {"totalToPay": {"amount": "250.00", "currency": "PLN"}},
+                    "boughtAt": "2026-09-01T09:00:00Z",
+                },
+                {
+                    "id": "nieoplacone",
+                    "buyer": {"login": "b2", "email": None},
+                    "status": "FILLED_IN",
+                    "fulfillment": {"status": "NEW"},
+                    "payment": {"type": "ONLINE", "finishedAt": None},
+                    "summary": {"totalToPay": {"amount": "300.00", "currency": "PLN"}},
+                    "boughtAt": "2026-09-02T09:00:00Z",
+                },
+            ],
+        })
+
+        orders = await svc.get_orders(limit=50)
+
+        assert [o.order_id for o in orders] == ["nieoplacone", "oplacone"]
 
     def test_token_file_default_user(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "test")
