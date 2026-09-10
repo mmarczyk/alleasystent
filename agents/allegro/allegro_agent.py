@@ -1408,13 +1408,30 @@ class AllegroAgent(BaseAgent):
     # Allegro has no billing-entry flag saying "this charge is the shipment" —
     # the type ids differ per delivery product (Allegro Delivery, WZA labels,
     # courier top-ups) and new ones appear whenever a carrier is added, so the
-    # human-readable type description is the only stable signal. Matched on
-    # word stems because Allegro declines them ("Opłata za przesyłkę",
-    # "Opłaty za etykiety", "Zwrot opłaty za wysyłkę").
-    _DELIVERY_FEE_DESC_RE = re.compile(
-        r"przesy[łl]k|etykiet|dostaw|wysy[łl]k|kurier|paczkomat|list\s+przewozowy|allegro\s+delivery",
+    # human-readable type name is the only stable signal. Matched on word stems
+    # because Allegro declines them ("Opłata za przesyłkę", "Opłaty za
+    # etykiety", "Zwrot opłaty za wysyłkę"), and the English stems are there
+    # because that label is translated per Accept-Language and falls back to
+    # English — a header that goes missing must not silently turn every
+    # shipping charge into an unclassified fee again.
+    _DELIVERY_FEE_LABEL_RE = re.compile(
+        r"przesy[łl]k|etykiet|dostaw|wysy[łl]k|kurier|paczkomat|list\s+przewozowy"
+        r"|deliver|shipping|shipment|parcel|label|courier|locker",
         re.IGNORECASE,
     )
+
+    @staticmethod
+    def _billing_type_label(entry: dict, default: str = "") -> str:
+        """The human-readable type of a billing entry ("Opłata za dostawę
+        ORLEN Paczka Allegro Delivery", "Prowizja od sprzedaży").
+
+        Allegro sends it as `type.name` — `type.description` does not exist in
+        the billing schema, and reading it was why every fee landed in "Inne"
+        and no shipping charge was ever recognised. The old key stays as a
+        fallback so a payload that does carry it still reads sensibly.
+        """
+        t = entry.get("type") or {}
+        return t.get("name") or t.get("description") or default
 
     @classmethod
     def _is_delivery_fee_entry(cls, entry: dict) -> bool:
@@ -1423,17 +1440,16 @@ class AllegroAgent(BaseAgent):
         a promotion fee. Used to answer "ile kosztowała mnie wysyłka" without
         making the store owner read the whole billing list and guess which
         rows are the parcel."""
-        desc = (entry.get("type") or {}).get("description") or ""
-        return bool(cls._DELIVERY_FEE_DESC_RE.search(desc))
+        return bool(cls._DELIVERY_FEE_LABEL_RE.search(cls._billing_type_label(entry)))
 
-    @staticmethod
-    def _is_balance_transfer_entry(entry: dict) -> bool:
+    @classmethod
+    def _is_balance_transfer_entry(cls, entry: dict) -> bool:
         """PAD ("Pobranie opłat z wpływów") entries record Allegro sweeping money from
         the seller's Allegro Finanse proceeds to settle their account balance — an
         internal transfer, not a new charge or credit. The fee it settles is already
         its own billing entry, so counting PAD too double-counts that same money.
         It also carries no order.id (account-level, not order-level)."""
-        type_desc = ((entry.get("type") or {}).get("description") or "").lower()
+        type_desc = cls._billing_type_label(entry).lower()
         type_id = (entry.get("type") or {}).get("id") or ""
         return type_id == "PAD" or "pobranie opłat z wpływów" in type_desc or "pobranie opłaty z wpływów" in type_desc
 
@@ -3408,7 +3424,7 @@ class AllegroAgent(BaseAgent):
             if self._is_balance_transfer_entry(e):
                 continue
             amount = float((e.get("value") or {}).get("amount", 0) or 0)
-            desc = (e.get("type") or {}).get("description", "Inne")
+            desc = self._billing_type_label(e, "Inne")
             if amount < 0:
                 total_fees += abs(amount)
                 fee_by_type[desc] += abs(amount)
@@ -3807,7 +3823,7 @@ class AllegroAgent(BaseAgent):
                 total_credits = 0.0
                 for e in billing_entries:
                     amount = float((e.get("value") or {}).get("amount", 0) or 0)
-                    desc = (e.get("type") or {}).get("description", "Inne")
+                    desc = self._billing_type_label(e, "Inne")
                     offer_name = (e.get("offer") or {}).get("name", "")
                     occurred = e.get("occurredAt", "")[:10]
                     offer_part = f" — {offer_name}" if offer_name else ""
@@ -3907,13 +3923,17 @@ class AllegroAgent(BaseAgent):
                         f"wysyłka kosztowała {self._format_price(seller_cost, order.currency)})"
                     )
             elif billing_entries:
-                # Billing came back and simply carries no shipping row: the
-                # label was bought outside Allegro (own courier contract,
-                # personal pickup), so Allegro genuinely does not know that
-                # cost. Saying so beats an unexplained missing line.
+                # Billing came back and simply carries no shipping row. Two
+                # innocent reasons, and the line names both rather than picking
+                # one: Allegro books the label fee only once the parcel is
+                # settled (a shipment sent today can be missing here until
+                # tomorrow), or the label was bought outside Allegro (own
+                # courier contract, personal pickup) and Allegro genuinely does
+                # not know that cost.
                 delivery_lines.append(
                     "  - Opłaty Allegro za wysyłkę: brak w rozliczeniu Allegro "
-                    "(etykieta opłacona poza Allegro nie jest tu widoczna)"
+                    "(opłata za etykietę bywa księgowana z opóźnieniem — "
+                    "albo etykieta została opłacona poza Allegro)"
                 )
             extra_lines.append("Dostawa:")
             extra_lines.extend(delivery_lines)
@@ -4240,7 +4260,7 @@ class AllegroAgent(BaseAgent):
                     if self._is_balance_transfer_entry(e):
                         continue
                     amount = float((e.get("value") or {}).get("amount", 0) or 0)
-                    type_desc = (e.get("type") or {}).get("description", "Inne")
+                    type_desc = self._billing_type_label(e, "Inne")
                     order_id = (e.get("order") or {}).get("id", "")
                     if amount < 0:
                         total_fees += abs(amount)
@@ -4566,7 +4586,7 @@ class AllegroAgent(BaseAgent):
             for e in entries:
                 amount_val = float((e.get("value") or {}).get("amount", 0) or 0)
                 currency = (e.get("value") or {}).get("currency", "PLN")
-                type_desc = (e.get("type") or {}).get("description", "Inne")
+                type_desc = self._billing_type_label(e, "Inne")
                 occurred = e.get("occurredAt", "")[:10]
                 order_id = (e.get("order") or {}).get("id", "")
                 is_transfer = self._is_balance_transfer_entry(e)

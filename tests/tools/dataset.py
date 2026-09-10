@@ -373,7 +373,9 @@ def _entry(entry_id: str, type_id: str, desc: str, amount: float, occurred: str,
     e: dict = {
         "id": entry_id,
         "occurredAt": occurred,
-        "type": {"id": type_id, "description": desc},
+        # Allegro's billing schema calls this field `name` (translated per
+        # Accept-Language) — there is no `description` in it.
+        "type": {"id": type_id, "name": desc},
         "value": _price(amount),
         "balance": _price(1500.00),
     }

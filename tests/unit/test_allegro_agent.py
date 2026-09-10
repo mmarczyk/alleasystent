@@ -1094,6 +1094,57 @@ class TestDeliveryCosts:
         assert "Opłaty Allegro za wysyłkę" not in result
         assert "Koszt dostawy zapłacony przez kupującego: 14,99 PLN" in result
 
+    # ── The shape Allegro actually sends ──────────────────────────────────
+    #
+    # Every fixture above writes the billing type as `type.description`, which
+    # is not a field Allegro's billing schema has: it sends `type.name`. The
+    # code read the missing key, so every fee rendered as "Inne" and no
+    # shipping charge was ever recognised — an order whose Allegro billing
+    # showed "Opłata za dostawę ORLEN Paczka Allegro Delivery −1,99 zł" came
+    # back as "brak w rozliczeniu Allegro". These tests use the real shape.
+
+    @staticmethod
+    def _api_entry(name, amount):
+        return {
+            "id": "be-1",
+            "value": {"amount": amount, "currency": "PLN"},
+            "type": {"id": "SHP", "name": name},
+            "order": {"id": "abc-123"},
+            "occurredAt": "2026-09-09T14:34:00Z",
+        }
+
+    @pytest.mark.asyncio
+    async def test_delivery_fee_named_the_way_allegro_names_it_is_found(self):
+        agent = self._agent_with_order(self._make_order(), billing_entries=[
+            self._api_entry("Opłata za dostawę ORLEN Paczka Allegro Delivery", "-1.99"),
+        ])
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "  - Opłaty Allegro za wysyłkę (Twój koszt): -1,99 PLN" in result
+        assert "brak w rozliczeniu Allegro" not in result
+        # …and the billing list names the fee instead of filing it under "Inne".
+        assert "Opłata za dostawę ORLEN Paczka Allegro Delivery" in result
+        assert "Inne" not in result
+
+    @pytest.mark.asyncio
+    async def test_english_type_name_is_still_recognised_as_shipping(self):
+        """Allegro translates type names per Accept-Language and falls back to
+        English, so a lost header must not hide the charge again."""
+        agent = self._agent_with_order(self._make_order(), billing_entries=[
+            self._api_entry("Delivery fee ORLEN Paczka Allegro Delivery", "-1.99"),
+        ])
+
+        result = await agent._dispatch("get_order_details", {"order_id": "abc-123"})
+
+        assert "  - Opłaty Allegro za wysyłkę (Twój koszt): -1,99 PLN" in result
+
+    def test_type_label_prefers_name_and_falls_back_to_description(self):
+        from agents.allegro.allegro_agent import AllegroAgent as A
+        assert A._billing_type_label({"type": {"name": "Opłata za dostawę"}}) == "Opłata za dostawę"
+        assert A._billing_type_label({"type": {"description": "Stare pole"}}) == "Stare pole"
+        assert A._billing_type_label({}, "Inne") == "Inne"
+
     @pytest.mark.asyncio
     async def test_courier_listing_shows_each_delivery_cost_and_their_total(self):
         agent = _make_agent()

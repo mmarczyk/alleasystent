@@ -635,6 +635,12 @@ class AllegroService:
             "Authorization": f"Bearer {self._tokens.access_token}",
             "Accept": "application/vnd.allegro.public.v1+json",
             "Content-Type": "application/vnd.allegro.public.v1+json",
+            # Allegro translates the human-readable labels it sends back
+            # (billing type names above all) according to this header and
+            # falls back to ENGLISH when it is absent — so without it a
+            # shipping charge arrives as "Delivery fee" while the seller,
+            # this app, and every rule that reads those labels speak Polish.
+            "Accept-Language": "pl-PL",
         }
 
     async def _get(self, path: str, params: dict | list | None = None, accept: str | None = None) -> dict[str, Any]:
@@ -1235,7 +1241,8 @@ class AllegroService:
                     "  billing[%d]: occurredAt=%s type=%s offer=%s amount=%s",
                     idx,
                     e.get("occurredAt", "")[:10],
-                    (e.get("type") or {}).get("description", "?"),
+                    (e.get("type") or {}).get("name")
+                    or (e.get("type") or {}).get("description", "?"),
                     (e.get("offer") or {}).get("name", "—"),
                     (e.get("value") or {}).get("amount", "?"),
                 )
