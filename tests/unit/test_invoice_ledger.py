@@ -33,7 +33,7 @@ class TestRecordIssued:
             await invoice_ledger.record_issued(
                 "u1", "ord-1", invoice_uuid="inv-9", number="FV/1/2026", attached=True
             )
-        key, raw = r.set.await_args[0]
+        key, raw = r.set.await_args_list[0][0]
         assert key == "allegro:invoice_issued:u1:ord-1"
         payload = json.loads(raw)
         assert payload["invoice_uuid"] == "inv-9"
@@ -51,9 +51,41 @@ class TestRecordIssued:
             await invoice_ledger.record_issued(
                 "u1", "ord-1", invoice_uuid="inv-9", attached=False, note="403"
             )
-        payload = json.loads(r.set.await_args[0][1])
+        payload = json.loads(r.set.await_args_list[0][0][1])
         assert payload["attached"] is False
         assert payload["note"] == "403"
+
+    @pytest.mark.asyncio
+    async def test_the_invoice_is_also_indexed_back_to_its_order(self):
+        """KSeF is addressed by invoice, but whether it is ALLOWED is a question
+        only Allegro can answer and Allegro answers per order — so the issuance
+        writes down which order an invoice belongs to."""
+        from services import invoice_ledger
+
+        r = _mock_redis(set=True)
+        with patch("redis.asyncio.from_url", return_value=r):
+            await invoice_ledger.record_issued("u1", "ord-1", invoice_uuid="inv-9")
+        assert r.set.await_args_list[1][0][:2] == ("allegro:invoice_order:u1:inv-9", "ord-1")
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_issuance_indexes_nothing(self):
+        """No UUID yet means no index entry to write — and later "we don't know
+        which order" is exactly the answer that must block a KSeF send."""
+        from services import invoice_ledger
+
+        r = _mock_redis(set=True)
+        with patch("redis.asyncio.from_url", return_value=r):
+            await invoice_ledger.record_issued("u1", "ord-1", invoice_uuid="", note="timeout")
+        assert r.set.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_invoice_resolves_to_no_order(self):
+        from services import invoice_ledger
+
+        r = _mock_redis(get=None)
+        with patch("redis.asyncio.from_url", return_value=r):
+            assert await invoice_ledger.order_of_invoice("u1", "inv-nope") is None
+            assert await invoice_ledger.order_of_invoice("u1", "") is None
 
     @pytest.mark.asyncio
     async def test_no_redis_is_a_silent_no_op(self, monkeypatch):

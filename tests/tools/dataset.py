@@ -460,25 +460,10 @@ INFAKT_INVOICE = {
     "currency": "PLN",
     "status": "paid",
     "ksef_number": None,
-    # The buyer fields decide whether KSeF is allowed at all, so they are part
-    # of the fixture rather than assumed — this one is a company (has a NIP).
+    # Whether KSeF is allowed is NOT decided here — it comes from the buyer's
+    # own declaration on the Allegro order (ORD_1 is a company with a NIP,
+    # ORD_2 a private person). These fields are only the copy inFakt holds.
     "client_company_name": "Kawa i Spółka sp. z o.o.",
-    "client_tax_code": "5252445767",
-}
-
-# The same invoice made out to a private person: no NIP, and inFakt echoes back
-# the client_business_activity_kind that build_invoice_payload sets for one.
-# KSeF addresses the buyer by NIP, so this invoice may never be filed there.
-INFAKT_PRIVATE_INVOICE_UUID = "c1a2b3d4-e5f6-7890-abcd-ef0123456789"
-INFAKT_PRIVATE_INVOICE = {
-    "uuid": INFAKT_PRIVATE_INVOICE_UUID,
-    "number": "FV/2026/08/58",
-    "gross_price": 12900,
-    "currency": "PLN",
-    "status": "paid",
-    "ksef_number": None,
-    "client_first_name": "Anna",
-    "client_last_name": "Kowalska",
-    "client_business_activity_kind": "private_person",
+    "client_tax_code": "7792445588",
 }
 INFAKT_SHARE_LINK = f"https://app.infakt.pl/share/{INFAKT_INVOICE_UUID}"

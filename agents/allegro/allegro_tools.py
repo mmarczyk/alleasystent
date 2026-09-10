@@ -1266,18 +1266,28 @@ ALLEGRO_TOOLS: list[dict] = [
                 "earlier issue_invoice_for_order call in this conversation — never guess it. "
                 "Submission is asynchronous — this only confirms the request was accepted, final "
                 "processing must be checked in the inFakt panel. "
-                "ONLY for a COMPANY (B2B) buyer, identified by a NIP. An invoice issued to a PRIVATE "
+                "ONLY for a COMPANY (B2B) buyer, identified by a NIP. An invoice for a PRIVATE "
                 "PERSON must NEVER be sent to KSeF — KSeF addresses the buyer by NIP and a private "
                 "person has none, so the filing would be wrong and cannot be withdrawn. This is not a "
                 "default the user can override: if they ask for it anyway, say why it is impossible "
-                "instead of calling this tool. The buyer type comes from get_order_invoice_data / the "
-                "issue_invoice_for_order result ('Nabywca: firma' vs 'osoba prywatna'); the call is "
-                "refused for a private person whatever you pass."
+                "instead of calling this tool. Whether the buyer is a company is decided from "
+                "ALLEGRO's invoice data for the ORDER (get_order_invoice_data: company_name + "
+                "vat_id), never from what is in inFakt — so pass order_id whenever you know it; "
+                "without it the order is looked up from the invoice we issued, and if that fails "
+                "the call is refused rather than sent unchecked."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                    "order_id": {
+                        "type": "string",
+                        "description": (
+                            "Allegro order (checkout form) UUID this invoice was issued for. Pass it "
+                            "whenever it is in context — it is what Allegro is asked about to confirm "
+                            "the buyer is a company with a NIP. Omit rather than guessing."
+                        ),
+                    },
                 },
                 "required": ["invoice_uuid"],
             },

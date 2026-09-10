@@ -74,15 +74,16 @@ class KsefNotAllowedError(Exception):
     point before the request leaves (InfaktService.send_to_ksef) and not only
     where the tool is chosen — a future caller, a retry or a model that reads
     its instructions loosely all end up here.
+
+    `reason` is the Polish half-sentence naming which case it was, so both the
+    tool layer and this one tell the seller the same thing.
     """
 
-    def __init__(self, invoice_uuid: str, number: str = ""):
+    def __init__(self, invoice_uuid: str, reason: str, number: str = ""):
         self.invoice_uuid = invoice_uuid
+        self.reason = reason
         self.number = number
-        super().__init__(
-            f"invoice {number or invoice_uuid} is issued to a private person — KSeF is for "
-            "business (NIP) invoices only"
-        )
+        super().__init__(f"invoice {number or invoice_uuid} may not go to KSeF: {reason}")
 
 
 class InfaktTaskError(Exception):
@@ -225,49 +226,63 @@ class InfaktService:
             raise InfaktAPIError(resp.status_code, resp.text[:500])
         return resp.content
 
-    async def send_to_ksef(self, invoice_uuid: str) -> dict[str, Any]:
+    async def send_to_ksef(self, invoice_uuid: str, *, allegro, order_id: str) -> dict[str, Any]:
         """Submit an issued invoice to KSeF (Krajowy System e-Faktur).
 
         Submission is asynchronous on inFakt's side — this call only confirms
         the request was accepted (status "sent"), not that KSeF finished
         processing it. Final status must be checked in the inFakt panel.
 
-        A private-person invoice never gets that far: the invoice is read back
-        from inFakt first and the request is refused here, on the last line
-        before it leaves this process, with KsefNotAllowedError. The tool layer
-        checks the same thing earlier and with a friendlier message — this one
-        exists because that check can be bypassed (a new caller, a retry, a
-        model that decided the rule did not apply this time) and a filing made
-        by mistake cannot be withdrawn.
+        A private-person invoice never gets that far: whether the buyer is a
+        business is asked of ALLEGRO, for the order this invoice was issued for,
+        and the request is refused here — on the last line before it leaves this
+        process — with KsefNotAllowedError. The tool layer asks the same
+        question earlier and words the answer for the seller; this check exists
+        because that one can be bypassed (a new caller, a retry, a model that
+        decided the rule did not apply this time) and a filing made by mistake
+        cannot be withdrawn. Hence `allegro` and `order_id` are keyword-only
+        and have no defaults: a caller cannot forget to make the check possible.
+
+        Deliberately NOT read from the inFakt invoice. What is in inFakt is a
+        copy of what we put there; Allegro is where the buyer actually declared
+        whether they are a company and gave their NIP, so Allegro is the only
+        thing that can answer the question this ban turns on.
         """
-        invoice = await self.get_invoice(invoice_uuid)
-        if is_private_person_invoice(invoice):
-            raise KsefNotAllowedError(invoice_uuid, invoice.get("number", "") or "")
+        address = await allegro.get_order_invoice_data(order_id)
+        reason = ksef_refusal_reason(address)
+        if reason:
+            raise KsefNotAllowedError(invoice_uuid, reason)
         return await self._post(f"/invoices/{invoice_uuid}/send_to_ksef.json")
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
 
-def is_private_person_invoice(invoice: dict[str, Any]) -> bool:
-    """Whether this inFakt invoice was issued to a private person rather than a
-    business — the one fact that decides whether KSeF is allowed at all.
+def ksef_refusal_reason(invoice_address: dict[str, Any]) -> str | None:
+    """Why this order's invoice may not go to KSeF — or None when it may.
 
-    Two signals, either of which is enough, because they are two sides of the
-    same payload build_invoice_payload() writes: the explicit
-    client_business_activity_kind = "private_person" it sets for a person, and
-    the client_tax_code (NIP) it only ever sets for a company.
+    Reads ALLEGRO's invoice data for the order (AllegroService
+    .get_order_invoice_data), which is where the buyer themselves declared, at
+    checkout, whether they want the invoice on a company and with which NIP.
+    That declaration is the fact the ban turns on. What sits in inFakt is only
+    our own copy of it, written by build_invoice_payload from this very dict —
+    checking there would be checking our own homework, and would keep saying
+    "company" for an invoice whose Allegro order never had a NIP.
 
-    A missing NIP counts as a private person on purpose. KSeF addresses the
-    buyer BY NIP, so an invoice without one cannot be filed correctly whatever
-    the rest of the record says — and if inFakt ever answers with a shape this
-    cannot read, refusing is the recoverable mistake (the seller can still send
-    it from the inFakt panel) while sending is not.
+    Two ways to fail, kept apart because the seller fixes them differently: a
+    private person is a dead end, while a company whose NIP is missing from the
+    order is something they can go and look at. Both are refusals: KSeF
+    addresses the buyer BY NIP, so without one the filing cannot be correct —
+    and refusing is the recoverable mistake (the invoice can still be sent from
+    the inFakt panel), while sending is not.
     """
-    kind = str(invoice.get("client_business_activity_kind") or "").strip().lower()
-    if kind == "private_person":
-        return True
-    return not str(invoice.get("client_tax_code") or "").strip()
+    company = str(invoice_address.get("company_name") or "").strip()
+    vat_id = str(invoice_address.get("vat_id") or "").strip()
+    if not company and not vat_id:
+        return "nabywcą jest osoba prywatna"
+    if not vat_id:
+        return f"nabywca „{company}” nie ma NIP-u w danych z Allegro"
+    return None
 
 
 # ── Invoice payload builder ──────────────────────────────────────────────────
@@ -411,15 +426,15 @@ def _confirm_prompt(order_id: str) -> str:
     )
 
 
-def _ksef_note(is_private_person: bool) -> str:
+def _ksef_note(blocked_reason: str | None) -> str:
     """What can happen to this invoice in KSeF, said at issuance — that is where
     the seller decides what to ask for next, and asking for something that is
     forbidden wastes a round trip and reads like the assistant changed its mind.
     """
-    if is_private_person:
+    if blocked_reason:
         return (
-            " Do KSeF ta faktura NIE pójdzie i nie mogę jej tam wysłać: nabywcą jest osoba "
-            "prywatna, a KSeF przyjmuje faktury dla firm, adresowane NIP-em."
+            f" Do KSeF ta faktura NIE pójdzie i nie mogę jej tam wysłać: {blocked_reason} "
+            "(wg danych do faktury z Allegro), a KSeF przyjmuje faktury dla firm, adresowane NIP-em."
         )
     return " Do KSeF też wysyłam wyłącznie na Twoje wyraźne polecenie."
 
@@ -506,8 +521,8 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
         return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
 
-    is_private_person = not address.get("company_name")
-    buyer_kind = "osoba prywatna" if is_private_person else "firma"
+    ksef_blocked = ksef_refusal_reason(address)
+    buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
     link_line = await _share_link_suffix(infakt, invoice_uuid)
 
     await invoice_ledger.record_issued(
@@ -519,5 +534,5 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         f"ID faktury w inFakt: `{invoice_uuid}`\n"
         f"Nabywca: {buyer_kind}.\n"
         f"⏸️ NIE dołączyłem jej do zamówienia w Allegro — kupujący jej na razie nie widzi. "
-        f"{_confirm_prompt(order_id)}{_ksef_note(is_private_person)}"
+        f"{_confirm_prompt(order_id)}{_ksef_note(ksef_blocked)}"
     )

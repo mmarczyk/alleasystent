@@ -581,10 +581,11 @@ class AllegroAgent(BaseAgent):
         "  - KSeF IS FOR COMPANY BUYERS ONLY. An invoice for a PRIVATE PERSON ('osoba prywatna', no "
         "NIP) must NEVER go to KSeF: KSeF addresses the buyer by NIP, so the filing would be wrong "
         "and cannot be withdrawn. This is a hard rule, not a default — if the user asks for it "
-        "anyway, do NOT call send_invoice_to_ksef; answer that the invoice is made out to a private "
-        "person, that KSeF only takes NIP-addressed business invoices, and that if the buyer really "
-        "is a company they should fix the NIP on the invoice in the inFakt panel first. The tool "
-        "refuses such a call regardless, so calling it only wastes a turn.\n"
+        "anyway, do NOT call send_invoice_to_ksef; answer that the buyer on that order is a private "
+        "person and that KSeF only takes NIP-addressed business invoices. Who the buyer is comes "
+        "from ALLEGRO's invoice data for the order (get_order_invoice_data), never from inFakt, so "
+        "pass order_id to send_invoice_to_ksef whenever you know it. The tool refuses such a call "
+        "regardless, so calling it only wastes a turn.\n"
         "  - So: once the user confirms the issued invoice looks fine and hasn't named a channel yet, "
         "call get_order_invoice_data for that order to check whether the buyer is a company or a "
         "private person, then ASK in your reply: "
@@ -3210,35 +3211,43 @@ class AllegroAgent(BaseAgent):
         )
 
     @staticmethod
-    def _ksef_refused_for_private_person(invoice_uuid: str, number: str) -> str:
-        """One wording for both layers of the private-person ban, so the seller
-        gets the same explanation wherever it was caught."""
+    def _ksef_refused(invoice_uuid: str, order_id: str, reason: str) -> str:
+        """One wording for both layers of the ban, so the seller gets the same
+        explanation wherever it was caught."""
         return (
-            f"🚫 Faktury {number or invoice_uuid} nie wyślę do KSeF — jest wystawiona dla osoby "
-            "prywatnej, a KSeF przyjmuje faktury dla firm, adresowane NIP-em. Nabywca bez NIP-u "
-            "nie ma tam swojego miejsca, więc takie zgłoszenie byłoby błędne i nie da się go "
-            "wycofać.\n"
-            "Jeśli to pomyłka i nabywcą jest firma, popraw dane nabywcy (NIP) w panelu inFakt — "
-            "wtedy wyślę ją bez problemu."
+            f"🚫 Faktury `{invoice_uuid}` nie wyślę do KSeF — wg danych do faktury z zamówienia "
+            f"`{order_id}` {reason}, a KSeF przyjmuje faktury dla firm, adresowane NIP-em. "
+            "Nabywca bez NIP-u nie ma tam swojego miejsca, więc takie zgłoszenie byłoby błędne "
+            "i nie da się go wycofać.\n"
+            "Jeśli to pomyłka, sprawdź dane do faktury na zamówieniu w Allegro — to stamtąd biorę "
+            "tę informację, bo tam kupujący sam deklaruje firmę i NIP."
         )
 
-    async def _send_invoice_to_ksef(self, invoice_uuid: str) -> str:
+    async def _send_invoice_to_ksef(self, invoice_uuid: str, order_id: str | None = None) -> str:
         """Submit an already-issued inFakt invoice to KSeF.
 
         Two things are refused here before anything is sent. Filing with the tax
         office is as final as showing the invoice to the buyer, so it gets the
         same same-turn block as _attach_invoice_to_allegro_order: an invoice
-        issued a second ago has not been read by anyone. And an invoice made out
-        to a private person may not go to KSeF at all — that is not a
-        preference the seller or the model can override, so it is read off the
-        invoice itself here and refused again inside
-        InfaktService.send_to_ksef, on the last line before the request leaves.
+        issued a second ago has not been read by anyone. And an invoice for a
+        buyer without a NIP may not go to KSeF at all — that is not a preference
+        the seller or the model can override, so it is asked of ALLEGRO here and
+        asked again inside InfaktService.send_to_ksef, on the last line before
+        the request leaves.
+
+        Allegro, not inFakt: the buyer declares the company and the NIP when
+        they order, and that declaration is what the ban turns on. inFakt only
+        holds the copy we wrote there ourselves. Allegro answers per ORDER, so
+        the order has to be known — from the tool call, or from the ledger,
+        which is where the issuance wrote down which order this invoice belongs
+        to. Not knowing it means not sending.
         """
+        from services import invoice_ledger
         from services.infakt_service import (
             InfaktAPIError,
             InfaktService,
             KsefNotAllowedError,
-            is_private_person_invoice,
+            ksef_refusal_reason,
         )
 
         if self._issued_an_invoice_this_turn:
@@ -3248,35 +3257,39 @@ class AllegroAgent(BaseAgent):
                 "powyżej i napisz „wyślij fakturę do KSeF”, kiedy będzie w porządku."
             )
 
-        infakt = InfaktService.get_instance()
-
-        # Who the invoice is FOR decides whether KSeF is possible at all, and
-        # that is read from the invoice rather than taken from the tool call:
-        # the caller (the model, or the seller insisting) has no say in it. The
-        # service refuses the same invoice again on the way out — this check is
-        # here to say why in a sentence the seller can act on, and to spend no
-        # API call on a request that cannot be granted.
-        try:
-            invoice = await infakt.get_invoice(invoice_uuid)
-        except InfaktAPIError as exc:
-            logger.error("send_invoice_to_ksef: cannot read invoice %s: %s", invoice_uuid, exc)
-            if exc.status_code == 404:
-                return self._unknown_infakt_invoice(invoice_uuid)
+        user_id = invoice_ledger.user_id_of(self._allegro)
+        order_id = order_id or await invoice_ledger.order_of_invoice(user_id, invoice_uuid)
+        if not order_id:
             return (
-                f"❌ Nie udało się sprawdzić, dla kogo jest faktura `{invoice_uuid}` ({exc}), "
-                "więc nie wysyłam jej do KSeF. Spróbuj ponownie za chwilę."
+                f"❓ Nie wiem, do którego zamówienia należy faktura `{invoice_uuid}`, a bez tego "
+                "nie sprawdzę w Allegro, czy nabywcą jest firma z NIP-em — więc jej nie wysyłam. "
+                "Podaj ID zamówienia (np. „wyślij fakturę do KSeF dla zamówienia `<id>`”)."
             )
 
-        if is_private_person_invoice(invoice):
-            return self._ksef_refused_for_private_person(invoice_uuid, invoice.get("number", ""))
-
         try:
-            result = await infakt.send_to_ksef(invoice_uuid)
+            address = await self._allegro.get_order_invoice_data(order_id)
+        except AllegroAPIError as exc:
+            logger.error("send_invoice_to_ksef: cannot read order %s: %s", order_id, exc)
+            return (
+                f"❌ Nie udało się pobrać z Allegro danych do faktury dla zamówienia `{order_id}` "
+                f"({exc}), więc nie wysyłam faktury do KSeF — bez tych danych nie wiem, czy "
+                "nabywcą jest firma. Spróbuj ponownie za chwilę."
+            )
+
+        reason = ksef_refusal_reason(address)
+        if reason:
+            return self._ksef_refused(invoice_uuid, order_id, reason)
+
+        infakt = InfaktService.get_instance()
+        try:
+            result = await infakt.send_to_ksef(
+                invoice_uuid, allegro=self._allegro, order_id=order_id
+            )
         except KsefNotAllowedError as exc:
-            # The service said no after this method said yes — the two disagree
-            # only if the invoice changed under us, and the service wins.
+            # The service said no after this method said yes — they can only
+            # disagree if the order changed under us, and the service wins.
             logger.error("send_invoice_to_ksef: refused at the API boundary: %s", exc)
-            return self._ksef_refused_for_private_person(invoice_uuid, exc.number)
+            return self._ksef_refused(invoice_uuid, order_id, exc.reason)
         except InfaktAPIError as exc:
             logger.error("send_invoice_to_ksef: invoice %s failed: %s", invoice_uuid, exc)
             if exc.status_code == 404:
@@ -4678,7 +4691,9 @@ class AllegroAgent(BaseAgent):
             )
 
         if tool_name == "send_invoice_to_ksef":
-            return await self._send_invoice_to_ksef(tool_input["invoice_uuid"])
+            return await self._send_invoice_to_ksef(
+                tool_input["invoice_uuid"], tool_input.get("order_id")
+            )
 
         # Both the "suggest" and "disable" tool for each monitor type resolve to the
         # same deterministic status block — the model only picks WHICH tool to call

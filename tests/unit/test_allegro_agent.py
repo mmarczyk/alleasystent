@@ -2373,68 +2373,116 @@ class TestAttachingWaitsForTheSeller:
         assert agent._issued_an_invoice_this_turn is False
 
 
-class TestKsefRefusesPrivatePersonInvoices:
+class TestKsefRefusesInvoicesWithoutANip:
     """KSeF carries invoices between businesses and addresses the buyer by NIP.
     A private person has none, so filing their invoice is wrong and cannot be
     withdrawn — the tool refuses it before spending a call, and the service
-    refuses it again on the way out (tests/unit/test_infakt_service.py)."""
+    refuses it again on the way out (tests/unit/test_infakt_service.py).
 
-    PRIVATE = {"number": "FV/1/2026", "client_business_activity_kind": "private_person"}
-    COMPANY = {"number": "FV/2/2026", "client_company_name": "Firma", "client_tax_code": "5252445767"}
+    The buyer comes from ALLEGRO's invoice data for the order, because that is
+    where the buyer declared the company and the NIP. inFakt only holds the copy
+    we wrote there ourselves."""
+
+    COMPANY = {"company_name": "Firma", "vat_id": "5252445767"}
+    PRIVATE = {"first_name": "Anna", "last_name": "Kowalska"}
+
+    def _agent(self, address: dict):
+        agent = _make_agent()
+        agent._allegro.get_order_invoice_data = AsyncMock(return_value=address)
+        return agent
 
     @staticmethod
-    def _infakt(invoice: dict):
+    def _infakt():
         infakt = MagicMock()
-        infakt.get_invoice = AsyncMock(return_value=invoice)
         infakt.send_to_ksef = AsyncMock(return_value={"status": "sent"})
+        infakt.get_invoice = AsyncMock(
+            side_effect=AssertionError("the buyer is Allegro's answer, not inFakt's")
+        )
         return infakt
 
     @pytest.mark.asyncio
     async def test_nothing_is_sent_for_a_private_person(self):
-        agent = _make_agent()
-        infakt = self._infakt(self.PRIVATE)
+        agent = self._agent(self.PRIVATE)
+        infakt = self._infakt()
         with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
-            out = await agent._dispatch("send_invoice_to_ksef", {"invoice_uuid": "inv-1"})
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-1", "order_id": "o1"}
+            )
 
         infakt.send_to_ksef.assert_not_awaited()
         assert out.startswith("🚫")
-        assert "osoby prywatnej" in out
+        assert "osoba prywatna" in out
         assert "NIP" in out
 
     @pytest.mark.asyncio
     async def test_a_company_invoice_is_sent(self):
-        agent = _make_agent()
-        infakt = self._infakt(self.COMPANY)
+        agent = self._agent(self.COMPANY)
+        infakt = self._infakt()
         with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
-            out = await agent._dispatch("send_invoice_to_ksef", {"invoice_uuid": "inv-2"})
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-2", "order_id": "o1"}
+            )
 
-        infakt.send_to_ksef.assert_awaited_once_with("inv-2")
+        infakt.send_to_ksef.assert_awaited_once_with("inv-2", allegro=agent._allegro, order_id="o1")
         assert out.startswith("📤")
 
     @pytest.mark.asyncio
-    async def test_the_services_own_refusal_is_reported_the_same_way(self):
-        """The two checks can only disagree if the invoice changed under us —
-        and then the one closest to the request wins."""
-        from services.infakt_service import KsefNotAllowedError
+    async def test_the_order_is_looked_up_when_the_call_does_not_name_it(self):
+        """"Wyślij tę fakturę do KSeF" carries no order — and without one there
+        is nothing to ask Allegro about."""
+        agent = self._agent(self.COMPANY)
+        infakt = self._infakt()
+        with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.order_of_invoice", AsyncMock(return_value="o-LEDGER")):
+            await agent._dispatch("send_invoice_to_ksef", {"invoice_uuid": "inv-2"})
 
-        agent = _make_agent()
-        infakt = self._infakt(self.COMPANY)
-        infakt.send_to_ksef = AsyncMock(side_effect=KsefNotAllowedError("inv-2", "FV/2/2026"))
-        with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
-            out = await agent._dispatch("send_invoice_to_ksef", {"invoice_uuid": "inv-2"})
-
-        assert out.startswith("🚫")
-        assert "FV/2/2026" in out
+        agent._allegro.get_order_invoice_data.assert_awaited_once_with("o-LEDGER")
 
     @pytest.mark.asyncio
-    async def test_an_unreadable_invoice_is_not_sent_on_a_guess(self):
-        from services.infakt_service import InfaktAPIError
-
-        agent = _make_agent()
-        infakt = self._infakt(self.COMPANY)
-        infakt.get_invoice = AsyncMock(side_effect=InfaktAPIError(500, "boom"))
-        with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+    async def test_an_unknown_order_blocks_the_send_instead_of_guessing(self):
+        agent = self._agent(self.COMPANY)
+        infakt = self._infakt()
+        with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt), \
+             patch("services.invoice_ledger.order_of_invoice", AsyncMock(return_value=None)):
             out = await agent._dispatch("send_invoice_to_ksef", {"invoice_uuid": "inv-2"})
 
         infakt.send_to_ksef.assert_not_awaited()
-        assert "nie wysyłam jej do KSeF" in out
+        agent._allegro.get_order_invoice_data.assert_not_awaited()
+        assert "Nie wiem, do którego zamówienia" in out
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_allegro_blocks_the_send_too(self):
+        """Not knowing whether the buyer is a company is not permission to send."""
+        from services.allegro_service import AllegroAPIError
+
+        agent = self._agent(self.COMPANY)
+        agent._allegro.get_order_invoice_data = AsyncMock(
+            side_effect=AllegroAPIError(500, "boom")
+        )
+        infakt = self._infakt()
+        with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-2", "order_id": "o1"}
+            )
+
+        infakt.send_to_ksef.assert_not_awaited()
+        assert "nie wysyłam faktury do KSeF" in out
+
+    @pytest.mark.asyncio
+    async def test_the_services_own_refusal_is_reported_the_same_way(self):
+        """The two checks can only disagree if the order changed under us — and
+        then the one closest to the request wins."""
+        from services.infakt_service import KsefNotAllowedError
+
+        agent = self._agent(self.COMPANY)
+        infakt = self._infakt()
+        infakt.send_to_ksef = AsyncMock(
+            side_effect=KsefNotAllowedError("inv-2", "nabywcą jest osoba prywatna", "FV/2/2026")
+        )
+        with patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-2", "order_id": "o1"}
+            )
+
+        assert out.startswith("🚫")
+        assert "osoba prywatna" in out
