@@ -364,6 +364,10 @@ class AllegroAgent(BaseAgent):
         "wysyłać ani fakturować) — nie musisz ich odfiltrowywać, dzieje się to samo. Pytaj o nie "
         "tylko wtedy, gdy sprzedawca prosi wprost ('pokaż anulowane zamówienia' → "
         "fulfillment_status=CANCELLED) — to jedyny przypadek, w którym są pokazywane.\n"
+        "   – NIEOPŁACONE koszyki (kupujący kliknął „kupuję”, ale nie zapłacił) tak samo nie "
+        "trafiają do ŻADNEGO listowania ani do żadnej liczby — dla Allegro to jeszcze nie "
+        "zamówienie, więc też nie musisz ich odfiltrowywać. Zamówienia ZA POBRANIEM są zwykłymi "
+        "zamówieniami (płatność przy odbiorze, więc bez daty opłacenia) i są pokazywane normalnie.\n"
         "   – WARTOŚĆ ('powyżej 400 zł', 'ponad 1000', 'poniżej 50 zł', 'od 100 do 300 zł') → "
         "min_value / max_value on the same listing call, together with whatever stage or negation "
         "the question also names ('niewysłane powyżej 400 zł' → get_orders with "
@@ -3631,7 +3635,10 @@ class AllegroAgent(BaseAgent):
         # this matters most for a negated listing, whose whole point is
         # "everything other than X" and which would otherwise sweep them in.
         # The one exception is a question that explicitly asks for cancelled
-        # ones; nothing else could answer it.
+        # ones; nothing else could answer it. (A form cancelled at CHECKOUT
+        # no longer reaches the fetch either — it is not READY_FOR_PROCESSING,
+        # see allegro_service.ORDER_STATUS_READY — so what this drop still
+        # catches is the orders cancelled mid-fulfillment.)
         asked_for_cancelled = "CANCELLED" in {
             str(status or "").upper(), str(fulfillment_status or "").upper()
         }

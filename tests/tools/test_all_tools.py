@@ -124,6 +124,28 @@ async def test_unsent_listing_keeps_the_orders_nobody_packed_yet():
     assert f"`{ds.ORD_6}`" not in out, "an already-sent order in a 'niewysłane' listing"
 
 
+async def test_an_unpaid_basket_reaches_no_answer_at_all():
+    """A form the buyer filled in but never paid for is not an order: Allegro
+    only hands the seller a READY_FOR_PROCESSING one, and everything before
+    that is a basket in progress. ORD_7 is the most expensive form in the
+    dataset and sits at the NEW fulfillment stage, so if it ever leaked it
+    would head the very listings a seller acts on — and it carries the nulls
+    (no payment date, no buyer e-mail) that such a form really has."""
+    for case_id in (
+        "get_new_orders",              # "jakie mam nowe zamówienia"
+        "get_orders",                  # "pokaż listę wszystkich zamówień"
+        "get_orders__unsent",          # "które nie zostały wysłane"
+        "get_orders__unsent_over_400",  # + próg kwotowy, a to forma za 3199 zł
+    ):
+        out = (await run_case(CASES_BY_ID[case_id]))["output"]
+        assert f"`{ds.ORD_7}`" not in out, f"{case_id} listed an unpaid basket"
+        assert "3199" not in out, f"{case_id} counted an unpaid basket's value"
+
+    # And the counts say the same thing: three new orders, not four.
+    counted = (await run_case(CASES_BY_ID["get_new_orders__count"]))["output"]
+    assert "**3**" in counted, counted
+
+
 async def test_value_filter_drops_the_orders_below_the_threshold():
     """The amount in "powyżej 400 zł" used to have no parameter to land in, so
     it was dropped and the unfiltered listing reached the seller as the

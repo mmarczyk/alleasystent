@@ -201,19 +201,41 @@ class TestAllegroServiceParsing:
         with pytest.raises(ValidationError):
             svc._parse_order(data)
 
-    async def test_unfiltered_page_with_an_unpaid_order_still_lists_everything(
+    async def test_a_status_less_fetch_asks_allegro_for_real_orders_only(
         self, monkeypatch
     ):
-        """The whole point of the null tolerance above: a listing that does NOT
-        pin status=READY_FOR_PROCESSING (a negated-stage question — "zamówienia
-        jeszcze nie wysłane") gets BOUGHT/FILLED_IN checkout forms on the same
-        page, and one of those must not cost the seller every other order."""
+        """A checkout form the buyer never paid for is a basket, not an order —
+        nothing may count, list or invoice it. The caller that names no status
+        is the one that used to get every form Allegro holds (a negated-stage
+        question: "zamówienia jeszcze nie wysłane"), so the status the fetch
+        fills in is what keeps unpaid forms out of every answer."""
+        svc = self._make_service(monkeypatch)
+        svc._get = AsyncMock(return_value={"checkoutForms": [], "totalCount": 0})
+
+        await svc.get_orders(limit=50)
+
+        assert svc._get.await_args.kwargs["params"]["status"] == "READY_FOR_PROCESSING"
+
+    async def test_an_explicit_status_is_still_the_callers_own(self, monkeypatch):
+        """The cancelled listing asks for its own status and must get it."""
+        svc = self._make_service(monkeypatch)
+        svc._get = AsyncMock(return_value={"checkoutForms": [], "totalCount": 0})
+
+        await svc.get_orders(status="CANCELLED", limit=50)
+
+        assert svc._get.await_args.kwargs["params"]["status"] == "CANCELLED"
+
+    async def test_an_order_without_a_payment_date_still_lists(self, monkeypatch):
+        """Cash on delivery is a real order — Allegro hands it over as
+        READY_FOR_PROCESSING — and it is paid on receipt, so it carries
+        `finishedAt: null` while it waits. That null must not cost the seller
+        the rest of the page (the crash this parsing tolerance exists for)."""
         svc = self._make_service(monkeypatch)
         svc._get = AsyncMock(return_value={
             "totalCount": 2,
             "checkoutForms": [
                 {
-                    "id": "oplacone",
+                    "id": "przelew",
                     "buyer": {"login": "b", "email": "b@example.com"},
                     "status": "READY_FOR_PROCESSING",
                     "fulfillment": {"status": "READY_FOR_SHIPMENT"},
@@ -222,11 +244,11 @@ class TestAllegroServiceParsing:
                     "boughtAt": "2026-09-01T09:00:00Z",
                 },
                 {
-                    "id": "nieoplacone",
+                    "id": "pobranie",
                     "buyer": {"login": "b2", "email": None},
-                    "status": "FILLED_IN",
+                    "status": "READY_FOR_PROCESSING",
                     "fulfillment": {"status": "NEW"},
-                    "payment": {"type": "ONLINE", "finishedAt": None},
+                    "payment": {"type": "CASH_ON_DELIVERY", "finishedAt": None},
                     "summary": {"totalToPay": {"amount": "300.00", "currency": "PLN"}},
                     "boughtAt": "2026-09-02T09:00:00Z",
                 },
@@ -235,7 +257,8 @@ class TestAllegroServiceParsing:
 
         orders = await svc.get_orders(limit=50)
 
-        assert [o.order_id for o in orders] == ["nieoplacone", "oplacone"]
+        assert [o.order_id for o in orders] == ["pobranie", "przelew"]
+        assert orders[0].paid_at == ""
 
     def test_token_file_default_user(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "test")

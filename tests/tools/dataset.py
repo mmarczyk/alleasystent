@@ -50,6 +50,7 @@ SELLER_LOGIN = "elektrodom_pl"
 # ORD_1..ORD_3  new, unprocessed  (get_new_orders)
 # ORD_4, ORD_5  packed, ready for the courier (get_orders_delivery)
 # ORD_6         already sent, invoice requested and already issued
+# ORD_7         unpaid basket (FILLED_IN) — must never appear in ANY answer
 
 ORD_1 = "0c4854a0-9646-11f1-8028-338c43adc37a"
 ORD_2 = "1d5965b1-a757-22e2-9139-449d54bed48b"
@@ -57,6 +58,7 @@ ORD_3 = "2e6a76c2-b868-33f3-a24a-55ae65cfe59c"
 ORD_4 = "3f7b87d3-c979-44f4-b35b-66bf76d0f6ad"
 ORD_5 = "4a8c98e4-da8a-55a5-c46c-77c087e1a7be"
 ORD_6 = "5b9da9f5-eb9b-66b6-d57d-88d198f2b8cf"
+ORD_7 = "6cae0a06-fcac-77c7-e68e-99e2a903c9d0"
 
 
 def _price(amount: float, currency: str = "PLN") -> dict:
@@ -254,6 +256,31 @@ CHECKOUT_FORMS: list[dict] = [
                 "countryCode": "PL",
             },
         },
+    },
+    # An unpaid basket: the buyer clicked "kupuję" and filled the form in, but
+    # never paid, so for Allegro this is not an order yet — there is nothing to
+    # pack, send, count or invoice. It sits here to prove no answer ever picks
+    # it up: it is the most expensive form in the set and its fulfillment stage
+    # is NEW, so every "nowe", "niewysłane" and "powyżej 400 zł" listing would
+    # show it first if the exclusion ever broke.
+    #
+    # Its nulls are deliberate too, and they are what Allegro really sends for
+    # a form like this: a basket has no payment date, and the buyer's e-mail is
+    # only released once the purchase completes. `null` is not a missing key —
+    # parsing has to survive it (see models.allegro._AllegroPayloadModel).
+    {
+        "id": ORD_7,
+        "status": "FILLED_IN",
+        "buyer": {"login": "krzysztof.w", "email": None, "phoneNumber": None},
+        "fulfillment": {"status": "NEW"},
+        "payment": {"type": "ONLINE", "finishedAt": None},
+        "boughtAt": in_month(0.5),
+        "summary": {"totalToPay": _price(3199.00)},
+        "delivery": _delivery("DPD", "Kurier DPD", 0.0, hours_ahead(40)),
+        "lineItems": [
+            _line_item("14587412233", "Pralka Bosch Serie 6 WGG244Z0PL", 1, 3199.00),
+        ],
+        "invoice": {"required": False, "dontWant": False},
     },
 ]
 
