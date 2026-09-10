@@ -285,12 +285,6 @@ class FakeInfaktAPI:
         if request.method == "POST" and path.endswith(f"/invoices/{uuid}/send_to_ksef.json"):
             return FakeAllegroAPI._json({"status": "sent", "ksef_reference_number": "20260825-SE-1A2B"})
 
-        # Served so a test can prove the request never gets here for a
-        # private-person invoice — inFakt itself would accept it.
-        if request.method == "POST" and path.endswith(
-            f"/invoices/{ds.INFAKT_PRIVATE_INVOICE_UUID}/send_to_ksef.json"
-        ):
-            return FakeAllegroAPI._json({"status": "sent", "ksef_reference_number": "20260825-SE-9Z8Y"})
 
         if request.method == "GET" and path.endswith(f"/invoices/{uuid}/pdf.json"):
             return httpx.Response(200, content=b"%PDF-1.4 fake invoice pdf\n%%EOF",
@@ -299,10 +293,6 @@ class FakeInfaktAPI:
         if request.method == "GET" and path.endswith(f"/invoices/{uuid}.json"):
             return FakeAllegroAPI._json(ds.INFAKT_INVOICE)
 
-        if request.method == "GET" and path.endswith(
-            f"/invoices/{ds.INFAKT_PRIVATE_INVOICE_UUID}.json"
-        ):
-            return FakeAllegroAPI._json(ds.INFAKT_PRIVATE_INVOICE)
 
         return FakeAllegroAPI._json({"error": "Not Found"}, 404)
 

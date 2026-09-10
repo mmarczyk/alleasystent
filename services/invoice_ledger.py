@@ -26,6 +26,12 @@ import time
 logger = logging.getLogger(__name__)
 
 _KEY = "allegro:invoice_issued:{user_id}:{order_id}"
+# The same fact from the other side: which ORDER an inFakt invoice belongs to.
+# Needed because the delivery steps are addressed by invoice, while everything
+# that decides whether they are ALLOWED — above all whether the buyer is a
+# company with a NIP — is a question only Allegro can answer, and Allegro is
+# asked per order (see AllegroAgent._send_invoice_to_ksef).
+_ORDER_KEY = "allegro:invoice_order:{user_id}:{invoice_uuid}"
 # Comfortably longer than any invoicing deadline — the point is that an order
 # invoiced months ago never comes back around as "not invoiced yet".
 _TTL = 86400 * 180
@@ -76,6 +82,10 @@ async def record_issued(
 
     async def _do(r):
         await r.set(_KEY.format(user_id=user_id, order_id=order_id), json.dumps(payload), ex=_TTL)
+        if invoice_uuid:
+            await r.set(
+                _ORDER_KEY.format(user_id=user_id, invoice_uuid=invoice_uuid), order_id, ex=_TTL,
+            )
 
     await _with_redis(_do)
     logger.info(
@@ -105,6 +115,20 @@ async def get_record(user_id: str, order_id: str) -> dict | None:
         return json.loads(raw)
     except (TypeError, ValueError):
         return None
+
+
+async def order_of_invoice(user_id: str, invoice_uuid: str) -> str | None:
+    """The order an inFakt invoice was issued for, or None if we never wrote it
+    down. None is not "no order" — it is "we don't know", and a caller that
+    needs the order to check whether something is allowed must treat it as a
+    reason to refuse rather than to proceed."""
+    if not invoice_uuid:
+        return None
+
+    async def _do(r):
+        return await r.get(_ORDER_KEY.format(user_id=user_id, invoice_uuid=invoice_uuid))
+
+    return await _with_redis(_do) or None
 
 
 async def get_records(user_id: str, order_ids: list[str]) -> dict[str, dict]:

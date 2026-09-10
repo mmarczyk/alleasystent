@@ -363,17 +363,17 @@ CASES: list[Case] = [
          ("❌", "404"),
          note="Nieznane ID faktury — czytelny komunikat błędu zamiast wyjątku."),
     Case("send_invoice_to_ksef", "send_invoice_to_ksef",
-         {"invoice_uuid": ds.INFAKT_INVOICE_UUID},
+         {"invoice_uuid": ds.INFAKT_INVOICE_UUID, "order_id": ds.ORD_1},
          "Wyślij tę fakturę do KSeF",
          ("📤", "KSeF", "sent"),
          note="Zgłoszenie faktury do KSeF (asynchroniczne po stronie inFakt) — "
-              "faktura dla firmy, z NIP-em."),
+              "nabywcą na zamówieniu jest firma z NIP-em."),
     Case("send_invoice_to_ksef__private_person", "send_invoice_to_ksef",
-         {"invoice_uuid": ds.INFAKT_PRIVATE_INVOICE_UUID},
+         {"invoice_uuid": ds.INFAKT_INVOICE_UUID, "order_id": ds.ORD_2},
          "Wyślij tę fakturę do KSeF",
-         ("🚫", "osoby prywatnej", "NIP"),
-         note="Faktura dla osoby prywatnej — do KSeF nie pójdzie. KSeF adresuje "
-              "nabywcę NIP-em, a zgłoszenia nie da się wycofać."),
+         ("🚫", "osoba prywatna", "NIP"),
+         note="Dane do faktury z Allegro mówią: osoba prywatna — do KSeF nie "
+              "pójdzie. KSeF adresuje nabywcę NIP-em, a zgłoszenia nie da się wycofać."),
 
     # ── Zwroty i reklamacje ──────────────────────────────────────────────────
     Case("get_new_returns", "get_new_returns", {},
