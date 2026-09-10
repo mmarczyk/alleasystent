@@ -56,6 +56,40 @@ _MESSAGE_LIST_OVERRIDE_RE = re.compile(
 _MESSAGE_QUESTION_WORD_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
 _MESSAGE_TOPIC_WORD_RE = re.compile(r"wiadomo", re.IGNORECASE)
 
+# ── Attaching an invoice to an Allegro order: the seller's word, every time ──
+# Attaching is the step the buyer sees: the PDF lands on their order page the
+# moment it uploads, Allegro takes one invoice per order, and nothing here can
+# take it back. So it never rides along with the issuance that produced the
+# invoice (see infakt_service.issue_invoice_for_order) and never happens on a
+# turn where the seller did not ask for it — the model's judgement of "the user
+# seemed happy with it" is exactly the guess this codebase has been bitten by
+# before (the ambiguous "tak" that issued two real invoices, see
+# services/invoice_reminder.py's module docstring).
+#
+# Two ways to authorize it, both the seller's own words:
+#   1. they name the action in THIS message ("dołącz fakturę do zamówienia X"),
+#   2. they confirm it ("ok", "zgadza się") right after the assistant asked
+#      about attaching — the same last-assistant-turn test the invoice reminder
+#      uses to tell its own question apart from everyone else's.
+_ATTACH_INSTRUCTION_RE = re.compile(
+    r"do[łl][ąa]cz|za[łl][ąa]cz|podepnij|wgraj|dodaj\s+(?:t[ęe]\s+|j[ąa]\s+)?faktur",
+    re.IGNORECASE,
+)
+_INVOICE_CONFIRMATION_RE = re.compile(
+    r"\b(ok|okej|oki|okey|dobrze|dobra|tak|potwierdzam|akceptuj[ęe]|zgadza\s+si[ęe]|"
+    r"wygl[ąa]da\s+(?:dobrze|ok)|jest\s+(?:ok|dobrze)|wszystko\s+(?:ok|dobrze|gra))\b",
+    re.IGNORECASE,
+)
+# The assistant's own "shall I attach it?" — either the ask the model makes
+# ("Dołączyć fakturę do zamówienia w Allegro?") or the "napisz „dołącz fakturę
+# do zamówienia …”" line every issuance ends with. Deliberately narrow: it must
+# name the ACTION, because "ok" against a message that merely mentions an
+# invoice and an order is not an answer to a question nobody asked.
+_ASSISTANT_ASKED_ATTACH_RE = re.compile(
+    r"(?:do[łl][ąa]cz|za[łl][ąa]cz|podepn)\w*\s+(?:j[ąa]\s+|t[ęe]\s+)?faktur",
+    re.IGNORECASE,
+)
+
 # ── "…z konta np1988": one named buyer vs the whole period ──────────────────
 # buyer_login is the only filter in the tool list that narrows an answer to ONE
 # buyer account, and these are the tools that answer for a whole PERIOD with no
@@ -302,12 +336,12 @@ class AllegroAgent(BaseAgent):
         "   – NOWE: 'nowe', 'świeże', 'do obsłużenia', 'złożone', 'zarejestrowane', "
         "'oczekujące na potwierdzenie', 'co nowego wpadło', 'co mam zacząć', 'co czeka na start', "
         "'nietknięte', 'ile w kolejce' — and the still-to-pack wording 'do spakowania' / "
-        "'co mam spakować' / 'niespakowane' → get_new_orders (fulfillment_status=NEW)\n"
+        "'co mam spakować' → get_new_orders (fulfillment_status=NEW)\n"
         "   – W REALIZACJI: 'w trakcie', 'w realizacji', 'przetwarzane', 'w toku', 'kompletowane', "
         "'co teraz kompletuję', 'co mam w robocie', 'nad czym siedzę', 'nieskończone', "
         "'do dokończenia' → get_orders with fulfillment_status=PROCESSING\n"
         "   – DO WYSŁANIA: 'gotowe do wysyłki', 'oczekujące/czekają na wysyłkę', 'do wysłania', "
-        "'niewysłane', 'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
+        "'przygotowane do nadania', 'do nadania', 'zapakowane' (już spakowane), "
         "'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania' → get_orders_delivery "
         "(its default filter is already fulfillment_status=READY_FOR_SHIPMENT)\n"
         "   – WYSŁANE: 'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', "
@@ -317,6 +351,25 @@ class AllegroAgent(BaseAgent):
         "   – ODEBRANE: 'odebrane', 'dostarczone', 'zrealizowane', 'zakończone', 'co już dotarło', "
         "'co klient odebrał', 'ile dostarczonych', 'ile zamkniętych' → get_orders with "
         "fulfillment_status=PICKED_UP\n"
+        "   – NEGACJA etapu ('niewysłane', 'jeszcze nie wysłane', 'które nie zostały wysłane', "
+        "'nieodebrane', 'niespakowane') is NEVER one of the stages above: a negation means EVERY "
+        "status other than the one negated, so it goes to get_orders with "
+        "exclude_fulfillment_status — 'niewysłane' → exclude ['SENT', 'IN_TRANSIT', "
+        "'READY_FOR_PICKUP', 'PICKED_UP'] (everything still on your side, packed or not, "
+        "in realizacji included), 'nieodebrane' → exclude ['PICKED_UP'], 'niespakowane' → exclude "
+        "['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. Answering "
+        "'niewysłane' with fulfillment_status=READY_FOR_SHIPMENT hides every order nobody has "
+        "packed yet, and answering it with SENT lists the exact opposite of what was asked.\n"
+        "   – ANULOWANE zamówienia nie trafiają do ŻADNEGO listowania (nie ma czego pakować, "
+        "wysyłać ani fakturować) — nie musisz ich odfiltrowywać, dzieje się to samo. Pytaj o nie "
+        "tylko wtedy, gdy sprzedawca prosi wprost ('pokaż anulowane zamówienia' → "
+        "fulfillment_status=CANCELLED) — to jedyny przypadek, w którym są pokazywane.\n"
+        "   – WARTOŚĆ ('powyżej 400 zł', 'ponad 1000', 'poniżej 50 zł', 'od 100 do 300 zł') → "
+        "min_value / max_value on the same listing call, together with whatever stage or negation "
+        "the question also names ('niewysłane powyżej 400 zł' → get_orders with "
+        "exclude_fulfillment_status + min_value=400). These are the ONLY parameters that carry an "
+        "amount — never answer a question naming one without them, the unfiltered listing would "
+        "reach the seller as if it were the filtered answer.\n"
         "   – NO stage named at all ('pokaż zamówienia', 'lista zamówień', a period or a buyer) → "
         "get_orders with no fulfillment_status — it is the fallback for every order question the "
         "stages above do not cover, never the first choice when a stage IS named.\n"
@@ -448,7 +501,10 @@ class AllegroAgent(BaseAgent):
         "(buyer, read status, last-message date), never the message text. Pass buyer_login and/or "
         "date ('dzisiaj'/'today' or 'YYYY-MM-DD') if you don't already have a thread_id from earlier "
         "in this conversation — the tool finds the matching thread for you, no need to call "
-        "get_message_threads first.\n"
+        "get_message_threads first. Its result also names the ORDER the message concerns, so a "
+        "buyer asking about 'ta transakcja' / 'to zamówienie' (a faktura, a return, a shipment) "
+        "is answered by calling get_thread_messages FIRST and then the order tool with THAT id — "
+        "never by asking the user for a UUID the message already carries.\n"
         "• New/recent customer returns, ANY status — 'nowe zwroty', 'jakie mam zwroty', 'czy są "
         "jakieś zwroty', 'ile zwrotów' → get_new_returns (count_only=true for a plain number "
         "question). NEVER confuse this with complaints/disputes even if the user's wording is loose.\n"
@@ -505,22 +561,39 @@ class AllegroAgent(BaseAgent):
         "'czy są jakieś faktury?') is NOT an issuance command — use get_orders_pending_invoice for that, "
         "never issue_invoice_for_order or preview_pending_invoices for a yes/no question.\n"
         "AFTER ISSUING AN INVOICE (issue_invoice_for_order succeeded) — delivering it further:\n"
+        "  - issue_invoice_for_order creates the invoice in inFakt and STOPS THERE. It does NOT "
+        "attach anything to the Allegro order and does not send anything to KSeF. Say so in your "
+        "reply, show the share link, and ask the user to check the invoice.\n"
+        "  - NEVER call attach_invoice_to_allegro_order or send_invoice_to_ksef in the same turn as "
+        "issue_invoice_for_order — not even when the user's original request said 'wystaw i dodaj do "
+        "Allegro' or 'wystaw i wyślij do KSeF'. Delivery shows the invoice to the buyer / files it "
+        "with the tax office and cannot be undone, so it waits for the user to look at the issued "
+        "invoice first. Issue it, then ask; the code enforces this and will refuse a same-turn call.\n"
         "  - attach_invoice_to_allegro_order → downloads the PDF from inFakt and attaches it to the "
-        "Allegro order, so the buyer sees it on their order page. Needs order_id + invoice_uuid "
-        "(invoice_uuid comes from the issue_invoice_for_order result earlier in this conversation — "
-        "never guess it, call ask_clarifying_question if it's not in context).\n"
+        "Allegro order, so the buyer sees it on their order page. Call it ONLY on a later turn in "
+        "which the user asks for it ('dołącz fakturę do zamówienia X') or confirms your question "
+        "about attaching ('ok', 'faktura jest ok', 'wygląda dobrze'). Needs order_id; invoice_uuid is "
+        "optional — pass it when the issue_invoice_for_order result earlier in this conversation gave "
+        "it to you, otherwise leave it out and it is looked up for that order. Never guess a UUID.\n"
         "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
-        "invoice_uuid, same rule — never guess it, call ask_clarifying_question instead.\n"
-        "  - If the user's ORIGINAL request already named the channel(s) ('wystaw i wyślij do KSeF i "
-        "Allegro', 'wystaw i dodaj do Allegro') — just call the matching tool(s) directly, no need to ask.\n"
-        "  - Otherwise: once the user confirms the issued invoice looks fine ('ok', 'faktura jest ok', "
-        "'wygląda dobrze') and hasn't named a channel yet, call get_order_invoice_data for that order to "
-        "check whether the buyer is a company or private person, then ASK in your reply: "
+        "invoice_uuid — never guess it, call ask_clarifying_question instead. Same rule: only after "
+        "the user asks for it on a later turn.\n"
+        "  - KSeF IS FOR COMPANY BUYERS ONLY. An invoice for a PRIVATE PERSON ('osoba prywatna', no "
+        "NIP) must NEVER go to KSeF: KSeF addresses the buyer by NIP, so the filing would be wrong "
+        "and cannot be withdrawn. This is a hard rule, not a default — if the user asks for it "
+        "anyway, do NOT call send_invoice_to_ksef; answer that the buyer on that order is a private "
+        "person and that KSeF only takes NIP-addressed business invoices. Who the buyer is comes "
+        "from ALLEGRO's invoice data for the order (get_order_invoice_data), never from inFakt, so "
+        "pass order_id to send_invoice_to_ksef whenever you know it. The tool refuses such a call "
+        "regardless, so calling it only wastes a turn.\n"
+        "  - So: once the user confirms the issued invoice looks fine and hasn't named a channel yet, "
+        "call get_order_invoice_data for that order to check whether the buyer is a company or a "
+        "private person, then ASK in your reply: "
         "for a company buyer — 'Wysłać fakturę do KSeF i dołączyć ją do zamówienia w Allegro?'; "
-        "for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' (don't default to KSeF for "
-        "a private person — only call send_invoice_to_ksef for one if the user explicitly asks). "
-        "Only call the delivery tool(s) after the user answers that question, unless they already "
-        "specified the channel(s) upfront as above.\n"
+        "for a private person — 'Dołączyć fakturę do zamówienia w Allegro?' and nothing about KSeF, "
+        "which is not available for that invoice at all (see the hard rule above — do not offer it, "
+        "and do not call the tool if the user asks for it anyway). "
+        "Only call the delivery tool(s) after the user answers that question.\n"
         "BILLING ROUTING: "
         "1) Specific order costs, delivery cost of a specific order included → ALWAYS "
         "get_order_details (uses order.id filter, exact results). "
@@ -740,6 +813,14 @@ class AllegroAgent(BaseAgent):
         super().__init__()
         self.model_override = self._settings.gemini_model_fast
         self._allegro = AllegroService.get_instance(user_id)
+        # Per-turn, reset at the top of run(): this instance is cached per user
+        # by the orchestrator, so anything left here would leak into the next
+        # turn — and one of these decides whether an invoice may be shown to a
+        # buyer (see _attach_invoice_to_allegro_order).
+        self._issued_this_turn: set[str] = set()
+        self._issued_an_invoice_this_turn: bool = False
+        self._current_query: str = ""
+        self._last_assistant_text: str = ""
 
     async def run(
         self,
@@ -750,6 +831,20 @@ class AllegroAgent(BaseAgent):
         from agents.base_agent import _call_for_reply, _call_with_retry
 
         perf = StageTimer("allegro_agent.run")
+
+        # What the seller actually said this turn, and what they were answering.
+        # Read by the attachment guard — never by anything that formats data.
+        self._issued_this_turn = set()
+        self._issued_an_invoice_this_turn = False
+        self._current_query = query
+        self._last_assistant_text = next(
+            (
+                m.get("content") or ""
+                for m in reversed(conversation_history or [])
+                if m.get("role") == "assistant"
+            ),
+            "",
+        )
 
         # ── Auth guard ────────────────────────────────────────────────────────
         with perf.stage("auth_check"):
@@ -1506,6 +1601,14 @@ class AllegroAgent(BaseAgent):
             parts.append(f"w okresie od {date_from}")
         elif date_to:
             parts.append(f"w okresie do {date_to}")
+        excluded = [str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())]
+        if excluded:
+            # "Brak zamówień w innym statusie niż wysłane" — a negated question
+            # answered with the generic "brak zamówień spełniających kryteria"
+            # is indistinguishable from having no orders at all, exactly like
+            # the buyer/period case this note exists for.
+            names = ", ".join(cls._fulfillment_pl(status).lower() for status in excluded)
+            parts.append(f"w innym statusie niż {names}")
         return (" " + " ".join(parts)) if parts else ""
 
     @staticmethod
@@ -1869,6 +1972,94 @@ class AllegroAgent(BaseAgent):
             if carrier_upper.startswith(prefix):
                 return template.format(code=code)
         return None
+
+    async def _thread_order_block(
+        self,
+        thread_id: str,
+        messages: list[dict[str, Any]],
+        buyer_login: str = "",
+    ) -> str:
+        """Which order a message thread is about, appended under its text.
+
+        A buyer asking "czy jest jeszcze możliwość wystawienia faktury do tej
+        transakcji" names no transaction. Until the seller knows WHICH order
+        that is, they can do nothing about it — so reading the message and
+        hunting down the order number were two separate jobs, the second one
+        manual. AllegroService.resolve_thread_order does it from Allegro's own
+        `relatedObject` tag on the message (or, failing that, the buyer's order
+        history) and this block puts the answer where the question is.
+
+        It also puts the checkout-form id into the RENDERED text, which is the
+        only thing a later turn can see — conversation history carries the
+        rendered view, never tool arguments (see ConversationSession) — so
+        "wystaw do tego fakturę" as a follow-up has a real id to pass to
+        issue_invoice_for_order instead of a UUID the model would have to
+        invent.
+
+        Returns "" rather than raising: a lookup bolted onto message reading
+        must never cost the seller the message itself.
+        """
+        try:
+            match = await self._allegro.resolve_thread_order(
+                thread_id, messages=messages, buyer_login=buyer_login
+            )
+        except AllegroAPIError as exc:
+            logger.warning("thread order lookup failed for %s: %s", thread_id, exc)
+            return ""
+
+        if match.source == "message":
+            if match.candidates:
+                return "📦 **Zamówienie z tej wiadomości:** " + self._order_one_liner(
+                    match.candidates[0]
+                )
+            # The tag is the answer even when the order details would not load.
+            return (
+                f"📦 **Zamówienie z tej wiadomości:** `{match.order_id}` "
+                "(nie udało się pobrać szczegółów)"
+            )
+
+        if match.source == "buyer_history":
+            return (
+                "📦 **Zamówienie kupującego:** "
+                + self._order_one_liner(match.candidates[0])
+                + f"\nWiadomość nie ma podpiętego zamówienia — to jedyne zamówienie konta "
+                f"**{match.buyer_login}**."
+            )
+
+        if match.candidates:
+            shown = match.candidates[:5]
+            listing = "\n".join(f"- {self._order_one_liner(o)}" for o in shown)
+            more = "" if len(match.candidates) == len(shown) else f" (pokazuję {len(shown)} najnowszych)"
+            return (
+                "📦 **Wiadomość nie ma podpiętego zamówienia.** Konto "
+                f"**{match.buyer_login}** ma {len(match.candidates)} "
+                f"{self._plural_pl(len(match.candidates), 'zamówienie', 'zamówienia', 'zamówień')}"
+                f"{more} — którego dotyczy pytanie?\n{listing}"
+            )
+
+        # Nothing tagged and nothing bought: a pre-purchase question, or a buyer
+        # whose orders are outside what this token can read. Say so plainly —
+        # silence here reads as "there is no order", which is a different claim.
+        who = f" konta **{match.buyer_login}**" if match.buyer_login else ""
+        return (
+            f"📦 Nie udało się ustalić zamówienia dla tej wiadomości — brak "
+            f"podpiętego zamówienia i brak zamówień{who}."
+        )
+
+    def _order_one_liner(self, order: Any) -> str:
+        """One order as a single line: id, what it was, how much, when — enough
+        for the seller to recognise it, short enough to sit under a message."""
+        parts = [f"`{order.order_id}`"]
+        items = list(getattr(order, "line_items", []) or [])
+        if items:
+            what = items[0].offer_name
+            if len(items) > 1:
+                what += f" + {len(items) - 1} inne"
+            parts.append(what)
+        parts.append(self._format_price(order.total_price, order.currency))
+        if order.created_at:
+            parts.append(self._format_dt_pl(order.created_at))
+        return " — ".join(parts)
 
     async def _monitoring_status_block(self) -> str:
         """Deterministic (non-LLM) status + action button for automatic order checking.
@@ -2892,20 +3083,49 @@ class AllegroAgent(BaseAgent):
 
         Delegates to services.infakt_service.issue_invoice_for_order, which is
         also called (once per order, same one-at-a-time path) by the invoice
-        reminder's "issue now" action — see services/invoice_reminder.py.
+        reminder's "issue now" action — see services/invoice_reminder.py. That
+        function stops at inFakt: the invoice reaches the buyer's Allegro order
+        page only through _attach_invoice_to_allegro_order, and only once the
+        seller has looked at it and said so.
         """
         from services.infakt_service import issue_invoice_for_order
 
-        return await issue_invoice_for_order(self._allegro, order_id, self._settings.is_production)
+        result = await issue_invoice_for_order(self._allegro, order_id, self._settings.is_production)
+        # Remembered so that neither delivery step can happen on this same turn,
+        # whatever the model decides to call next — the seller has not seen the
+        # invoice yet.
+        self._issued_this_turn.add(order_id)
+        self._issued_an_invoice_this_turn = True
+        return result
 
-    async def _attach_invoice_to_allegro_order(self, order_id: str, invoice_uuid: str) -> str:
-        """Fetch the invoice PDF from inFakt and attach it to the Allegro order.
+    def _attach_authorized_by_seller(self) -> bool:
+        """Did the seller, in this turn, actually ask for the invoice to go to
+        the buyer? See _ATTACH_INSTRUCTION_RE for why this is decided here and
+        not left to the model."""
+        if _ATTACH_INSTRUCTION_RE.search(self._current_query or ""):
+            return True
+        return bool(
+            _INVOICE_CONFIRMATION_RE.search(self._current_query or "")
+            and _ASSISTANT_ASKED_ATTACH_RE.search(self._last_assistant_text or "")
+        )
+
+    async def _attach_invoice_to_allegro_order(
+        self, order_id: str, invoice_uuid: str | None = None
+    ) -> str:
+        """Fetch the invoice PDF from inFakt and attach it to the Allegro order,
+        once the seller has confirmed the invoice is correct.
 
         Allegro takes up to 10 PDF invoices per order (3 MB each) via a
         two-step API: POST registers the invoice metadata, PUT uploads the
         actual file bytes against the id from that response. Both steps need
         the SCOPE_ORDERS_WRITE scope — without it they answer 403, which is
         the "brak uprawnień" the seller sees.
+
+        The two guards in front of that are the point of this method: the buyer
+        sees the PDF as soon as it lands, so the upload waits for a turn in
+        which the seller asked for it, and never happens on the turn that issued
+        the invoice — the seller cannot have checked a document they were shown
+        a second ago.
         """
         from services import invoice_ledger
         from services.infakt_service import (
@@ -2914,16 +3134,44 @@ class AllegroAgent(BaseAgent):
             attach_invoice_to_order,
         )
 
+        user_id = invoice_ledger.user_id_of(self._allegro)
+
+        if order_id in self._issued_this_turn:
+            return (
+                f"⏸️ Nie dołączam faktury do zamówienia `{order_id}` w tej samej wiadomości, "
+                "w której ją wystawiłem — kupujący zobaczy ją natychmiast, a Allegro przyjmuje "
+                "jedną fakturę na zamówienie, więc pomyłki nie da się cofnąć. Sprawdź fakturę "
+                f"pod linkiem powyżej i napisz „dołącz fakturę do zamówienia `{order_id}`”."
+            )
+
+        if not self._attach_authorized_by_seller():
+            return (
+                f"⏸️ Nie dołączam faktury do zamówienia `{order_id}` bez Twojego wyraźnego "
+                "polecenia — to krok, który pokazuje fakturę kupującemu i jest nieodwracalny. "
+                f"Napisz „dołącz fakturę do zamówienia `{order_id}`”, kiedy ją sprawdzisz."
+            )
+
+        if not invoice_uuid:
+            # The seller says "dołącz fakturę do zamówienia X" without an ID —
+            # which is the normal case when the invoice was issued hours ago or
+            # from another conversation thread. The ledger knows which invoice
+            # belongs to this order; asking the model to remember it is how a
+            # wrong UUID gets attached to the wrong order.
+            record = await invoice_ledger.get_record(user_id, order_id) or {}
+            invoice_uuid = record.get("invoice_uuid") or ""
+            if not invoice_uuid:
+                return (
+                    f"❓ Nie mam zapisanej faktury dla zamówienia `{order_id}` — nie wiem, "
+                    "który plik miałbym dołączyć. Podaj ID faktury z inFakt albo wystaw ją "
+                    f"najpierw („wystaw fakturę dla zamówienia `{order_id}`”)."
+                )
+
         try:
             number = await attach_invoice_to_order(self._allegro, order_id, invoice_uuid)
         except InfaktAPIError as exc:
             logger.error("attach_invoice_to_allegro_order: fetch from inFakt failed for %s: %s", invoice_uuid, exc)
             if exc.status_code == 404:
-                return (
-                    f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
-                    "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
-                    "zamówienia ponownie przez issue_invoice_for_order."
-                )
+                return self._unknown_infakt_invoice(invoice_uuid)
             return f"❌ Nie udało się pobrać faktury `{invoice_uuid}` z inFakt: {exc}"
         except InvoiceTooLargeError as exc:
             return (
@@ -2950,26 +3198,102 @@ class AllegroAgent(BaseAgent):
 
         # The ledger is what stops the invoice reminder nagging about an order
         # whose invoice only reached Allegro on this second, manual step.
-        await invoice_ledger.mark_attached(
-            invoice_ledger.user_id_of(self._allegro), order_id, number=number,
-        )
+        await invoice_ledger.mark_attached(user_id, order_id, number=number)
         return f"✅ Faktura {number or invoice_uuid} dołączona do zamówienia `{order_id}` w Allegro — kupujący zobaczy ją na stronie zamówienia."
 
-    async def _send_invoice_to_ksef(self, invoice_uuid: str) -> str:
-        """Submit an already-issued inFakt invoice to KSeF."""
-        from services.infakt_service import InfaktAPIError, InfaktService
+    @staticmethod
+    def _unknown_infakt_invoice(invoice_uuid: str) -> str:
+        """inFakt's 404 for an invoice ID — the same answer wherever it comes up."""
+        return (
+            f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
+            "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
+            "zamówienia ponownie przez issue_invoice_for_order."
+        )
+
+    @staticmethod
+    def _ksef_refused(invoice_uuid: str, order_id: str, reason: str) -> str:
+        """One wording for both layers of the ban, so the seller gets the same
+        explanation wherever it was caught."""
+        return (
+            f"🚫 Faktury `{invoice_uuid}` nie wyślę do KSeF — wg danych do faktury z zamówienia "
+            f"`{order_id}` {reason}, a KSeF przyjmuje faktury dla firm, adresowane NIP-em. "
+            "Nabywca bez NIP-u nie ma tam swojego miejsca, więc takie zgłoszenie byłoby błędne "
+            "i nie da się go wycofać.\n"
+            "Jeśli to pomyłka, sprawdź dane do faktury na zamówieniu w Allegro — to stamtąd biorę "
+            "tę informację, bo tam kupujący sam deklaruje firmę i NIP."
+        )
+
+    async def _send_invoice_to_ksef(self, invoice_uuid: str, order_id: str | None = None) -> str:
+        """Submit an already-issued inFakt invoice to KSeF.
+
+        Two things are refused here before anything is sent. Filing with the tax
+        office is as final as showing the invoice to the buyer, so it gets the
+        same same-turn block as _attach_invoice_to_allegro_order: an invoice
+        issued a second ago has not been read by anyone. And an invoice for a
+        buyer without a NIP may not go to KSeF at all — that is not a preference
+        the seller or the model can override, so it is asked of ALLEGRO here and
+        asked again inside InfaktService.send_to_ksef, on the last line before
+        the request leaves.
+
+        Allegro, not inFakt: the buyer declares the company and the NIP when
+        they order, and that declaration is what the ban turns on. inFakt only
+        holds the copy we wrote there ourselves. Allegro answers per ORDER, so
+        the order has to be known — from the tool call, or from the ledger,
+        which is where the issuance wrote down which order this invoice belongs
+        to. Not knowing it means not sending.
+        """
+        from services import invoice_ledger
+        from services.infakt_service import (
+            InfaktAPIError,
+            InfaktService,
+            KsefNotAllowedError,
+            ksef_refusal_reason,
+        )
+
+        if self._issued_an_invoice_this_turn:
+            return (
+                f"⏸️ Nie wysyłam faktury `{invoice_uuid}` do KSeF w tej samej wiadomości, "
+                "w której ją wystawiłem — do KSeF wysyła się raz. Sprawdź ją pod linkiem "
+                "powyżej i napisz „wyślij fakturę do KSeF”, kiedy będzie w porządku."
+            )
+
+        user_id = invoice_ledger.user_id_of(self._allegro)
+        order_id = order_id or await invoice_ledger.order_of_invoice(user_id, invoice_uuid)
+        if not order_id:
+            return (
+                f"❓ Nie wiem, do którego zamówienia należy faktura `{invoice_uuid}`, a bez tego "
+                "nie sprawdzę w Allegro, czy nabywcą jest firma z NIP-em — więc jej nie wysyłam. "
+                "Podaj ID zamówienia (np. „wyślij fakturę do KSeF dla zamówienia `<id>`”)."
+            )
+
+        try:
+            address = await self._allegro.get_order_invoice_data(order_id)
+        except AllegroAPIError as exc:
+            logger.error("send_invoice_to_ksef: cannot read order %s: %s", order_id, exc)
+            return (
+                f"❌ Nie udało się pobrać z Allegro danych do faktury dla zamówienia `{order_id}` "
+                f"({exc}), więc nie wysyłam faktury do KSeF — bez tych danych nie wiem, czy "
+                "nabywcą jest firma. Spróbuj ponownie za chwilę."
+            )
+
+        reason = ksef_refusal_reason(address)
+        if reason:
+            return self._ksef_refused(invoice_uuid, order_id, reason)
 
         infakt = InfaktService.get_instance()
         try:
-            result = await infakt.send_to_ksef(invoice_uuid)
+            result = await infakt.send_to_ksef(
+                invoice_uuid, allegro=self._allegro, order_id=order_id
+            )
+        except KsefNotAllowedError as exc:
+            # The service said no after this method said yes — they can only
+            # disagree if the order changed under us, and the service wins.
+            logger.error("send_invoice_to_ksef: refused at the API boundary: %s", exc)
+            return self._ksef_refused(invoice_uuid, order_id, exc.reason)
         except InfaktAPIError as exc:
             logger.error("send_invoice_to_ksef: invoice %s failed: %s", invoice_uuid, exc)
             if exc.status_code == 404:
-                return (
-                    f"❌ inFakt nie zna faktury `{invoice_uuid}` (404) — to ID jest nieprawidłowe albo "
-                    "zgubione. Sprawdź w panelu inFakt prawidłowe ID albo wystaw fakturę dla tego "
-                    "zamówienia ponownie przez issue_invoice_for_order."
-                )
+                return self._unknown_infakt_invoice(invoice_uuid)
             return f"❌ Nie udało się wysłać faktury `{invoice_uuid}` do KSeF: {exc}"
 
         status = result.get("status", "?")
@@ -3272,16 +3596,44 @@ class AllegroAgent(BaseAgent):
         dispatch_before = self._optional_local_to_utc(
             tool_input.get("dispatch_before_local") or preset.get("dispatch_before_local")
         )
-        exclude_fulfillment = preset.get("exclude_fulfillment") or frozenset()
+        # A NEGATED stage ("niewysłane") is an exclusion, never one positive
+        # status: it covers every stage before the one named, so the caller
+        # passes the statuses to drop instead of the single one to keep — see
+        # exclude_fulfillment_status in allegro_tools.py. The presets use the
+        # same mechanism (get_orders_due_today excludes everything already
+        # dispatched), hence one field feeding both.
+        exclude_fulfillment = frozenset(
+            str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())
+        ) or preset.get("exclude_fulfillment") or frozenset()
         min_value, max_value = self._value_bounds(tool_input)
+        # A cancelled order is never part of an answer: there is nothing to
+        # pack, send, invoice or count, so listing one only adds a line the
+        # seller has to recognise and skip. It is dropped on BOTH statuses
+        # Allegro can cancel on — the checkout form (status=CANCELLED, the
+        # buyer withdrew before payment) and the fulfillment stage
+        # (fulfillment.status=CANCELLED, cancelled while being handled) — and
+        # this matters most for a negated listing, whose whole point is
+        # "everything other than X" and which would otherwise sweep them in.
+        # The one exception is a question that explicitly asks for cancelled
+        # ones; nothing else could answer it.
+        asked_for_cancelled = "CANCELLED" in {
+            str(status or "").upper(), str(fulfillment_status or "").upper()
+        }
+        if not asked_for_cancelled:
+            exclude_fulfillment = frozenset(exclude_fulfillment) | {"CANCELLED"}
         # The deadline filter, the status exclusion and the order-value bounds
         # all run client-side (the Allegro API has no parameter for any of them
         # — see _dispatch_within), so fetch a full page and narrow afterwards;
-        # filtering a limit=1 fetch would usually leave nothing at all.
-        fetch_limit = 100 if (
-            dispatch_after or dispatch_before or exclude_fulfillment
+        # filtering a limit=1 fetch would usually leave nothing at all. The
+        # cancelled drop alone does not widen the fetch on a listing pinned to
+        # one fulfillment stage, which cannot contain a cancelled order anyway
+        # — "ostatnie nowe zamówienie" (limit=1) still costs one small page.
+        narrows_after_fetch = (
+            dispatch_after or dispatch_before
+            or (exclude_fulfillment - {"CANCELLED"}) or not fulfillment_status
             or min_value is not None or max_value is not None
-        ) else limit
+        )
+        fetch_limit = 100 if narrows_after_fetch else limit
 
         orders = await self._allegro.get_orders(
             status=status,
@@ -3301,12 +3653,14 @@ class AllegroAgent(BaseAgent):
         scanned = len(orders)
         if exclude_fulfillment:
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
+        if not asked_for_cancelled:
+            orders = [o for o in orders if str(o.status or "").upper() != "CANCELLED"]
+        if dispatch_after or dispatch_before:
+            orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)]
         if min_value is not None:
             orders = [o for o in orders if (o.total_price or 0) >= min_value]
         if max_value is not None:
             orders = [o for o in orders if (o.total_price or 0) <= max_value]
-        if dispatch_after or dispatch_before:
-            orders = [o for o in orders if self._dispatch_within(o, dispatch_after, dispatch_before)]
         if preset.get("sort_by_dispatch"):
             # Soonest deadline first — the order the parcels have to be dealt
             # with, not the order they were bought in.
@@ -4129,6 +4483,11 @@ class AllegroAgent(BaseAgent):
                 # buyer actually wrote.
                 lines.append(f"„{m.get('text', '')}”")
                 lines.append("")
+            # "N/A" is _dispatch's placeholder for a thread whose interlocutor
+            # Allegro did not name — not a login to look orders up by.
+            lines.append(await self._thread_order_block(
+                thread_id, messages, matched_buyer if matched_buyer not in (None, "N/A") else ""
+            ))
             return "\n".join(lines).rstrip()
 
         if tool_name == "get_account_info":
@@ -4328,11 +4687,13 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "attach_invoice_to_allegro_order":
             return await self._attach_invoice_to_allegro_order(
-                tool_input["order_id"], tool_input["invoice_uuid"]
+                tool_input["order_id"], tool_input.get("invoice_uuid")
             )
 
         if tool_name == "send_invoice_to_ksef":
-            return await self._send_invoice_to_ksef(tool_input["invoice_uuid"])
+            return await self._send_invoice_to_ksef(
+                tool_input["invoice_uuid"], tool_input.get("order_id")
+            )
 
         # Both the "suggest" and "disable" tool for each monitor type resolve to the
         # same deterministic status block — the model only picks WHICH tool to call

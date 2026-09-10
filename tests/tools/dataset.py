@@ -334,8 +334,12 @@ THREAD_MESSAGES: dict[str, list[dict]] = {
          "text": "Świetnie, proszę o wysyłkę na paczkomat POZ01A. Czy zdąży dziś wyjść?"},
     ],
     THREAD_2: [
+        # Written from the order page, so Allegro tags it with the checkout
+        # form — this is what lets "do tej transakcji" resolve to an order id
+        # without asking the seller which one (see message_related_order_id).
         {"id": "msg-4", "createdAt": hours_ago(5),
          "author": {"login": "marek_zielinski", "isInterlocutor": True},
+         "relatedObject": {"type": "ORDER", "id": ORD_2},
          "text": "Kiedy planowana jest wysyłka odkurzacza? Zależy mi na czasie."},
     ],
     THREAD_3: [
@@ -456,5 +460,10 @@ INFAKT_INVOICE = {
     "currency": "PLN",
     "status": "paid",
     "ksef_number": None,
+    # Whether KSeF is allowed is NOT decided here — it comes from the buyer's
+    # own declaration on the Allegro order (ORD_1 is a company with a NIP,
+    # ORD_2 a private person). These fields are only the copy inFakt holds.
+    "client_company_name": "Kawa i Spółka sp. z o.o.",
+    "client_tax_code": "7792445588",
 }
 INFAKT_SHARE_LINK = f"https://app.infakt.pl/share/{INFAKT_INVOICE_UUID}"

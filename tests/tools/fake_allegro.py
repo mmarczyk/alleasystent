@@ -285,12 +285,14 @@ class FakeInfaktAPI:
         if request.method == "POST" and path.endswith(f"/invoices/{uuid}/send_to_ksef.json"):
             return FakeAllegroAPI._json({"status": "sent", "ksef_reference_number": "20260825-SE-1A2B"})
 
+
         if request.method == "GET" and path.endswith(f"/invoices/{uuid}/pdf.json"):
             return httpx.Response(200, content=b"%PDF-1.4 fake invoice pdf\n%%EOF",
                                   headers={"Content-Type": "application/pdf"})
 
         if request.method == "GET" and path.endswith(f"/invoices/{uuid}.json"):
             return FakeAllegroAPI._json(ds.INFAKT_INVOICE)
+
 
         return FakeAllegroAPI._json({"error": "Not Found"}, 404)
 

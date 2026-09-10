@@ -23,11 +23,54 @@ _ORDER_PARAMS: dict[str, dict] = {
     "fulfillment_status": {
         "type": "string",
         "description": (
-            "Filter by fulfillment status: NEW = not packed yet ('niespakowane', "
-            "'do spakowania'), READY_FOR_SHIPMENT = packed, awaiting carrier handoff "
-            "('do wysłania', 'niewysłane'), SENT = already handed over."
+            "Filter by fulfillment status — ONE positive stage: NEW = not packed yet "
+            "('do spakowania'), READY_FOR_SHIPMENT = packed, awaiting carrier handoff "
+            "('do wysłania', 'gotowe do wysyłki', 'zapakowane'), SENT = already handed over. "
+            "NEVER use it for a NEGATED question ('niewysłane', 'jeszcze nie wysłane', 'nie "
+            "odebrane'): 'not sent' covers every stage before the handoff, not just the packed "
+            "one, so it is exclude_fulfillment_status that answers it."
         ),
         "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
+    },
+    "exclude_fulfillment_status": {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": [
+                "NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT",
+                "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED",
+            ],
+        },
+        "description": (
+            "NEGATED stage filter — return every order whose fulfillment status is NOT one of "
+            "these. A negated question is never one status, it is everything except one: "
+            "'niewysłane' / 'jeszcze nie wysłane' / 'które nie zostały wysłane' means every "
+            "order that has not left yet (NEW, PROCESSING, READY_FOR_SHIPMENT alike), NOT only "
+            "the packed ones — so pass exclude_fulfillment_status=['SENT', 'IN_TRANSIT', "
+            "'READY_FOR_PICKUP', 'PICKED_UP'] rather than fulfillment_status=READY_FOR_SHIPMENT, "
+            "which silently drops everything nobody has packed yet. Same for any other negation: "
+            "'nieodebrane' → exclude ['PICKED_UP'], 'niespakowane' → exclude "
+            "['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. "
+            "Combine with fulfillment_status only when the question really names both sides."
+        ),
+    },
+    "min_value": {
+        "type": "number",
+        "description": (
+            "Only orders worth AT LEAST this much (the order total the buyer paid, delivery "
+            "included, in the order's own currency). Pass it whenever the question names a "
+            "floor: 'zamówienia powyżej 400 zł', 'ponad 1000 zł', 'od 250 zł w górę', "
+            "'droższe niż 99,99'. Without it the amount the user just said is silently "
+            "ignored and the listing comes back unfiltered, which reads like an answer."
+        ),
+    },
+    "max_value": {
+        "type": "number",
+        "description": (
+            "Only orders worth AT MOST this much (same figure as min_value). For a ceiling: "
+            "'zamówienia poniżej 50 zł', 'do 100 zł', 'tańsze niż 20 zł'. Pass both bounds "
+            "for a range ('od 100 do 300 zł')."
+        ),
     },
     "buyer_login": {
         "type": "string",
@@ -179,7 +222,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "('Wysyłka do' — when the parcel must be handed to the carrier), and totals."
             ),
             "parameters": _order_params(
-                "buyer_login", "dispatch_before_local", "count_only", "limit",
+                "buyer_login", "dispatch_before_local", "min_value", "max_value",
+                "count_only", "limit",
                 limit={
                     "description": (
                         "Max orders to return (1–100). Set to 1 when the user asks about "
@@ -217,6 +261,21 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'zakończone' / 'co już dotarło' / 'co klient odebrał' → fulfillment_status=PICKED_UP. "
                 "For the NOWE stage use get_new_orders and for DO WYSŁANIA / WYSŁANE use "
                 "get_orders_delivery (it adds the courier and tracking details those questions want). "
+                "NEGATED STAGE — only this tool can serve it, via exclude_fulfillment_status: "
+                "'niewysłane' / 'jeszcze nie wysłane' / 'które nie zostały wysłane' → exclude "
+                "['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'] (every order still on your "
+                "side, packed or not); 'nieodebrane' → exclude ['PICKED_UP']; 'niespakowane' → "
+                "exclude ['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', "
+                "'PICKED_UP']. A negation is never one positive status: answering 'niewysłane' with "
+                "fulfillment_status=READY_FOR_SHIPMENT hides every order nobody has packed yet. "
+                "CANCELLED ORDERS are never listed by any of these tools — there is nothing to "
+                "pack, send or invoice — so they need no filtering on your side; ask for them only "
+                "when the user explicitly wants them ('pokaż anulowane zamówienia' → "
+                "fulfillment_status=CANCELLED), which is the one case they are shown. "
+                "VALUE FILTERS: min_value/max_value are the ONLY way to answer a question that names "
+                "an amount — 'zamówienia powyżej 400 zł' → min_value=400, 'poniżej 50 zł' → "
+                "max_value=50, 'od 100 do 300 zł' → both. Never answer such a question without them: "
+                "the listing would come back unfiltered and read as if it were the answer. "
                 "TIME FILTERS: bought_after/before_local = order PLACEMENT time; "
                 "paid_after/before_local = PAYMENT time ('opłacone po X', 'zapłacone po X'); "
                 "dispatch_after/before_local = DISPATCH DEADLINE ('do kiedy trzeba wysłać'). "
@@ -236,7 +295,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "answers it. Never drop the amount and return an unfiltered list."
             ),
             "parameters": _order_params(
-                "status", "fulfillment_status", "buyer_login", "line_items_sent",
+                "status", "fulfillment_status", "exclude_fulfillment_status",
+                "buyer_login", "line_items_sent",
                 "bought_after_local", "bought_before_local",
                 "paid_after_local", "paid_before_local",
                 "dispatch_after_local", "dispatch_before_local",
@@ -604,7 +664,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "date — use this tool instead whenever the user wants to read a message. "
                 "If thread_id isn't already known from earlier in the conversation, provide "
                 "buyer_login and/or date to find the matching thread automatically — no need to call "
-                "get_message_threads first."
+                "get_message_threads first. "
+                "The result also names the ORDER the message is about (the checkout-form id Allegro "
+                "attached to it, or the buyer's single order) — a buyer writing 'faktura do tej transakcji' "
+                "never names the order themselves, so take the id from here and pass it straight to "
+                "get_order_details / get_order_invoice_data / issue_invoice_for_order."
             ),
             "parameters": {
                 "type": "object",
@@ -702,9 +766,14 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Default (no filters): orders with fulfillment_status=READY_FOR_SHIPMENT "
                 "(packed and awaiting carrier handoff). "
                 "STAGE 'DO WYSŁANIA' — leave fulfillment_status EMPTY for any wording meaning the "
-                "parcel still has to go out: 'do wysłania', 'gotowe do wysyłki', 'czekają/oczekujące "
-                "na wysyłkę', 'niewysłane', 'do nadania', 'przygotowane do nadania', 'zapakowane' "
-                "(already packed), 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania'. "
+                "parcel is PACKED and still has to go out: 'do wysłania', 'gotowe do wysyłki', "
+                "'czekają/oczekujące na wysyłkę', 'do nadania', 'przygotowane do nadania', "
+                "'zapakowane', 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania'. "
+                "NEGATION 'NIEWYSŁANE' IS NOT THIS STAGE — 'niewysłane', 'jeszcze nie wysłane', "
+                "'które nie zostały wysłane' mean every order that has not left yet, including the "
+                "ones nobody has packed: that is get_orders with "
+                "exclude_fulfillment_status=['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. "
+                "Answering it with this preset silently hides every unpacked order. "
                 "STAGE 'WYSŁANE' — set fulfillment_status=SENT for wording meaning it already left: "
                 "'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', 'co już poszło', "
                 "'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało'. "
@@ -1139,8 +1208,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "or given directly by the user). If you don't have a concrete order_id in context, ask "
                 "the user for it or look it up first — never guess or invent one. "
                 "This creates a real, numbered invoice in inFakt — it is not easily reversible. "
-                "Returns a share link for manual review PLUS the invoice_uuid needed for the follow-up "
-                "delivery tools (attach_invoice_to_allegro_order, send_invoice_to_ksef)."
+                "It STOPS at inFakt: it does NOT attach the invoice to the Allegro order and does NOT "
+                "send it to KSeF, so the seller can check it first. Returns a share link for that "
+                "review PLUS the invoice_uuid needed for the follow-up delivery tools "
+                "(attach_invoice_to_allegro_order, send_invoice_to_ksef) — never call either of them "
+                "in the same turn as this one, even if the user asked for both at once."
             ),
             "parameters": {
                 "type": "object",
@@ -1158,18 +1230,29 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Download the invoice PDF from inFakt and attach it to the corresponding Allegro order, "
                 "so the buyer can see/download it directly from their Allegro order page. "
-                "Requires BOTH the Allegro order_id and the inFakt invoice_uuid returned by an earlier "
-                "issue_invoice_for_order call in this conversation — never guess either ID; ask or look "
-                "it up if missing. Allegro allows only ONE PDF invoice per order — calling this twice "
-                "for the same order will fail."
+                "IRREVERSIBLE and visible to the buyer immediately, so call it ONLY when the user asks "
+                "for it in the CURRENT message ('dołącz fakturę do zamówienia X') or confirms your own "
+                "question about attaching ('ok', 'wygląda dobrze'). Never on the same turn that issued "
+                "the invoice — the user has not read it yet — and never on your own initiative. "
+                "Requires the Allegro order_id; invoice_uuid is optional — pass the one an earlier "
+                "issue_invoice_for_order returned in this conversation, or leave it out and the invoice "
+                "recorded for that order is used. Never guess a UUID. "
+                "Allegro allows only ONE PDF invoice per order — calling this twice for the same order "
+                "will fail."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
-                    "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                    "invoice_uuid": {
+                        "type": "string",
+                        "description": (
+                            "inFakt invoice UUID from issue_invoice_for_order. Optional — omit it "
+                            "rather than guessing; the invoice recorded for this order is used."
+                        ),
+                    },
                 },
-                "required": ["order_id", "invoice_uuid"],
+                "required": ["order_id"],
             },
         },
     },
@@ -1183,13 +1266,28 @@ ALLEGRO_TOOLS: list[dict] = [
                 "earlier issue_invoice_for_order call in this conversation — never guess it. "
                 "Submission is asynchronous — this only confirms the request was accepted, final "
                 "processing must be checked in the inFakt panel. "
-                "Typically relevant for company (B2B) buyers; don't call it for a private-person buyer "
-                "unless the user explicitly asks for it."
+                "ONLY for a COMPANY (B2B) buyer, identified by a NIP. An invoice for a PRIVATE "
+                "PERSON must NEVER be sent to KSeF — KSeF addresses the buyer by NIP and a private "
+                "person has none, so the filing would be wrong and cannot be withdrawn. This is not a "
+                "default the user can override: if they ask for it anyway, say why it is impossible "
+                "instead of calling this tool. Whether the buyer is a company is decided from "
+                "ALLEGRO's invoice data for the ORDER (get_order_invoice_data: company_name + "
+                "vat_id), never from what is in inFakt — so pass order_id whenever you know it; "
+                "without it the order is looked up from the invoice we issued, and if that fails "
+                "the call is refused rather than sent unchecked."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                    "order_id": {
+                        "type": "string",
+                        "description": (
+                            "Allegro order (checkout form) UUID this invoice was issued for. Pass it "
+                            "whenever it is in context — it is what Allegro is asked about to confirm "
+                            "the buyer is a company with a NIP. Omit rather than guessing."
+                        ),
+                    },
                 },
                 "required": ["invoice_uuid"],
             },

@@ -64,6 +64,28 @@ class InvoiceTooLargeError(Exception):
         super().__init__(f"invoice PDF is {size_bytes} bytes, Allegro accepts {limit_bytes}")
 
 
+class KsefNotAllowedError(Exception):
+    """The invoice may not go to KSeF, and no caller may override that.
+
+    KSeF (Krajowy System e-Faktur) carries structured invoices between
+    BUSINESSES, addressed by NIP. An invoice issued to a private person has no
+    NIP to address it by; sending one is a filing that should never have been
+    made and that nobody here can withdraw. So the ban is enforced at the last
+    point before the request leaves (InfaktService.send_to_ksef) and not only
+    where the tool is chosen — a future caller, a retry or a model that reads
+    its instructions loosely all end up here.
+
+    `reason` is the Polish half-sentence naming which case it was, so both the
+    tool layer and this one tell the seller the same thing.
+    """
+
+    def __init__(self, invoice_uuid: str, reason: str, number: str = ""):
+        self.invoice_uuid = invoice_uuid
+        self.reason = reason
+        self.number = number
+        super().__init__(f"invoice {number or invoice_uuid} may not go to KSeF: {reason}")
+
+
 class InfaktTaskError(Exception):
     """Raised when an async invoice-creation task finishes with a failure code."""
 
@@ -204,17 +226,63 @@ class InfaktService:
             raise InfaktAPIError(resp.status_code, resp.text[:500])
         return resp.content
 
-    async def send_to_ksef(self, invoice_uuid: str) -> dict[str, Any]:
+    async def send_to_ksef(self, invoice_uuid: str, *, allegro, order_id: str) -> dict[str, Any]:
         """Submit an issued invoice to KSeF (Krajowy System e-Faktur).
 
         Submission is asynchronous on inFakt's side — this call only confirms
         the request was accepted (status "sent"), not that KSeF finished
         processing it. Final status must be checked in the inFakt panel.
+
+        A private-person invoice never gets that far: whether the buyer is a
+        business is asked of ALLEGRO, for the order this invoice was issued for,
+        and the request is refused here — on the last line before it leaves this
+        process — with KsefNotAllowedError. The tool layer asks the same
+        question earlier and words the answer for the seller; this check exists
+        because that one can be bypassed (a new caller, a retry, a model that
+        decided the rule did not apply this time) and a filing made by mistake
+        cannot be withdrawn. Hence `allegro` and `order_id` are keyword-only
+        and have no defaults: a caller cannot forget to make the check possible.
+
+        Deliberately NOT read from the inFakt invoice. What is in inFakt is a
+        copy of what we put there; Allegro is where the buyer actually declared
+        whether they are a company and gave their NIP, so Allegro is the only
+        thing that can answer the question this ban turns on.
         """
+        address = await allegro.get_order_invoice_data(order_id)
+        reason = ksef_refusal_reason(address)
+        if reason:
+            raise KsefNotAllowedError(invoice_uuid, reason)
         return await self._post(f"/invoices/{invoice_uuid}/send_to_ksef.json")
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def ksef_refusal_reason(invoice_address: dict[str, Any]) -> str | None:
+    """Why this order's invoice may not go to KSeF — or None when it may.
+
+    Reads ALLEGRO's invoice data for the order (AllegroService
+    .get_order_invoice_data), which is where the buyer themselves declared, at
+    checkout, whether they want the invoice on a company and with which NIP.
+    That declaration is the fact the ban turns on. What sits in inFakt is only
+    our own copy of it, written by build_invoice_payload from this very dict —
+    checking there would be checking our own homework, and would keep saying
+    "company" for an invoice whose Allegro order never had a NIP.
+
+    Two ways to fail, kept apart because the seller fixes them differently: a
+    private person is a dead end, while a company whose NIP is missing from the
+    order is something they can go and look at. Both are refusals: KSeF
+    addresses the buyer BY NIP, so without one the filing cannot be correct —
+    and refusing is the recoverable mistake (the invoice can still be sent from
+    the inFakt panel), while sending is not.
+    """
+    company = str(invoice_address.get("company_name") or "").strip()
+    vat_id = str(invoice_address.get("vat_id") or "").strip()
+    if not company and not vat_id:
+        return "nabywcą jest osoba prywatna"
+    if not vat_id:
+        return f"nabywca „{company}” nie ma NIP-u w danych z Allegro"
+    return None
 
 
 # ── Invoice payload builder ──────────────────────────────────────────────────
@@ -302,13 +370,19 @@ def _delivery_service(cost: float, is_production: bool) -> dict[str, Any]:
 # invoice reminder's "issue now" action (services/invoice_reminder.py) —
 # both issue one concrete order at a time through this same path, see the
 # module docstring above for why bulk issuance stays preview-only.
+#
+# Neither of them attaches anything: issuance ends in inFakt, and the invoice
+# only reaches the buyer's Allegro order page once the seller has said the
+# invoice is correct.
 
 async def attach_invoice_to_order(allegro, order_id: str, invoice_uuid: str) -> str:
     """Fetch an inFakt invoice's PDF and attach it to the Allegro order.
 
-    The mechanics of Allegro's two-step attachment in one place, shared by the
-    chat tool (AllegroAgent._attach_invoice_to_allegro_order) and by
-    issue_invoice_for_order below, which now always finishes the job itself.
+    The mechanics of Allegro's two-step attachment in one place. The only
+    caller is the chat tool (AllegroAgent._attach_invoice_to_allegro_order),
+    which runs it after the seller has confirmed the invoice — issuance
+    deliberately does not reach this function on its own (see
+    issue_invoice_for_order below).
     Returns the human invoice number (may be empty). Raises InfaktAPIError,
     InvoiceTooLargeError or AllegroAPIError — callers word the failure.
     """
@@ -328,67 +402,79 @@ async def attach_invoice_to_order(allegro, order_id: str, invoice_uuid: str) -> 
     return number
 
 
-def _attach_failure_reason(allegro, exc: Exception) -> str:
-    """Why the attachment failed, naming the missing Allegro permission when
-    that is what it was — the 403 the seller otherwise has to guess at before
-    going and attaching the PDF by hand."""
-    from services.allegro_service import SCOPE_ORDERS_WRITE
+async def _share_link_suffix(infakt, invoice_uuid: str) -> str:
+    """The seller cannot confirm an invoice they can't see, so the link is part
+    of every "waiting for your OK" message. A missing link is not worth failing
+    an issued invoice over — it degrades to a note, not an error."""
+    try:
+        return f": {await infakt.get_share_link(invoice_uuid)}"
+    except InfaktAPIError as exc:
+        logger.warning("issue_invoice_for_order: share link failed for %s: %s", invoice_uuid, exc)
+        return " (nie udało się wygenerować linku podglądu)"
 
-    status = getattr(exc, "status_code", None)
-    if status in (401, 403) and allegro.has_scope(SCOPE_ORDERS_WRITE) is False:
+
+def _confirm_prompt(order_id: str) -> str:
+    """The one sentence that turns an issued invoice into an attached one.
+
+    Attaching is a one-way door — Allegro shows the PDF to the buyer the moment
+    it lands, and the order takes only one — so it never happens off the back of
+    the issuance itself. This is the ask that has to be answered first.
+    """
+    return (
+        f"Sprawdź ją pod linkiem. Jeśli wszystko się zgadza, napisz „dołącz fakturę do "
+        f"zamówienia `{order_id}`” — dopiero wtedy dołączę ją do zamówienia."
+    )
+
+
+def _ksef_note(blocked_reason: str | None) -> str:
+    """What can happen to this invoice in KSeF, said at issuance — that is where
+    the seller decides what to ask for next, and asking for something that is
+    forbidden wastes a round trip and reads like the assistant changed its mind.
+    """
+    if blocked_reason:
         return (
-            f"token Allegro nie ma uprawnienia `{SCOPE_ORDERS_WRITE}`, więc nie mogę dodać "
-            "pliku do zamówienia. Włącz je dla aplikacji na https://apps.developer.allegro.pl "
-            "(zakładka „Uprawnienia”) i zaloguj się ponownie przez /allegro/login — token "
-            "dostaje uprawnienia w chwili logowania. Do tego czasu dołącz fakturę ręcznie "
-            "w panelu Allegro."
+            f" Do KSeF ta faktura NIE pójdzie i nie mogę jej tam wysłać: {blocked_reason} "
+            "(wg danych do faktury z Allegro), a KSeF przyjmuje faktury dla firm, adresowane NIP-em."
         )
-    if status in (401, 403):
-        return f"Allegro odmówiło dodania pliku do zamówienia ({exc})"
-    return str(exc)
+    return " Do KSeF też wysyłam wyłącznie na Twoje wyraźne polecenie."
 
 
-async def _finish_earlier_issuance(allegro, user_id: str, order_id: str, known: dict) -> str:
-    """Attach an invoice we issued earlier instead of issuing a second one."""
-    from services import invoice_ledger
-    from services.allegro_service import AllegroAPIError
+async def _report_earlier_issuance(order_id: str, known: dict) -> str:
+    """Report an invoice we issued earlier instead of issuing a second one.
 
+    Not an attachment: the earlier issuance was never confirmed either, so
+    "wystaw" for the second time is still not permission to show the buyer a
+    document nobody has checked.
+    """
     invoice_uuid = known["invoice_uuid"]
     label = known.get("number") or invoice_uuid
-    try:
-        number = await attach_invoice_to_order(allegro, order_id, invoice_uuid)
-    except (InfaktAPIError, InvoiceTooLargeError, AllegroAPIError) as exc:
-        logger.error("issue_invoice_for_order: re-attach to order %s failed: %s", order_id, exc)
-        return (
-            f"⚠️ Faktura {label} dla zamówienia `{order_id}` została już wcześniej wystawiona "
-            "w inFakt — nie wystawiam drugiej. Nadal nie mogę dołączyć jej do zamówienia: "
-            f"{_attach_failure_reason(allegro, exc)}"
-        )
-
-    await invoice_ledger.record_issued(
-        user_id, order_id, invoice_uuid=invoice_uuid, number=number or known.get("number", ""),
-        attached=True,
-    )
+    link_line = await _share_link_suffix(InfaktService.get_instance(), invoice_uuid) if invoice_uuid else ""
     return (
-        f"📎 Faktura {number or label} była już wystawiona w inFakt — nie wystawiałem drugiej, "
-        f"tylko dołączyłem tę do zamówienia `{order_id}` w Allegro."
+        f"📄 Faktura {label} dla zamówienia `{order_id}` była już wystawiona w inFakt — "
+        f"nie wystawiam drugiej{link_line}\n"
+        f"ID faktury w inFakt: `{invoice_uuid}`\n"
+        f"⏸️ Nadal NIE jest dołączona do zamówienia w Allegro. {_confirm_prompt(order_id)}"
     )
 
 
 async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -> str:
     """Create ONE real VAT invoice in inFakt for a single named Allegro order —
-    and attach it to the order, which is the half that actually finishes the job.
+    and stop there, because the next step is the seller's to authorize.
 
-    Issuing used to stop at inFakt. Allegro then still reported the order as
-    having no invoice, so the invoice reminder (services/invoice_reminder.py),
-    which asks Allegro exactly that, nagged about the same order every two hours
-    for ever: its own "wystaw" action could never satisfy its own condition, and
-    the seller — who could see the invoice — was told over and over to issue it.
-    So the attachment happens here, and either way the issuance is written to
-    services/invoice_ledger.py so no later pass can call this order uninvoiced.
+    Issuing and attaching were briefly one step, so that Allegro (which calls an
+    order uninvoiced until a PDF is on it) would stop feeding the reminder in
+    services/invoice_reminder.py the same order every two hours. That fixed the
+    loop by taking a decision away from the seller: the invoice reached the
+    BUYER's order page before anyone had looked at it, and Allegro accepts one
+    invoice per order, so a wrong NIP or a wrong amount could not be taken back.
+
+    So the attachment is a separate, explicitly confirmed step again
+    (AllegroAgent._attach_invoice_to_allegro_order), and the loop is kept shut
+    by services/invoice_ledger.py instead: every issuance is written down, so
+    the reminder and the next "wystaw" both say "this one is issued and waiting
+    for your OK" rather than quietly creating a second invoice.
     """
     from services import invoice_ledger
-    from services.allegro_service import AllegroAPIError
 
     user_id = invoice_ledger.user_id_of(allegro)
 
@@ -401,12 +487,11 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         return f"Zamówienie `{order_id}`: faktura już istnieje w Allegro — nie wystawiono kolejnej."
 
     # Allegro saying "no invoice" is not the same as "we never issued one": the
-    # attachment is a second call that can fail on its own, and a second real
-    # VAT invoice for one order cannot be taken back. So a previous issuance is
-    # finished, not repeated.
+    # invoice may be sitting in inFakt waiting for the seller to confirm it, and
+    # a second real VAT invoice for one order cannot be taken back.
     known = await invoice_ledger.get_record(user_id, order_id)
     if known and known.get("invoice_uuid"):
-        return await _finish_earlier_issuance(allegro, user_id, order_id, known)
+        return await _report_earlier_issuance(order_id, known)
 
     try:
         address = await allegro.get_order_invoice_data(order_id)
@@ -436,41 +521,18 @@ async def issue_invoice_for_order(allegro, order_id: str, is_production: bool) -
         logger.error("issue_invoice_for_order: order %s failed: %s", order_id, exc)
         return f"❌ Nie udało się wystawić faktury dla zamówienia `{order_id}`: {exc}"
 
+    ksef_blocked = ksef_refusal_reason(address)
     buyer_kind = "firma" if address.get("company_name") else "osoba prywatna"
-    try:
-        link = await infakt.get_share_link(invoice_uuid)
-        link_line = f": {link}"
-    except InfaktAPIError as exc:
-        # A missing preview link is not worth failing an issued invoice over.
-        logger.warning("issue_invoice_for_order: share link failed for %s: %s", invoice_uuid, exc)
-        link_line = " (nie udało się wygenerować linku podglądu)"
-
-    head = (
-        f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt{link_line}\n"
-        f"ID faktury w inFakt: `{invoice_uuid}`\n"
-        f"Nabywca: {buyer_kind}."
-    )
-
-    try:
-        number = await attach_invoice_to_order(allegro, order_id, invoice_uuid)
-    except (InfaktAPIError, InvoiceTooLargeError, AllegroAPIError) as exc:
-        logger.error("issue_invoice_for_order: attach to order %s failed: %s", order_id, exc)
-        await invoice_ledger.record_issued(
-            user_id, order_id, invoice_uuid=invoice_uuid, attached=False, note=str(exc),
-        )
-        return (
-            f"{head}\n"
-            f"⚠️ Nie udało się dołączyć jej do zamówienia w Allegro: {_attach_failure_reason(allegro, exc)}\n"
-            "Faktura JEST wystawiona — nie wystawiaj jej ponownie. Dopóki nie będzie dołączona "
-            "do zamówienia, Allegro widzi je jako bez faktury (i tak samo widzę je ja). "
-            f"Napisz „dołącz fakturę do zamówienia `{order_id}`”, kiedy przyczyna zniknie."
-        )
+    link_line = await _share_link_suffix(infakt, invoice_uuid)
 
     await invoice_ledger.record_issued(
-        user_id, order_id, invoice_uuid=invoice_uuid, number=number, attached=True,
+        user_id, order_id, invoice_uuid=invoice_uuid, attached=False,
+        note="czeka na potwierdzenie sprzedawcy przed dołączeniem do Allegro",
     )
     return (
-        f"{head}\n"
-        f"📎 Dołączona do zamówienia w Allegro — kupujący zobaczy ją na stronie zamówienia.\n"
-        "Zweryfikuj fakturę pod linkiem, zanim pójdzie dalej (do KSeF)."
+        f"✅ Faktura dla zamówienia `{order_id}` ({order.buyer_login}) wystawiona w inFakt{link_line}\n"
+        f"ID faktury w inFakt: `{invoice_uuid}`\n"
+        f"Nabywca: {buyer_kind}.\n"
+        f"⏸️ NIE dołączyłem jej do zamówienia w Allegro — kupujący jej na razie nie widzi. "
+        f"{_confirm_prompt(order_id)}{_ksef_note(ksef_blocked)}"
     )

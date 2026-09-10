@@ -62,7 +62,6 @@ class TestOrderStageVocabulary:
         # do spakowania = wciąż NOWE, nie 'do wysłania'
         "które zamówienia mam spakować",
         "zamówienia do spakowania",
-        "niespakowane zamówienia",
     ])
     def test_new_stage(self, query):
         assert _resolve(query) == ("get_new_orders", {})
@@ -84,7 +83,7 @@ class TestOrderStageVocabulary:
         "pokaż mi zamówienia do wysłania",
         "zamówienia gotowe do wysyłki",
         "zamówienia oczekujące na wysyłkę",
-        "niewysłane zamówienia",
+        # "niewysłane" is deliberately NOT here — see TestNegatedStage.
         "zamówienia przygotowane do nadania",
         "zapakowane zamówienia",
         "co czeka na kuriera",
@@ -161,9 +160,6 @@ class TestGetOrdersDelivery:
     def test_orders_to_send(self):
         assert _resolve("które zamówienia są do wysłania") == ("get_orders_delivery", {})
 
-    def test_unsent_orders(self):
-        assert _resolve("pokaż zamówienia niewysłane") == ("get_orders_delivery", {})
-
     def test_count_only(self):
         assert _resolve("ile zamówień mam do wysłania") == (
             "get_orders_delivery", {"count_only": True},
@@ -179,6 +175,79 @@ class TestGetOrdersDelivery:
         """'Do kiedy wysłać' asks about the dispatch deadline — a filter this
         layer can't compute, so it must fall through to the LLM."""
         assert _resolve("do kiedy mam wysłać zamówienia") is None
+
+
+class TestNegatedStage:
+    """A negated stage is an EXCLUSION, not one positive status: "niewysłane"
+    means every order that has not left yet — packed, unpacked, in progress —
+    so it resolves to get_orders with the shipped statuses excluded.
+
+    Before this, the compact spelling answered with READY_FOR_SHIPMENT alone
+    (hiding everything nobody had packed) and the spaced spelling 'nie wysłane'
+    fell through to the WYSŁANE pattern and answered with the exact opposite
+    listing: orders that had already gone out.
+    """
+
+    UNSENT = ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]
+
+    @pytest.mark.parametrize("query", [
+        "pokaż zamówienia niewysłane",
+        "pokaż nie wysłane zamówienia",
+        "które zamówienia nie zostały wysłane",
+        "jakie zamówienia jeszcze nie wysłałem",
+        "zamówienia które nie są wysłane",
+    ])
+    def test_unsent_is_everything_but_sent(self, query):
+        assert _resolve(query) == ("get_orders", {"exclude_fulfillment_status": self.UNSENT})
+
+    def test_count_only(self):
+        assert _resolve("ile mam niewysłanych zamówień") == (
+            "get_orders", {"exclude_fulfillment_status": self.UNSENT, "count_only": True},
+        )
+
+    @pytest.mark.parametrize("query,excluded", [
+        ("nieodebrane zamówienia", ["PICKED_UP"]),
+        ("niespakowane zamówienia",
+         ["READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]),
+    ])
+    def test_other_stages_negate_the_same_way(self, query, excluded):
+        assert _resolve(query) == ("get_orders", {"exclude_fulfillment_status": excluded})
+
+    @pytest.mark.parametrize("query", [
+        # A negation-shaped word that is one stage's own vocabulary must not be
+        # torn into "nie" + stem (see _split_compact_negations).
+        ("jakie zamówienia są jeszcze nietknięte"),
+        ("które zamówienia są nieskończone"),
+    ])
+    def test_lexicalised_words_are_not_negations(self, query):
+        tool, _ = _resolve(query)
+        assert tool in ("get_new_orders", "get_orders")
+
+    def test_positive_and_negated_together_go_to_the_llm(self):
+        """"Spakowane, ale jeszcze nie wysłane" is two stages at once — the
+        ambiguity this layer always hands over rather than guessing at."""
+        assert _resolve("które są spakowane, a które jeszcze nie wysłane") is None
+
+    def test_negation_of_the_verb_is_not_a_negated_stage(self):
+        assert _resolve("nie mam nic do wysłania") == ("get_orders_delivery", {})
+
+
+class TestNegationAndAmountTogether:
+    """The seller's own sentence, which used to come back as a list of orders
+    that had ALREADY been sent, with the amount silently dropped. The stage
+    resolves here; the amount is read out of the same sentence and put on the
+    call by AllegroAgent._with_value_bounds (see extract_value_bounds)."""
+
+    QUERY = "Pokaż mi zamówienie jeszcze nie wysłane o wartości powyżej 400zl"
+
+    def test_the_stage_resolves_to_an_exclusion(self):
+        assert _resolve(self.QUERY) == (
+            "get_orders",
+            {"exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]},
+        )
+
+    def test_the_amount_is_read_from_the_same_sentence(self):
+        assert extract_value_bounds(self.QUERY) == {"min_value": 400.0}
 
 
 class TestOrdersDueToday:

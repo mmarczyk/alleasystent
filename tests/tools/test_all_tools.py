@@ -11,6 +11,7 @@ would see in the chat.
 import pytest
 
 from agents.allegro.allegro_tools import ALLEGRO_TOOLS
+from tests.tools import dataset as ds
 from tests.tools.cases import CASES, CASES_BY_ID, COVERED_TOOLS, Case
 from tests.tools.runner import run_case
 
@@ -110,6 +111,30 @@ async def test_order_listings_answer_in_one_shape():
             assert field in result["output"], f"{case_id} is missing {field}"
 
 
+async def test_unsent_listing_keeps_the_orders_nobody_packed_yet():
+    """"Niewysłane" is the negation of WYSŁANE, so it must cover every order
+    still on the seller's side — NEW and READY_FOR_SHIPMENT alike. Read as the
+    single READY_FOR_SHIPMENT stage (as it used to be) it silently hid the
+    unpacked ones; read as the SENT stage (which the spaced spelling "nie
+    wysłane" fell through to) it answered with the exact opposite listing."""
+    out = (await run_case(CASES_BY_ID["get_orders__unsent"]))["output"]
+
+    assert f"`{ds.ORD_1}`" in out, "unpacked order missing from a 'niewysłane' listing"
+    assert f"`{ds.ORD_4}`" in out, "packed order missing from a 'niewysłane' listing"
+    assert f"`{ds.ORD_6}`" not in out, "an already-sent order in a 'niewysłane' listing"
+
+
+async def test_value_filter_drops_the_orders_below_the_threshold():
+    """The amount in "powyżej 400 zł" used to have no parameter to land in, so
+    it was dropped and the unfiltered listing reached the seller as the
+    answer."""
+    out = (await run_case(CASES_BY_ID["get_orders__unsent_over_400"]))["output"]
+
+    assert f"`{ds.ORD_1}`" in out and f"`{ds.ORD_2}`" in out   # 429,98 and 899,00
+    assert f"`{ds.ORD_3}`" not in out                          # 137,70 — below the floor
+    assert f"`{ds.ORD_6}`" not in out                          # 1249,00 but already sent
+
+
 async def test_payment_period_filter_keeps_the_buyer_login():
     """A payment-time filter is applied client-side, so the fetch behind it used
     to be rebuilt from scratch — status forced to READY_FOR_PROCESSING, a fixed
@@ -158,6 +183,14 @@ async def test_issue_invoice_checks_the_infakt_task_before_sleeping():
     status_calls = [c for c in result["api_calls"] if "async/invoices/status" in c]
     assert len(status_calls) == 1, status_calls
     assert result["duration_ms"] < 1000, f"still waiting up front: {result['duration_ms']} ms"
+
+
+async def test_a_private_person_invoice_never_reaches_the_ksef_endpoint():
+    """The refusal has to be a refusal, not a well-worded message written after
+    the request already went out — a KSeF filing cannot be withdrawn."""
+    result = await run_case(CASES_BY_ID["send_invoice_to_ksef__private_person"])
+    assert not [c for c in result["api_calls"] if "send_to_ksef" in c], result["api_calls"]
+    assert result["output"].startswith("🚫"), result["output"]
 
 
 async def test_issue_invoice_waits_out_infakts_mid_processing_status():
