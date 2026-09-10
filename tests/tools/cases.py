@@ -333,10 +333,10 @@ CASES: list[Case] = [
          note="Payload inFakt bez wysyłki — nic nie trafia do inFakt."),
     Case("issue_invoice_for_order", "issue_invoice_for_order", {"order_id": ds.ORD_1},
          f"Wystaw fakturę dla zamówienia {ds.ORD_1}",
-         ("✅ Faktura", "infakt.pl/share", "firma", "Dołączona do zamówienia w Allegro"),
-         note="Wystawienie faktury w inFakt ORAZ dołączenie jej do zamówienia — "
-              "bez tego drugiego kroku Allegro nadal widzi zamówienie bez faktury "
-              "i przypominajka pyta o nie w kółko."),
+         ("✅ Faktura", "infakt.pl/share", "firma", "NIE dołączyłem jej do zamówienia"),
+         note="Wystawienie faktury kończy się w inFakt: link do sprawdzenia i prośba o "
+              "potwierdzenie. Dołączenie do zamówienia pokazuje fakturę kupującemu i jest "
+              "nieodwracalne, więc czeka na wyraźne „dołącz”."),
     Case("issue_invoice_for_order__exists", "issue_invoice_for_order", {"order_id": ds.ORD_6},
          f"Wystaw fakturę dla zamówienia {ds.ORD_6}",
          ("faktura już istnieje",),
@@ -350,7 +350,13 @@ CASES: list[Case] = [
          {"order_id": ds.ORD_1, "invoice_uuid": ds.INFAKT_INVOICE_UUID},
          "Dołącz tę fakturę do zamówienia w Allegro",
          ("✅ Faktura", "dołączona do zamówienia"),
-         note="Pobranie PDF z inFakt i upload do Allegro (2 kroki API)."),
+         note="Pobranie PDF z inFakt i upload do Allegro (2 kroki API) — wyłącznie na "
+              "wyraźne polecenie sprzedawcy, bo od tej chwili fakturę widzi kupujący."),
+    Case("attach_invoice_to_allegro_order__unconfirmed", "attach_invoice_to_allegro_order",
+         {"order_id": ds.ORD_1, "invoice_uuid": ds.INFAKT_INVOICE_UUID},
+         "Pokaż szczegóły tego zamówienia",
+         ("⏸️", "bez Twojego wyraźnego polecenia"), no_api=True,
+         note="Sprzedawca nie prosił o dołączenie — nic nie leci do Allegro."),
     Case("attach_invoice_to_allegro_order__404", "attach_invoice_to_allegro_order",
          {"order_id": ds.ORD_1, "invoice_uuid": "00000000-0000-0000-0000-000000000000"},
          "Dołącz fakturę 00000000-0000-0000-0000-000000000000 do zamówienia",
@@ -360,7 +366,14 @@ CASES: list[Case] = [
          {"invoice_uuid": ds.INFAKT_INVOICE_UUID},
          "Wyślij tę fakturę do KSeF",
          ("📤", "KSeF", "sent"),
-         note="Zgłoszenie faktury do KSeF (asynchroniczne po stronie inFakt)."),
+         note="Zgłoszenie faktury do KSeF (asynchroniczne po stronie inFakt) — "
+              "faktura dla firmy, z NIP-em."),
+    Case("send_invoice_to_ksef__private_person", "send_invoice_to_ksef",
+         {"invoice_uuid": ds.INFAKT_PRIVATE_INVOICE_UUID},
+         "Wyślij tę fakturę do KSeF",
+         ("🚫", "osoby prywatnej", "NIP"),
+         note="Faktura dla osoby prywatnej — do KSeF nie pójdzie. KSeF adresuje "
+              "nabywcę NIP-em, a zgłoszenia nie da się wycofać."),
 
     # ── Zwroty i reklamacje ──────────────────────────────────────────────────
     Case("get_new_returns", "get_new_returns", {},
