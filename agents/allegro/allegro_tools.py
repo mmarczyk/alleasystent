@@ -925,6 +925,56 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_sold_quantities",
+            "description": (
+                "HOW MANY UNITS of a product were SOLD in a period — the quantity question, not the "
+                "money one. USE THIS for: 'ile sztuk sprzedałem', 'ile sztuk sprzedanych dla <produkt>', "
+                "'ile poszło <produkt>', 'ile sztuk <produkt> zeszło w tym miesiącu', 'co się najlepiej "
+                "sprzedawało', 'ile zeszło włóczki jeans'. "
+                "Counts units from PAID orders in the period, cancelled ones excluded. Returns are NOT "
+                "subtracted — a returned item still counts as sold here, so say so if the number matters "
+                "to the seller. "
+                "NOT get_sales_summary: that one answers how much money came in and ranks products by "
+                "REVENUE; this one counts PIECES and can be narrowed to named products. "
+                "NOT get_active_offers/query_offers_by_stock: those report what is IN STOCK right now, "
+                "which is a different number from what was sold. "
+                "PRODUCT NAMES — pass every model the user names as a SEPARATE entry in `names`, exactly "
+                "as they wrote it: 'włóczki jeans i jeans plus' is names=['jeans', 'jeans plus'], NOT "
+                "['jeans'] and NOT ['jeans i jeans plus']. They are different models and the tool keeps "
+                "them apart; merging them into one term is what makes the answer wrong. "
+                "Omit `names` entirely only when the user named no product at all ('ile sztuk sprzedałem "
+                "w maju') — then every product sold in the period is listed, most units first. "
+                "Same period rules as get_sales_summary: resolve 'ostatnie 3 miesiące', 'w tym roku' etc. "
+                "yourself into date_from_local/date_to_local and call this ONCE for the whole period."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Product/model names to count, one entry per model the user named. A name "
+                            "matches an offer title on whole words, and the most specific name wins, so "
+                            "'jeans' and 'jeans plus' never absorb each other's sales."
+                        ),
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": "Start of period as a Warsaw-local calendar date, 'YYYY-MM-DD'.",
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": "End of period as a Warsaw-local calendar date, 'YYYY-MM-DD' (inclusive).",
+                    },
+                },
+                "required": ["date_from_local", "date_to_local"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_buyers",
             "description": (
                 "The BUYER view of a period: one row per CUSTOMER instead of one row per order — "
@@ -1615,7 +1665,14 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Ask ONE short, specific question, in the same language as the user's message, "
                 "naming exactly what you need (e.g. which order — ID or buyer login; which date "
                 "or period; which product). Do NOT call any other tool in the same turn — this is "
-                "a stop-and-ask, not a guess-and-verify."
+                "a stop-and-ask, not a guess-and-verify. "
+                "ALSO call this when NO tool here can answer the question AT ALL — not a missing "
+                "parameter, but a missing capability: a figure none of these tools computes, a "
+                "breakdown none of them produces. In that case do not ask a question — state "
+                "plainly, in one sentence and in the user's language, that you cannot answer this "
+                "one and what would be needed. Reaching for the nearest listing instead is the "
+                "worst available answer: the user reads it as the figure they asked for, and "
+                "nothing in the reply tells them it is not."
             ),
             "parameters": {
                 "type": "object",
@@ -1683,6 +1740,9 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_account_info": "chat",
     "get_billing_summary": "table",
     "get_sales_summary": "dashboard",
+    # "chat": a handful of product rows answering the question just asked,
+    # not a document — same reasoning as get_order_details above.
+    "get_sold_quantities": "chat",
     "get_buyers": "table",
     # "chat" (not "table") — a contact lookup answers a yes/no question about
     # ONE person, usually with a single match; a one-row table hidden behind
@@ -1768,6 +1828,10 @@ _TOOL_LABELS: dict[str, str] = {
     # finanse
     "get_billing_summary":             "finanse",
     "get_sales_summary":               "finanse",
+    # A quantity-sold question names the PRODUCT, so it usually matches
+    # "oferty" too — but what it asks for is a sales figure, and the
+    # selling verbs ("sprzeda", "zarob") are what reliably fire here.
+    "get_sold_quantities":             "finanse",
     # "finanse", not "zamowienia", even though it takes an order_id: what makes
     # a query reach for it is the MONEY vocabulary ("zysk", "koszt", "marża"),
     # and a follow-up often names no order at all ("a jaki zysk przy 8 zł za
@@ -1831,7 +1895,14 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
                    "robocie", "nieskoncz", "nieukoncz", "dokoncz", "wywoz", "transporcie",
                    "przewozn", "poszl", "wyjecha", "dotar", "odebr", "odbior", "dostarcz",
                    "zakonczon", "zamkni", "odhaczy", "termin", "paczek", "nadac", "nadaj"),
-    "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj"),
+    # The assortment words are what a seller actually names instead of the
+    # generic "produkt"/"oferta" — "ile zostało włóczek", "jakie tkaniny mam".
+    # Without them such a query matched no label at all and fell back to the
+    # full ~37-tool list. Diacritics folded (see _normalize), and stems cut
+    # short of the fill vowel Polish inserts in the genitive plural:
+    # "włóczka" → "włóczek" ("wloczek"), so the stem has to be "wlocz".
+    "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj",
+                   "wlocz", "tkanin", "przedz", "motk"),
     "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),
     # "marz" is the margin vocabulary calculate_order_profit answers to
@@ -1839,7 +1910,11 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
     # prefixes the month "marzec" — a cheap miss: such a query keeps every
     # label it already had, it only loses the deterministic layer, which is
     # exactly the recall-over-precision trade this map is built on.
-    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz",
+    # "sprzeda", not "sprzedaz": the noun is "sprzedaż" but the seller asks with
+    # the PARTICIPLE — "ile sztuk sprzedanych", "co się sprzedało", "ile
+    # sprzedałem" — and none of those contain the "ż". The longer stem matched
+    # only the noun, which is the form that shows up least.
+    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzeda",
                    "bilans", "marz", "rentown", "narzut"),
     "faktury":    ("faktur", "nip", "ksef", "vat"),
     # A buyer question names the person, not the order: "lista kupujących",
@@ -2042,3 +2117,59 @@ def select_tools_for_context(text: str) -> list[dict] | None:
     if not labels:
         return None
     return tools_for_labels(labels)
+
+
+# ── Matching a product the seller named against real offer titles ───────────
+# "jeans" and "jeans plus" are two different yarns, and an Allegro title
+# carries far more than the model name ("Włóczka Jeans Plus 100g kolor 05").
+# A naive `term in title` therefore fails in BOTH directions: it counts every
+# Jeans Plus sale towards "jeans", and it matches "jeans" inside an unrelated
+# word. Two rules fix that:
+#
+#   1. Compare TOKENS, not characters. "jeans" matches the title token "Jeans",
+#      never the middle of "jeanswear", and a multi-word term has to appear as
+#      consecutive tokens.
+#   2. Most specific term wins. A title matching both "jeans" and "jeans plus"
+#      belongs to "jeans plus" — the longer term is the more precise claim
+#      about which model it is.
+#
+# Rule 2 only separates models the seller actually named. When one term alone
+# matches several different titles, nothing here decides that they are the
+# same model — the caller reports each title on its own line instead of
+# silently summing them, since the distinction it cannot make is exactly the
+# one the seller can read off the names.
+#
+# "+" becomes the token "plus" so "Jeans+" and "Jeans Plus" are one model,
+# which is how the seller writes them interchangeably.
+_TOKEN_SPLIT_RE = re.compile(r"[^0-9a-z]+")
+
+
+def product_tokens(text: str) -> list[str]:
+    """Offer title or search term as comparable tokens (diacritics folded)."""
+    return [t for t in _TOKEN_SPLIT_RE.split(_normalize(text).replace("+", " plus ")) if t]
+
+
+def _contains_run(haystack: list[str], needle: list[str]) -> bool:
+    """True when `needle` appears as consecutive items of `haystack`."""
+    if not needle or len(needle) > len(haystack):
+        return False
+    return any(
+        haystack[i:i + len(needle)] == needle
+        for i in range(len(haystack) - len(needle) + 1)
+    )
+
+
+def match_product_term(offer_name: str, terms: list[str]) -> str | None:
+    """Which of `terms` this offer title belongs to — the most specific one.
+
+    Returns the matching term as the caller passed it (so it can be echoed back
+    in the seller's own words), or None when the title matches none of them.
+    """
+    name_toks = product_tokens(offer_name)
+    best: str | None = None
+    best_len = 0
+    for term in terms:
+        term_toks = product_tokens(term)
+        if len(term_toks) > best_len and _contains_run(name_toks, term_toks):
+            best, best_len = term, len(term_toks)
+    return best

@@ -163,7 +163,13 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
         # oferty + produkty
         "ofert", "offer", "listing", "produkt", "towar", "cen", "price", "stock",
         "stan magaz", "aktywn", "wystawion",
-        "włóczk", "tkanin", "materiał", "przędz",
+        # "włócz", not "włóczk": the genitive plural of "włóczka" is "włóczek"
+        # — Polish drops in a fill vowel before the final consonant, so the
+        # longer stem is NOT a substring of the very form a seller uses most
+        # ("ilość sztuk sprzedanych dla włóczek"). That query matched no
+        # keyword at all and went to the LLM classifier. Exactly the same
+        # failure as the "zamówień" one noted above, one declension over.
+        "włócz", "tkanin", "materiał", "przędz",
         # wiadomości + kupujący
         "wiadomo", "message", "kupując", "buyer",
         "klient", "nr tel", "numer tel", "telefon", "kontrahent", "nabywc",
