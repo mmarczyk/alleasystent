@@ -420,6 +420,34 @@ def refers_to_one_known_order(query: str) -> bool:
     return bool(_ORDER_ANAPHORA_RE.search(query) or _ORDER_CONTENTS_UNIT_RE.search(query))
 
 
+# A PRODUCT named inside an order question ("zamówienia z włóczką yarnart
+# jeans", "które miało tylko jeans plus") is a filter — get_orders'
+# product_names — and this layer cannot tell where the model name starts and
+# ends, so it hands the turn to the LLM instead of serving the unfiltered
+# listing the preset would produce. Exactly the failure shape this module's
+# docstring calls unacceptable: the seller gets every order of the period back
+# with the product silently dropped, and it reads like an answer.
+#
+# The stems are the assortment words a seller actually types (the same ones
+# allegro_tools' "oferty" label matches), plus the phrasings that describe an
+# order by its CONTENTS whatever the product is called — a brand name like
+# "yarnart" carries no stem this layer could know in advance.
+# Stems are cut short of the fill vowel Polish inserts ("kordonek" → "kordon"),
+# the same trick the assortment stems in allegro_tools use.
+_ORDER_NAMED_PRODUCT_RE = re.compile(
+    r"w[łl][óo]czk\w*|prz[ęe]dz\w*|tkanin\w*|motk\w*|kordon\w*|"
+    r"z\s+produktem|zawier\w*|"
+    r"kt[óo]r\w*\s+(?:mia[łl]\w*|by[łl]\w*\s+w\b)",
+    re.IGNORECASE,
+)
+
+
+def names_a_product(query: str) -> bool:
+    """True when an order question is scoped to what was INSIDE the order —
+    this layer's bail, see the comment above."""
+    return bool(_ORDER_NAMED_PRODUCT_RE.search(query))
+
+
 # Any of these means the query wants more than a bare listing — a specific
 # order's details/status/cost (get_order_details, usually chained off a
 # listing call this layer can't perform) or a date range (get_orders).
@@ -442,7 +470,7 @@ _ORDER_STAGE_BAIL_RE = re.compile(
 
 
 def _match_get_new_orders(query: str) -> dict | None:
-    if _ORDERS_BAIL_RE.search(query) or _negated_stage(query):
+    if _ORDERS_BAIL_RE.search(query) or _negated_stage(query) or names_a_product(query):
         return None
     stage = _order_stage(query)
     if stage is not None and stage != "new":
@@ -462,7 +490,11 @@ def _match_get_new_orders(query: str) -> dict | None:
 # on the LLM-free path.
 def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
     def _match(query: str) -> dict | None:
-        if _ORDER_STAGE_BAIL_RE.search(query) or _order_stage(query) != stage:
+        if (
+            _ORDER_STAGE_BAIL_RE.search(query)
+            or names_a_product(query)
+            or _order_stage(query) != stage
+        ):
             return None
         if _ORDERS_SINGULAR_RE.search(query):
             return None  # "ostatnie do wysłania" — a limit=1 guess isn't worth the risk
@@ -476,7 +508,7 @@ def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
 def _match_negated_stage(query: str) -> dict | None:
     """"Niewysłane" / "nie zostały wysłane" / "nieodebrane" → get_orders with
     the negated stage's statuses excluded (see _STAGE_EXCLUDES)."""
-    if _ORDER_STAGE_BAIL_RE.search(query):
+    if _ORDER_STAGE_BAIL_RE.search(query) or names_a_product(query):
         return None
     stage = _negated_stage(query)
     if stage is None:
@@ -505,7 +537,11 @@ _DISPATCH_INTENT_RE = re.compile(
 def _match_get_orders_due_today(query: str) -> dict | None:
     if not (_TODAY_RE.search(query) and _DISPATCH_INTENT_RE.search(query)):
         return None
-    if _ORDER_DETAIL_INTENT_RE.search(query) or _ORDERS_SINGULAR_RE.search(query):
+    if (
+        _ORDER_DETAIL_INTENT_RE.search(query)
+        or _ORDERS_SINGULAR_RE.search(query)
+        or names_a_product(query)
+    ):
         return None
     # "ile dziś wysłałem?" is today + shipping words, but it asks about parcels
     # that already LEFT — the WYSŁANE stage, and a period one at that, so it

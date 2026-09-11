@@ -100,6 +100,22 @@ CASES: list[Case] = [
          (f"`{ds.ORD_1}`", f"`{ds.ORD_2}`"),
          note="Negacja + próg kwotowy w jednym pytaniu — dokładnie to zdanie "
               "odpowiadało wcześniej listą zamówień JUŻ wysłanych, bez filtra kwoty."),
+    Case("get_orders__product", "get_orders",
+         {"product_names": ["jeans plus"], "limit": 50},
+         "Pokaż mi zamówienie, które miało włóczkę jeans plus",
+         (f"`{ds.ORD_YARN_1}`", "Produkty:", "Włóczka Jeans Plus 100g kolor 12 — 2 szt."),
+         note="Produkt jako filtr zamówień. Bez product_names to pytanie wracało całą "
+              "listą zamówień z okresu — włóczka ginęła po drodze, a lista czytała się "
+              "jak odpowiedź. Listing pokazuje teraz zawartość zamówienia, żeby "
+              "sprzedawca mógł ją sprawdzić."),
+    Case("get_orders__product_only", "get_orders",
+         {"product_names": ["jeans plus"], "product_match": "only", "limit": 50},
+         "Pokaż mi zamówienie, które miało tylko włóczkę jeans plus",
+         ("Brak zamówień zawierających wyłącznie **jeans plus**",),
+         note="„Tylko” to inne pytanie niż „z” — ORD_YARN_1 ma jeans plus, ale obok "
+              "zwykłego jeansu, a jedyne czyste zamówienie na jeans plus jest "
+              "anulowane. Puste zdanie powtarza „wyłącznie”, inaczej czyta się jak "
+              "„nie sprzedałeś tej włóczki”."),
     Case("get_orders__value_range", "get_orders", {"min_value": 100, "max_value": 300},
          "Pokaż zamówienia od 100 do 300 zł",
          (f"`{ds.ORD_3}`", f"`{ds.ORD_4}`"),

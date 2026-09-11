@@ -474,6 +474,33 @@ class TestMatchProductTerm:
         assert match_product_term("Włóczka Merino 50g", ["jeans", "jeans plus"]) is None
 
 
+class TestProductFilterTerms:
+    """Preparing the seller's own wording for matching. The question is asked
+    as "zamówienie z włóczką yarnart jeans", the title may read "YarnArt Jeans
+    50g bawełna" — and match_product_term compares consecutive tokens, so the
+    category word the seller put in front has to go."""
+
+    def test_leading_category_word_is_dropped(self):
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["włóczka yarnart jeans"]) == ["yarnart jeans"]
+        assert product_filter_terms(["włóczkę jeans plus"]) == ["jeans plus"]
+        assert product_filter_terms(["przędza merino"]) == ["merino"]
+
+    def test_a_category_word_that_is_the_whole_term_is_kept(self):
+        """"ile zamówień z włóczką" names no model — an empty term would match
+        every offer in the store instead of nothing."""
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["włóczka"]) == ["wloczka"]
+
+    def test_a_category_word_elsewhere_in_the_term_stays(self):
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["jeans włóczka"]) == ["jeans wloczka"]
+
+    def test_blank_entries_are_dropped(self):
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["", "   ", "jeans"]) == ["jeans"]
+
+
 class TestRenderSoldQuantities:
     """Grouping rules for the answer — see _render_sold_quantities."""
 

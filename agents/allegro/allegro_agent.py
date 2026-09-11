@@ -471,6 +471,14 @@ class AllegroAgent(BaseAgent):
         "stage, so an order already sent (or not yet packed) is silently excluded, and it has no "
         "amount filter in its preset wording — a real bug seen in production, where 'dostawa "
         "zamówienia ponad 2000 zł' came back as 100 unrelated orders grouped by courier.\n"
+        "• A PRODUCT NAMED IN AN ORDER QUESTION IS A FILTER TOO — 'pokaż zamówienie z wczoraj, "
+        "które miało włóczkę yarnart jeans', 'zamówienia z jeans plus z tego tygodnia', 'kto kupił "
+        "kordonek' → get_orders with product_names=['yarnart jeans'] (the model name, WITHOUT the "
+        "category word 'włóczka'/'przędza') plus the period the question names. Add "
+        "product_match='only' when the question says the order held nothing else ('tylko', "
+        "'wyłącznie', 'same', 'jedynie'). Never answer it with the period's whole listing and "
+        "never with get_sold_quantities — that one returns a units total and never names an "
+        "order, so 'pokaż zamówienie' goes unanswered.\n"
         "• ORDER AMOUNT IS A FILTER, NEVER A HINT — any question naming a value ('powyżej 2000 "
         "zł', 'ponad 500 zł', 'poniżej 100 zł', 'między 500 a 1000 zł', 'najdroższe/największe "
         "zamówienie') MUST pass min_value and/or max_value on the order listing. Never fetch an "
@@ -1628,6 +1636,17 @@ class AllegroAgent(BaseAgent):
             parts.append(f"o wartości powyżej {cls._format_price(min_value)}")
         elif max_value is not None:
             parts.append(f"o wartości poniżej {cls._format_price(max_value)}")
+        product_names, product_terms, product_only = cls._product_filter(tool_input)
+        if product_terms:
+            products = " lub ".join(f"**{n}**" for n in product_names)
+            # "tylko" is the whole question in "zamówienie, które miało tylko
+            # włóczkę yarnart jeans" — an empty answer that doesn't repeat it
+            # reads as "you sold none of it", which is a different (and
+            # usually false) statement.
+            parts.append(
+                f"zawierających wyłącznie {products}" if product_only
+                else f"z produktem {products}"
+            )
         date_from = cls._local_date(tool_input, "bought_after_local", "paid_after_local")
         date_to = cls._local_date(tool_input, "bought_before_local", "paid_before_local")
         if date_from and date_to:
@@ -3702,6 +3721,57 @@ class AllegroAgent(BaseAgent):
                 bounds.append(None)
         return bounds[0], bounds[1]
 
+    @staticmethod
+    def _product_filter(tool_input: dict[str, Any]) -> tuple[list[str], list[str], bool]:
+        """The product filter an order listing was asked for: the names as the
+        seller wrote them (for the scope note), the terms to match titles with,
+        and whether the order must contain NOTHING ELSE ('tylko włóczkę yarnart
+        jeans')."""
+        from agents.allegro.allegro_tools import product_filter_terms
+
+        raw = tool_input.get("product_names")
+        if isinstance(raw, str):
+            raw = [raw]
+        names = [str(n).strip() for n in (raw or ()) if str(n).strip()]
+        only = str(tool_input.get("product_match") or "any").strip().lower() == "only"
+        return names, product_filter_terms(names), only
+
+    @staticmethod
+    def _order_has_products(order: Any, terms: list[str], only: bool) -> bool:
+        """Does this order's contents answer the product question?
+
+        `only` is the difference between "an order containing X" and "an order
+        containing nothing but X" — the seller's 'tylko' — so it is checked
+        against EVERY line of the order, not just the matching ones. An order
+        whose lines Allegro didn't return is never a match: a product question
+        answered with an order nobody can see the contents of is a guess.
+        """
+        from agents.allegro.allegro_tools import match_product_term
+
+        lines = list(getattr(order, "line_items", None) or ())
+        if not lines:
+            return False
+        matched = sum(1 for li in lines if match_product_term(li.offer_name or "", terms))
+        if not matched:
+            return False
+        return matched == len(lines) if only else True
+
+    @classmethod
+    def _product_lines(cls, order: Any) -> list[str]:
+        """The order's contents as sub-bullets under a "Produkty:" heading.
+
+        Shown on a product-filtered listing (and only there): the seller asked
+        about what was inside the order, and 'tylko włóczkę yarnart jeans' is
+        a claim they have to be able to check — the bullet's bare "Ilość: 3
+        szt." cannot support it.
+        """
+        lines = list(getattr(order, "line_items", None) or ())
+        if not lines:
+            return []
+        return ["Produkty:"] + [
+            f"  - {li.offer_name} — {int(li.quantity or 0)} szt." for li in lines
+        ]
+
     async def _orders_listing(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """The one order-listing implementation, shared by all three order
         tools. `tool_name` only picks the preset defaults in _ORDERS_PRESETS;
@@ -3735,6 +3805,9 @@ class AllegroAgent(BaseAgent):
             str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())
         ) or preset.get("exclude_fulfillment") or frozenset()
         min_value, max_value = self._value_bounds(tool_input)
+        # The names themselves are only needed by the scope note, which reads
+        # them off tool_input itself (see _filter_scope_note).
+        _, product_terms, product_only = self._product_filter(tool_input)
         # A cancelled order is never part of an answer: there is nothing to
         # pack, send, invoice or count, so listing one only adds a line the
         # seller has to recognise and skip. It is dropped on BOTH statuses
@@ -3764,6 +3837,7 @@ class AllegroAgent(BaseAgent):
             dispatch_after or dispatch_before
             or (exclude_fulfillment - {"CANCELLED"}) or not fulfillment_status
             or min_value is not None or max_value is not None
+            or bool(product_terms)
         )
         fetch_limit = 100 if narrows_after_fetch else limit
 
@@ -3778,10 +3852,10 @@ class AllegroAgent(BaseAgent):
             paid_at_lte=self._optional_local_to_utc(tool_input.get("paid_before_local")),
             limit=fetch_limit,
         )
-        # A value filter narrows to a handful of orders out of a page of 100,
-        # so an answer built on it has to be able to say "out of the 100 most
-        # recent" rather than implying it saw everything — see value_scan_note
-        # below.
+        # A value or product filter narrows to a handful of orders out of a
+        # page of 100, so an answer built on it has to be able to say "out of
+        # the 100 most recent" rather than implying it saw everything — see
+        # scan_note below.
         scanned = len(orders)
         if exclude_fulfillment:
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
@@ -3793,6 +3867,10 @@ class AllegroAgent(BaseAgent):
             orders = [o for o in orders if (o.total_price or 0) >= min_value]
         if max_value is not None:
             orders = [o for o in orders if (o.total_price or 0) <= max_value]
+        if product_terms:
+            orders = [
+                o for o in orders if self._order_has_products(o, product_terms, product_only)
+            ]
         if preset.get("sort_by_dispatch"):
             # Soonest deadline first — the order the parcels have to be dealt
             # with, not the order they were bought in.
@@ -3821,20 +3899,24 @@ class AllegroAgent(BaseAgent):
         scope = self._filter_scope_note(tool_input)
         if scope:
             empty_msg = count_none = f"Brak zamówień{stage_note}{scope}."
-        # Allegro cannot filter by amount, so a value question is answered from
-        # the page this call fetched. When that page came back full, EVERY
-        # answer built on it is about those orders only — "nothing matched" may
-        # miss an order just outside the page, and so may a count ("masz 12"
-        # when the store had 40). Both say how far the search reached.
-        value_scan_note = ""
-        if (min_value is not None or max_value is not None) and scanned >= fetch_limit:
-            value_scan_note = f" (przeszukano {scanned} ostatnich zamówień)"
+        # Allegro cannot filter by amount or by what is inside an order, so a
+        # value or product question is answered from the page this call
+        # fetched. When that page came back full, EVERY answer built on it is
+        # about those orders only — "nothing matched" may miss an order just
+        # outside the page, and so may a count ("masz 12" when the store had
+        # 40). Both say how far the search reached.
+        scan_note = ""
+        narrowed_client_side = (
+            min_value is not None or max_value is not None or bool(product_terms)
+        )
+        if narrowed_client_side and scanned >= fetch_limit:
+            scan_note = f" (przeszukano {scanned} ostatnich zamówień)"
         if tool_input.get("count_only"):
             return self._count_sentence(
                 len(orders), count_lead, count_forms, count_none, scope=scope
-            ) + value_scan_note + suffix
+            ) + scan_note + suffix
         if not orders:
-            return empty_msg + value_scan_note + suffix
+            return empty_msg + scan_note + suffix
 
         carrier_map: dict[str, str] = {}
         if include_delivery:
@@ -3847,7 +3929,14 @@ class AllegroAgent(BaseAgent):
                 logger.warning("[allegro] carrier lookup failed, using order delivery names: %s", exc)
 
         blocks = [
-            self._order_bullet(o, carrier_map=carrier_map, include_delivery=include_delivery)
+            self._order_bullet(
+                o,
+                carrier_map=carrier_map,
+                include_delivery=include_delivery,
+                # Only on a product-filtered listing: see _product_lines. An
+                # ordinary "nowe zamówienia" stays the short bullet it is.
+                extra_lines=self._product_lines(o) if product_terms else None,
+            )
             for o in orders
         ]
         body = "\n\n".join(blocks)
@@ -3887,7 +3976,7 @@ class AllegroAgent(BaseAgent):
                     f"**{self._format_price(total_delivery, currency)}**{detail}"
                 )
             body = summary + "\n\n---\n\n" + body
-        if value_scan_note:
+        if scan_note:
             # Leading, not trailing: a listing ends with the last order's link,
             # and a caveat about what the search covered belongs before the
             # results, not tacked on where it reads as part of that order.
