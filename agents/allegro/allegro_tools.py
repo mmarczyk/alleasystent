@@ -111,6 +111,34 @@ _ORDER_PARAMS: dict[str, dict] = {
             "Combine with min_value for a range ('między 500 a 1000 zł')."
         ),
     },
+    "product_names": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Only orders CONTAINING one of these products — the ONLY way to answer a question "
+            "that names what was inside the order: 'zamówienie z wczoraj z włóczką yarnart "
+            "jeans', 'pokaż zamówienia z jeans plus', 'kto kupił kordonek'. One entry per model "
+            "the user named, written as they wrote it but WITHOUT the generic category word: "
+            "'włóczkę yarnart jeans' → ['yarnart jeans'], 'jeans i jeans plus' → ['jeans', "
+            "'jeans plus'] (two models, never one merged entry). A name matches an offer title "
+            "on whole words and the most specific name wins, so 'jeans' never swallows 'jeans "
+            "plus'. Without it the product is silently dropped and the whole period's listing "
+            "comes back, which reads like an answer to a question nobody asked."
+        ),
+    },
+    "product_match": {
+        "type": "string",
+        "enum": ["any", "only"],
+        "description": (
+            "How product_names has to match the order's contents. 'any' (default) — the order "
+            "contains at least one of the named products, next to anything else. 'only' — the "
+            "order contains NOTHING BUT the named products: this is what 'tylko' / 'wyłącznie' / "
+            "'same' / 'jedynie' mean ('zamówienie, które miało tylko włóczkę yarnart jeans'), "
+            "and answering such a question with 'any' returns every mixed order too, which is a "
+            "different question. Ignored when product_names is empty."
+        ),
+        "default": "any",
+    },
     "line_items_sent": {
         "type": "array",
         "items": {"type": "string", "enum": ["NONE", "SOME", "ALL"]},
@@ -229,7 +257,7 @@ ALLEGRO_TOOLS: list[dict] = [
             ),
             "parameters": _order_params(
                 "buyer_login", "dispatch_before_local", "min_value", "max_value",
-                "count_only", "limit",
+                "product_names", "product_match", "count_only", "limit",
                 limit={
                     "description": (
                         "Max orders to return (1–100). Set to 1 when the user asks about "
@@ -282,6 +310,16 @@ ALLEGRO_TOOLS: list[dict] = [
                 "either and never reach a listing or a count, again with nothing to filter on "
                 "your side; a cash-on-delivery order, paid on receipt and therefore carrying no "
                 "payment date, IS an ordinary order and is always listed. "
+                "PRODUCT FILTERS: product_names is the ONLY way to answer a question naming what "
+                "was INSIDE the order — 'pokaż zamówienie z wczoraj, które miało włóczkę yarnart "
+                "jeans', 'zamówienia z kordonkiem z tego tygodnia', 'kto kupił jeans plus'. Pass "
+                "the model name without the category word ('włóczkę yarnart jeans' → "
+                "product_names=['yarnart jeans']) together with the period the question names, and "
+                "add product_match='only' when the question says the order held NOTHING ELSE "
+                "('tylko', 'wyłącznie', 'same', 'jedynie'). Never drop the product and return the "
+                "whole period's listing — it is handed to the seller as the answer. This is also "
+                "NOT get_sold_quantities: that one counts PIECES over a period and never shows "
+                "which orders they came from. "
                 "VALUE FILTERS: min_value/max_value are the ONLY way to answer a question that names "
                 "an amount — 'zamówienia powyżej 400 zł' → min_value=400, 'poniżej 50 zł' → "
                 "max_value=50, 'od 100 do 300 zł' → both. Never answer such a question without them: "
@@ -306,7 +344,7 @@ ALLEGRO_TOOLS: list[dict] = [
             ),
             "parameters": _order_params(
                 "status", "fulfillment_status", "exclude_fulfillment_status",
-                "buyer_login", "line_items_sent",
+                "buyer_login", "line_items_sent", "product_names", "product_match",
                 "bought_after_local", "bought_before_local",
                 "paid_after_local", "paid_before_local",
                 "dispatch_after_local", "dispatch_before_local",
@@ -794,7 +832,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "status", "fulfillment_status", "buyer_login",
                 "bought_after_local", "bought_before_local",
                 "dispatch_after_local", "dispatch_before_local",
-                "min_value", "max_value", "count_only", "limit",
+                "min_value", "max_value", "product_names", "product_match",
+                "count_only", "limit",
                 status={"description": "Order status filter. Default: READY_FOR_PROCESSING."},
                 fulfillment_status={
                     "description": (
@@ -948,6 +987,9 @@ ALLEGRO_TOOLS: list[dict] = [
                 "REVENUE; this one counts PIECES and can be narrowed to named products. "
                 "NOT get_active_offers/query_offers_by_stock: those report what is IN STOCK right now, "
                 "which is a different number from what was sold. "
+                "NOT for LISTING the orders a product was in ('pokaż zamówienie z wczoraj z włóczką "
+                "yarnart jeans', 'które zamówienia miały jeans plus') — this tool answers with a "
+                "units total and never names an order; that is get_orders with product_names. "
                 "PRODUCT NAMES — pass every model the user names as a SEPARATE entry in `names`, exactly "
                 "as they wrote it: 'włóczki jeans i jeans plus' is names=['jeans', 'jeans plus'], NOT "
                 "['jeans'] and NOT ['jeans i jeans plus']. They are different models and the tool keeps "
@@ -2167,6 +2209,31 @@ def _contains_run(haystack: list[str], needle: list[str]) -> bool:
         haystack[i:i + len(needle)] == needle
         for i in range(len(haystack) - len(needle) + 1)
     )
+
+
+# A seller names the model, but says the category out loud first — "włóczkę
+# yarnart jeans", "przędza jeans plus". Allegro titles carry that word too,
+# yet not always in front ("YarnArt Jeans 50g włóczka bawełniana"), and
+# match_product_term compares CONSECUTIVE tokens — so the category word the
+# seller prepended would break a match against a title that puts it elsewhere.
+# It is dropped from the front of a search term, never from the title, and
+# never when it is the whole term: "ile zeszło włóczki" names no model, and an
+# empty term would match every offer in the store.
+_PRODUCT_CATEGORY_PREFIXES = ("wloczk", "przedz", "tkanin", "motek", "motk")
+
+
+def product_filter_terms(names: list[str]) -> list[str]:
+    """Search terms as they should be matched against offer titles: normalized,
+    blank entries dropped, and a leading category word ("włóczka") removed when
+    the term names a model beyond it."""
+    terms: list[str] = []
+    for name in names:
+        toks = product_tokens(name)
+        while len(toks) > 1 and any(toks[0].startswith(p) for p in _PRODUCT_CATEGORY_PREFIXES):
+            toks = toks[1:]
+        if toks:
+            terms.append(" ".join(toks))
+    return terms
 
 
 def match_product_term(offer_name: str, terms: list[str]) -> str | None:

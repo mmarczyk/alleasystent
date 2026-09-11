@@ -609,3 +609,38 @@ class TestWantsLatestOrderDetails:
     ])
     def test_does_not_match(self, query):
         assert wants_latest_order_details(query) is False
+
+
+class TestOrderQuestionNamingAProduct:
+    """A product inside an order question is a filter this layer cannot
+    extract (it has no way to tell where a model name ends — "yarnart jeans"
+    carries no stem), so every order matcher hands the turn to the LLM, which
+    has get_orders' product_names. Serving the preset instead would answer
+    with the whole unfiltered listing, product dropped."""
+
+    @pytest.mark.parametrize("query", [
+        "pokaż nowe zamówienia z włóczką jeans",
+        "jakie mam nowe zamówienia z yarnart jeans, które miały tylko ją",
+        "ile mam nowych zamówień z przędzą merino",
+    ])
+    def test_new_orders_bails(self, query):
+        assert _resolve(query) is None
+
+    @pytest.mark.parametrize("query", [
+        "co mam do wysłania z włóczką jeans plus",
+        "które wysłane zamówienia zawierały kordonek",
+    ])
+    def test_stage_listing_bails(self, query):
+        assert _resolve(query) is None
+
+    def test_negated_stage_bails(self):
+        assert _resolve("niewysłane zamówienia z włóczką jeans") is None
+
+    def test_due_today_bails(self):
+        assert _resolve("co muszę dzisiaj wysłać z włóczką jeans") is None
+
+    def test_an_ordinary_order_question_is_unaffected(self):
+        """The bail is scoped to contents wording — the everyday listings stay
+        on the LLM-free path."""
+        assert _resolve("jakie mam nowe zamówienia") == ("get_new_orders", {})
+        assert _resolve("ile paczek mam do nadania")[0] == "get_orders_delivery"

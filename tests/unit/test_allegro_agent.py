@@ -2537,3 +2537,209 @@ class TestKsefRefusesInvoicesWithoutANip:
 
         assert out.startswith("🚫")
         assert "osoba prywatna" in out
+
+
+class TestOrderProductFilter:
+    """Allegro cannot filter orders by what is INSIDE them, and until this
+    filter existed nothing else could either: "pokaż mi zamówienie z wczoraj,
+    które miało tylko włóczkę yarnart jeans" came back as every order of the
+    day, the product silently dropped — the unfiltered-list-as-an-answer shape
+    the value filter above was built to stop. Seen in production."""
+
+    def _order(self, order_id, *items, **overrides):
+        """`items` are (offer_name, quantity) pairs — this filter is about the
+        order's contents, so every test states them."""
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        defaults = dict(
+            order_id=order_id,
+            buyer_login="jan_kowalski",
+            status="BOUGHT",
+            fulfillment_status="NEW",
+            total_price=120.00,
+            currency="PLN",
+            paid_at="2026-09-10T10:20:00Z",
+            delivery={"method": {"name": "Kurier DPD"},
+                      "cost": {"amount": "14.99", "currency": "PLN"}},
+            line_items=[
+                AllegroOrderLine(offer_id=str(i), offer_name=name, quantity=qty, price=10.0)
+                for i, (name, qty) in enumerate(items, start=1)
+            ],
+        )
+        defaults.update(overrides)
+        return AllegroOrder(**defaults)
+
+    def _agent(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=orders)
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_only_orders_containing_the_product_are_listed(self):
+        agent = self._agent([
+            self._order("yarn", ("Włóczka YarnArt Jeans 50g kolor 05", 3)),
+            self._order("other", ("Włóczka Merino 100g", 1)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"]}
+        )
+
+        assert "`yarn`" in result
+        assert "`other`" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_category_word_the_seller_says_out_loud_does_not_break_the_match(self):
+        """"włóczkę yarnart jeans" is how the question is asked; the title may
+        put that word anywhere or leave it out (see product_filter_terms)."""
+        agent = self._agent([self._order("yarn", ("YarnArt Jeans 50g bawełna", 2))])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["włóczka yarnart jeans"]}
+        )
+
+        assert "`yarn`" in result
+
+    @pytest.mark.asyncio
+    async def test_tylko_means_the_order_held_nothing_else(self):
+        """The seller's 'tylko': a mixed order contains the yarn too, but it is
+        not the order they asked about."""
+        orders = [
+            self._order("pure", ("Włóczka YarnArt Jeans 50g", 4)),
+            self._order("mixed",
+                        ("Włóczka YarnArt Jeans 50g", 1), ("Włóczka Merino 100g", 2)),
+        ]
+
+        only = await self._agent(orders)._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"], "product_match": "only"}
+        )
+        any_match = await self._agent(orders)._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"]}
+        )
+
+        assert "`pure`" in only and "`mixed`" not in only
+        assert "`pure`" in any_match and "`mixed`" in any_match, "'any' is the default"
+
+    @pytest.mark.asyncio
+    async def test_a_more_specific_model_is_not_swallowed_by_a_shorter_name(self):
+        """'jeans' and 'jeans plus' are two yarns — the whole point of
+        match_product_term, and it has to hold for orders too."""
+        agent = self._agent([
+            self._order("plus", ("Włóczka YarnArt Jeans Plus 100g", 1)),
+            self._order("base", ("Włóczka YarnArt Jeans 50g", 1)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["jeans plus"], "product_match": "only"}
+        )
+
+        assert "`plus`" in result and "`base`" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_filtered_listing_shows_what_was_in_the_order(self):
+        """'tylko włóczkę yarnart jeans' is a claim about the contents — the
+        seller has to be able to check it against the reply."""
+        agent = self._agent([self._order("yarn", ("Włóczka YarnArt Jeans 50g", 3))])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["yarnart jeans"]})
+
+        assert "Produkty:" in result
+        assert "  - Włóczka YarnArt Jeans 50g — 3 szt." in result
+
+    @pytest.mark.asyncio
+    async def test_an_unfiltered_listing_keeps_the_short_bullet(self):
+        agent = self._agent([self._order("yarn", ("Włóczka YarnArt Jeans 50g", 3))])
+
+        result = await agent._dispatch("get_orders", {})
+
+        assert "Produkty:" not in result
+
+    @pytest.mark.asyncio
+    async def test_empty_result_names_the_product_it_filtered_on(self):
+        agent = self._agent([self._order("other", ("Włóczka Merino 100g", 1))])
+
+        result = await agent._dispatch(
+            "get_orders",
+            {"product_names": ["yarnart jeans"], "bought_after_local": "2026-09-10 00:00"},
+        )
+
+        assert result.startswith(
+            "Brak zamówień z produktem **yarnart jeans** w okresie od 2026-09-10"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_result_repeats_the_tylko_too(self):
+        agent = self._agent([
+            self._order("mixed",
+                        ("Włóczka YarnArt Jeans 50g", 1), ("Włóczka Merino 100g", 2)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"], "product_match": "only"}
+        )
+
+        assert result.startswith(
+            "Brak zamówień zawierających wyłącznie **yarnart jeans**"
+        ), "'brak zamówień z tą włóczką' would be false — one order had it"
+
+    @pytest.mark.asyncio
+    async def test_a_count_names_the_product_as_well(self):
+        agent = self._agent([
+            self._order("yarn", ("Włóczka YarnArt Jeans 50g", 3)),
+            self._order("other", ("Włóczka Merino 100g", 1)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"], "count_only": True}
+        )
+
+        assert result == "Masz łącznie **1** zamówienie z produktem **yarnart jeans**."
+
+    @pytest.mark.asyncio
+    async def test_a_full_page_scanned_says_how_far_it_looked(self):
+        """Same caveat as the amount filter: "nothing matched" is only true of
+        the page this call fetched."""
+        agent = self._agent([
+            self._order(f"o{i}", ("Włóczka Merino 100g", 1)) for i in range(100)
+        ])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["yarnart jeans"]})
+
+        assert "(przeszukano 100 ostatnich zamówień)" in result
+
+    @pytest.mark.asyncio
+    async def test_an_order_with_no_line_items_is_never_a_match(self):
+        """Allegro returned nothing about its contents, so no product question
+        can be answered with it."""
+        agent = self._agent([self._order("empty")])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["yarnart jeans"]})
+
+        assert "`empty`" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_blank_product_name_filters_nothing_out(self):
+        """A malformed argument must not turn the listing into "no orders at
+        all" — the same recoverable-over-raising rule as _value_bounds."""
+        agent = self._agent([self._order("yarn", ("Włóczka Merino 100g", 1))])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["", "  "]})
+
+        assert "`yarn`" in result
+        assert "Produkty:" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_filter_reaches_the_new_orders_and_courier_presets_too(self):
+        """All three order tools are one listing (see _ORDERS_PRESETS), so the
+        product question is answerable whichever preset the model picks."""
+        orders = [
+            self._order("yarn", ("Włóczka YarnArt Jeans 50g", 1),
+                        fulfillment_status="READY_FOR_SHIPMENT"),
+            self._order("other", ("Włóczka Merino 100g", 1),
+                        fulfillment_status="READY_FOR_SHIPMENT"),
+        ]
+
+        result = await self._agent(orders)._dispatch(
+            "get_orders_delivery", {"product_names": ["yarnart jeans"]}
+        )
+
+        assert "`yarn`" in result and "`other`" not in result
