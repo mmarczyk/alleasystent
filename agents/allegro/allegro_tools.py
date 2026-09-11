@@ -17,8 +17,14 @@ import re
 _ORDER_PARAMS: dict[str, dict] = {
     "status": {
         "type": "string",
-        "description": "Filter by order status.",
-        "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
+        "description": (
+            "Checkout-form status. LEAVE IT OUT for every normal question: the listing then "
+            "covers exactly the orders that exist for the seller, cash-on-delivery included. "
+            "Pass CANCELLED only for a question that explicitly asks about cancelled orders "
+            "('pokaż anulowane zamówienia'). Baskets a buyer started but never paid for are "
+            "not orders and are never listed, whatever else the question asks for."
+        ),
+        "enum": ["READY_FOR_PROCESSING", "CANCELLED"],
     },
     "fulfillment_status": {
         "type": "string",
@@ -272,6 +278,10 @@ ALLEGRO_TOOLS: list[dict] = [
                 "pack, send or invoice — so they need no filtering on your side; ask for them only "
                 "when the user explicitly wants them ('pokaż anulowane zamówienia' → "
                 "fulfillment_status=CANCELLED), which is the one case they are shown. "
+                "UNPAID BASKETS — a buyer who clicked buy but never paid — are not orders "
+                "either and never reach a listing or a count, again with nothing to filter on "
+                "your side; a cash-on-delivery order, paid on receipt and therefore carrying no "
+                "payment date, IS an ordinary order and is always listed. "
                 "VALUE FILTERS: min_value/max_value are the ONLY way to answer a question that names "
                 "an amount — 'zamówienia powyżej 400 zł' → min_value=400, 'poniżej 50 zł' → "
                 "max_value=50, 'od 100 do 300 zł' → both. Never answer such a question without them: "
