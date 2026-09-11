@@ -2537,3 +2537,82 @@ class TestKsefRefusesInvoicesWithoutANip:
 
         assert out.startswith("🚫")
         assert "osoba prywatna" in out
+
+
+class TestAppendedMonitoringBlock:
+    """A listing answers what the seller asked; the monitoring block rides along.
+
+    While the monitor is OFF that ride-along is an offer worth making. Once it
+    is ON the same block says nothing the seller doesn't already know — it just
+    pushes the actual answer up under a status line and a grey button — so the
+    appended copy disappears and only the explicit suggest/disable tools still
+    render the on/turn-it-off view.
+    """
+
+    @staticmethod
+    def _flag(monkeypatch, module: str, enabled: bool):
+        import importlib
+
+        mod = importlib.import_module(module)
+
+        async def fake(*_args, **_kw):
+            return enabled
+
+        monkeypatch.setattr(mod, "is_monitor_enabled", fake)
+
+    @pytest.mark.asyncio
+    async def test_orders_listing_drops_the_block_once_monitoring_is_on(self, monkeypatch):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[_plain_order("a")])
+        self._flag(monkeypatch, "services.order_monitor", True)
+
+        out = await agent._dispatch("get_new_orders", {})
+
+        assert "Automatyczne sprawdzanie" not in out
+        assert "btn-monitoring" not in out
+        # No block means no dangling blank lines where it used to sit.
+        assert out == out.rstrip()
+
+    @pytest.mark.asyncio
+    async def test_orders_listing_still_offers_the_block_while_monitoring_is_off(self, monkeypatch):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=[_plain_order("a")])
+        self._flag(monkeypatch, "services.order_monitor", False)
+
+        out = await agent._dispatch("get_new_orders", {})
+
+        assert "🔔 Włącz automatyczne sprawdzanie</button>" in out
+
+    @pytest.mark.asyncio
+    async def test_asking_about_the_monitor_itself_still_shows_its_status(self, monkeypatch):
+        """The seller who typed "wyłącz automatyczne sprawdzanie" asked about
+        the monitor — that reply is the one place the on-state belongs."""
+        agent = _make_agent()
+        self._flag(monkeypatch, "services.order_monitor", True)
+
+        out = await agent._dispatch("disable_order_monitoring", {})
+
+        assert "🔔 Automatyczne sprawdzanie nowych zamówień jest włączone" in out
+        assert "🔕 Wyłącz automatyczne sprawdzanie</button>" in out
+
+    @pytest.mark.asyncio
+    async def test_returns_and_complaints_drop_the_block_once_monitoring_is_on(self, monkeypatch):
+        agent = _make_agent()
+        agent._allegro.get_customer_returns = AsyncMock(return_value=[])
+        agent._allegro.get_issues = AsyncMock(return_value=[])
+        self._flag(monkeypatch, "services.return_complaint_monitor", True)
+
+        for tool in ("get_new_returns", "get_returns_to_process", "get_new_complaints"):
+            out = await agent._dispatch(tool, {})
+            assert "btn-returns-monitoring" not in out, tool
+            assert out == out.rstrip(), tool
+
+    @pytest.mark.asyncio
+    async def test_pending_invoices_drops_the_reminder_block_once_it_is_on(self, monkeypatch):
+        agent = _make_agent()
+        agent._allegro.get_orders_needing_invoice = AsyncMock(return_value=[])
+        self._flag(monkeypatch, "services.invoice_reminder", True)
+
+        out = await agent._dispatch("get_orders_pending_invoice", {})
+
+        assert out == "Brak zamówień wymagających wystawienia faktury."

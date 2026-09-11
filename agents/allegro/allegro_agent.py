@@ -638,8 +638,10 @@ class AllegroAgent(BaseAgent):
         "suggest_invoice_reminder after get_orders_pending_invoice when the user wants to be notified or "
         "actively asked about pending invoices "
         "(though get_new_orders/get_message_threads/get_new_returns/get_returns_to_process/"
-        "get_new_complaints/get_orders_pending_invoice ALREADY append their own status block — "
-        "don't double-call). "
+        "get_new_complaints/get_orders_pending_invoice ALREADY append their own status block "
+        "while that monitor is OFF — don't double-call. Once it is ON they append nothing, "
+        "which is deliberate: the seller already knows, so don't call the suggest tool to fill "
+        "the gap and don't mention the monitor in your own words). "
         "The invoice REMINDER and the unread-message REMINDER also handle their own conversation once "
         "they have asked — if the user's "
         "current message looks like a reply to that chat question ('tak wystaw', 'później', 'za 3 "
@@ -2077,16 +2079,33 @@ class AllegroAgent(BaseAgent):
             parts.append(self._format_dt_pl(order.created_at))
         return " — ".join(parts)
 
-    async def _monitoring_status_block(self) -> str:
+    @staticmethod
+    def _block_suffix(block: str) -> str:
+        """Append a status block to an answer — or nothing at all when the block
+        came back empty (see `offer_only` below), so the answer doesn't end in
+        stray blank lines."""
+        return f"\n\n{block}" if block else ""
+
+    async def _monitoring_status_block(self, *, offer_only: bool = False) -> str:
         """Deterministic (non-LLM) status + action button for automatic order checking.
 
         Always reflects the real Redis flag, not the model's guess — the invoice-issuance
         bug (misfiring on a yes/no question) showed prompt-only judgement isn't reliable
         for this kind of state, so it's computed here instead of left to the LLM.
+
+        `offer_only` is for the block APPENDED to an answer the seller asked for
+        something else entirely (a listing, a count). There the "it's already on"
+        variant is noise: it repeats state the seller switched on themselves and
+        buries the actual answer under a status line and a button. So an appended
+        block only appears while the feature is off, where it's an offer worth
+        making; the on/turn-it-off view stays on the explicit suggest/disable
+        tools, which is where the seller asked about the monitor itself.
         """
         from services.order_monitor import is_monitor_enabled
 
         if await is_monitor_enabled(self._allegro._user_id):
+            if offer_only:
+                return ""
             return (
                 "🔔 Automatyczne sprawdzanie nowych zamówień jest włączone — dam Ci znać, "
                 "gdy pojawi się coś nowego.\n\n"
@@ -2101,7 +2120,7 @@ class AllegroAgent(BaseAgent):
             '🔔 Włącz automatyczne sprawdzanie</button>'
         )
 
-    async def _invoice_reminder_status_block(self) -> str:
+    async def _invoice_reminder_status_block(self, *, offer_only: bool = False) -> str:
         """Deterministic (non-LLM) status + action button for the automatic
         invoice REMINDER — a scheduled 7:00-20:00 check (every 2h by default,
         adjustable by the seller) for unissued VAT invoices on already-shipped
@@ -2114,6 +2133,8 @@ class AllegroAgent(BaseAgent):
         from services.invoice_reminder import is_monitor_enabled
 
         if await is_monitor_enabled(self._allegro._user_id):
+            if offer_only:
+                return ""
             return (
                 "⏰ Automatyczne przypomnienia o niewystawionych fakturach są włączone — co 2 "
                 "godziny (7:00-20:00) sprawdzę, czy są niewystawione faktury dla wysłanych "
@@ -2211,12 +2232,14 @@ class AllegroAgent(BaseAgent):
             '💬 Włącz monitoring wiadomości</button>'
         )
 
-    async def _returns_monitoring_status_block(self) -> str:
+    async def _returns_monitoring_status_block(self, *, offer_only: bool = False) -> str:
         """Deterministic (non-LLM) status + action button for automatic returns/
         complaints checking — same rationale as _monitoring_status_block above."""
         from services.return_complaint_monitor import is_monitor_enabled
 
         if await is_monitor_enabled(self._allegro._user_id):
+            if offer_only:
+                return ""
             return (
                 "↩️ Automatyczne sprawdzanie nowych zwrotów i reklamacji jest włączone — dam Ci "
                 "znać, gdy pojawi się coś nowego.\n\n"
@@ -3683,7 +3706,10 @@ class AllegroAgent(BaseAgent):
             orders.sort(key=lambda o: getattr(o, "dispatch_to", "") or "")
         orders = orders[:limit]
 
-        suffix = "\n\n" + await self._monitoring_status_block() if preset.get("monitoring_block") else ""
+        suffix = (
+            self._block_suffix(await self._monitoring_status_block(offer_only=True))
+            if preset.get("monitoring_block") else ""
+        )
         # An explicit fulfillment_status can override the preset's own stage —
         # the stage matchers in deterministic_dispatch do exactly that to reach
         # WYSŁANE/ODEBRANE — and then the preset's wording names the wrong one
@@ -4643,7 +4669,9 @@ class AllegroAgent(BaseAgent):
                 year=tool_input.get("year"),
             )
             if not orders:
-                return "Brak zamówień wymagających wystawienia faktury." + "\n\n" + await self._invoice_reminder_status_block()
+                return "Brak zamówień wymagających wystawienia faktury." + self._block_suffix(
+                    await self._invoice_reminder_status_block(offer_only=True)
+                )
             # Fetch invoice address data for all orders in parallel
             inv_results = await asyncio.gather(
                 *[self._allegro.get_order_invoice_data(o.order_id) for o in orders],
@@ -4694,7 +4722,9 @@ class AllegroAgent(BaseAgent):
                     if inv.get("street"):
                         extra.append(f"Adres: {inv['street']}, {inv.get('zip_code', '')} {inv.get('city', '')}".strip(", "))
                 blocks.append(self._order_bullet(o, extra_lines=extra))
-            return header + "\n\n".join(blocks) + "\n\n" + await self._invoice_reminder_status_block()
+            return header + "\n\n".join(blocks) + self._block_suffix(
+                await self._invoice_reminder_status_block(offer_only=True)
+            )
 
         if tool_name == "preview_pending_invoices":
             return await self._preview_pending_invoices(
@@ -4752,7 +4782,9 @@ class AllegroAgent(BaseAgent):
                     f"Brak zwrotów{suffix}." if not returns
                     else self._returns_listing(returns, f"Zwroty{suffix}")
                 )
-            return body + "\n\n" + await self._returns_monitoring_status_block()
+            return body + self._block_suffix(
+                await self._returns_monitoring_status_block(offer_only=True)
+            )
 
         if tool_name == "get_returns_to_process":
             date_from, date_to, period_label = self._optional_period(tool_input)
@@ -4776,7 +4808,9 @@ class AllegroAgent(BaseAgent):
                     if not returns else
                     self._returns_listing(returns, f"Zwroty do obsłużenia{suffix}")
                 )
-            return body + "\n\n" + await self._returns_monitoring_status_block()
+            return body + self._block_suffix(
+                await self._returns_monitoring_status_block(offer_only=True)
+            )
 
         if tool_name == "get_new_complaints":
             date_from, date_to, period_label = self._optional_period(tool_input)
@@ -4792,7 +4826,9 @@ class AllegroAgent(BaseAgent):
                     f"Brak reklamacji{suffix}." if not issues
                     else self._complaints_listing(issues, f"Reklamacje{suffix}")
                 )
-            return body + "\n\n" + await self._returns_monitoring_status_block()
+            return body + self._block_suffix(
+                await self._returns_monitoring_status_block(offer_only=True)
+            )
 
         if tool_name in ("suggest_returns_monitoring", "disable_returns_monitoring"):
             return await self._returns_monitoring_status_block()
