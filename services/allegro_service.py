@@ -60,6 +60,21 @@ INVOICE_FILE_MAX_BYTES = 3 * 1024 * 1024
 # fetch small.
 _PAID_WINDOW_BACKDATE_DAYS = 30
 
+# The checkout-form status of an order that actually exists for the seller.
+#
+# Allegro keeps a checkout form from the moment a buyer clicks "kupuję", long
+# before there is anything for the seller to do with it: BOUGHT (the buyer has
+# not filled the form in) and FILLED_IN (filled in, not paid) are baskets in
+# progress, not orders. Only READY_FOR_PROCESSING is Allegro saying the order
+# is the seller's to handle — which includes cash-on-delivery, paid on receipt
+# and therefore carrying no payment date of its own.
+#
+# So a fetch that names no status gets this one rather than "every form Allegro
+# holds": an unpaid basket must not be counted, listed, invoiced, or matched to
+# a buyer's message anywhere. A caller that wants a different status (the
+# cancelled listing) still passes it and gets exactly that.
+ORDER_STATUS_READY = "READY_FOR_PROCESSING"
+
 
 def decode_token_scopes(access_token: str | None) -> list[str] | None:
     """Scopes carried by an Allegro access token, or None if they can't be read.
@@ -635,6 +650,12 @@ class AllegroService:
             "Authorization": f"Bearer {self._tokens.access_token}",
             "Accept": "application/vnd.allegro.public.v1+json",
             "Content-Type": "application/vnd.allegro.public.v1+json",
+            # Allegro translates the human-readable labels it sends back
+            # (billing type names above all) according to this header and
+            # falls back to ENGLISH when it is absent — so without it a
+            # shipping charge arrives as "Delivery fee" while the seller,
+            # this app, and every rule that reads those labels speak Polish.
+            "Accept-Language": "pl-PL",
         }
 
     async def _get(self, path: str, params: dict | list | None = None, accept: str | None = None) -> dict[str, Any]:
@@ -693,10 +714,12 @@ class AllegroService:
         #
         # Every OTHER filter the caller passed is forwarded to that fetch. It
         # used to be dropped (buyer_login, fulfillment_status, line_items_sent
-        # and the boughtAt bounds all vanished, and the status was forced to
-        # READY_FOR_PROCESSING), so "czy w tym roku kupował ode mnie ktoś z
-        # konta np1988" — a buyer_login + payment-period call — came back as
-        # the whole store's last week, the login silently ignored.
+        # and the boughtAt bounds all vanished), so "czy w tym roku kupował ode
+        # mnie ktoś z konta np1988" — a buyer_login + payment-period call —
+        # came back as the whole store's last week, the login silently ignored.
+        # The status is the one argument this call fills in for a caller that
+        # left it out, and it fills in the same one either way (see
+        # ORDER_STATUS_READY) — never a filter of its own invention.
         #
         # The window start is derived from paid_at_gte instead of a fixed
         # "last 7 days", which made any period longer than a week unanswerable.
@@ -717,7 +740,7 @@ class AllegroService:
                 window_from - timedelta(days=_PAID_WINDOW_BACKDATE_DAYS)
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
             raw = await self.get_orders(
-                status=status or "READY_FOR_PROCESSING",
+                status=status or ORDER_STATUS_READY,
                 buyer_login=buyer_login,
                 fulfillment_status=fulfillment_status,
                 line_items_sent=line_items_sent,
@@ -732,9 +755,11 @@ class AllegroService:
                 result = [o for o in result if (o.paid_at or "") <= paid_at_lte]
             return result[:limit]
 
-        base_params: dict[str, Any] = {}
-        if status:
-            base_params["status"] = status
+        # An unpaid basket is not an order (see ORDER_STATUS_READY): the fetch
+        # asks Allegro for real ones, so nothing downstream — a listing, a
+        # count, an invoice run, a thread→order match — has to know that
+        # BOUGHT and FILLED_IN forms exist.
+        base_params: dict[str, Any] = {"status": status or ORDER_STATUS_READY}
         if buyer_login:
             base_params["buyer.login"] = buyer_login
         if fulfillment_status:
@@ -798,7 +823,7 @@ class AllegroService:
         offset = 0
         while True:
             params: dict[str, Any] = {
-                "status": "READY_FOR_PROCESSING",
+                "status": ORDER_STATUS_READY,
                 "lineItems.boughtAt.gte": date_from,
                 "lineItems.boughtAt.lte": date_to,
                 "limit": page_size,
@@ -1012,7 +1037,7 @@ class AllegroService:
         offset = 0
         while True:
             page = await self.get_orders(
-                status="READY_FOR_PROCESSING",
+                status=ORDER_STATUS_READY,
                 bought_at_gte=first_day,
                 bought_at_lte=last_day,
                 limit=page_size,
@@ -1235,7 +1260,8 @@ class AllegroService:
                     "  billing[%d]: occurredAt=%s type=%s offer=%s amount=%s",
                     idx,
                     e.get("occurredAt", "")[:10],
-                    (e.get("type") or {}).get("description", "?"),
+                    (e.get("type") or {}).get("name")
+                    or (e.get("type") or {}).get("description", "?"),
                     (e.get("offer") or {}).get("name", "—"),
                     (e.get("value") or {}).get("amount", "?"),
                 )
