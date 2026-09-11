@@ -418,3 +418,117 @@ class TestLabelPhraseCoverage:
         assert tools is not None, f"No label matched for: {query!r}"
         names = {t["function"]["name"] for t in tools}
         assert tool_name in names, f"{tool_name!r} missing for query {query!r} (got {sorted(names)})"
+
+
+class TestMatchProductTerm:
+    """Matching a model the seller named against real offer titles. The
+    production failure this exists for: "ile sztuk sprzedanych dla włóczek
+    jeans i jeans plus" — two different yarns whose titles share a word."""
+
+    TITLES = [
+        "Włóczka Jeans 100g kolor 05",
+        "Włóczka Jeans Plus 100g kolor 12",
+        "Włóczka Merino 50g",
+    ]
+
+    def test_more_specific_term_wins(self):
+        """The whole point: a Jeans Plus sale belongs to "jeans plus", not to
+        "jeans" — otherwise the longer model's units get counted twice, or
+        folded into the shorter one."""
+        from agents.allegro.allegro_tools import match_product_term
+        terms = ["jeans", "jeans plus"]
+        assert match_product_term("Włóczka Jeans 100g kolor 05", terms) == "jeans"
+        assert match_product_term("Włóczka Jeans Plus 100g kolor 12", terms) == "jeans plus"
+
+    def test_term_order_does_not_matter(self):
+        from agents.allegro.allegro_tools import match_product_term
+        title = "Włóczka Jeans Plus 100g"
+        assert match_product_term(title, ["jeans", "jeans plus"]) == "jeans plus"
+        assert match_product_term(title, ["jeans plus", "jeans"]) == "jeans plus"
+
+    def test_matches_whole_words_only(self):
+        """"jeans" must not match inside another word — otherwise a yarn query
+        picks up jeans trousers."""
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Spodnie jeansowe męskie", ["jeans"]) is None
+        assert match_product_term("Włóczka Merino 50g", ["jeans"]) is None
+
+    def test_plus_sign_reads_as_the_word(self):
+        """Sellers write the same model both ways."""
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Włóczka Jeans+ 50g", ["jeans", "jeans plus"]) == "jeans plus"
+
+    def test_case_and_diacritics_are_ignored(self):
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("JEANS PLUS włóczka", ["Jeans Plus"]) == "Jeans Plus"
+        assert match_product_term("Włóczka Bawełniana", ["bawelniana"]) == "bawelniana"
+
+    def test_multi_word_term_must_be_consecutive(self):
+        """"jeans plus" is one model name, not two words that happen to both
+        appear somewhere in the title."""
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Włóczka Jeans 100g plus gratis", ["jeans plus"]) is None
+
+    def test_term_matching_nothing_returns_none(self):
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Włóczka Merino 50g", ["jeans", "jeans plus"]) is None
+
+
+class TestRenderSoldQuantities:
+    """Grouping rules for the answer — see _render_sold_quantities."""
+
+    @staticmethod
+    def _orders(*per_order):
+        from types import SimpleNamespace as NS
+        return [
+            NS(line_items=[NS(offer_name=n, quantity=q) for n, q in items])
+            for items in per_order
+        ]
+
+    def test_two_models_are_never_summed_together(self):
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3), ("Włóczka Jeans Plus 100g", 2)],
+                         [("Włóczka Jeans 100g", 5)]),
+            ["jeans", "jeans plus"], "2026-06-01 – 2026-09-01",
+        )
+        assert "„jeans” — 8 szt." in out
+        assert "„jeans plus” — 2 szt." in out
+
+    def test_several_titles_under_one_term_are_broken_down(self):
+        """One term matching two different titles is exactly the case the tool
+        cannot resolve — so it shows both instead of merging them."""
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3), ("Włóczka Jeans 50g", 4)]),
+            ["jeans"], "2026-06-01 – 2026-09-01",
+        )
+        assert "„jeans” — 7 szt." in out
+        assert "Włóczka Jeans 100g — 3 szt." in out
+        assert "Włóczka Jeans 50g — 4 szt." in out
+
+    def test_a_term_that_sold_nothing_is_reported_not_dropped(self):
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3)]),
+            ["jeans", "kaszmir"], "2026-06-01 – 2026-09-01",
+        )
+        assert "Brak sprzedaży dla: „kaszmir”." in out
+
+    def test_no_names_ranks_every_product_by_units(self):
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Merino 50g", 7), ("Włóczka Jeans 100g", 3)]),
+            [], "2026-06-01 – 2026-09-01",
+        )
+        assert out.index("Merino") < out.index("Jeans")
+        assert "**Razem: 10 szt.**" in out
+
+    def test_counting_basis_is_always_stated(self):
+        """Both choices change the number, so a seller reconciling it against
+        their own records has to be told which one they are looking at."""
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3)]), ["jeans"], "2026-06-01 – 2026-09-01",
+        )
+        assert "anulowane pominięte, zwroty nieodjęte" in out

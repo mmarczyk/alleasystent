@@ -121,6 +121,20 @@ CASES: list[Case] = [
          ("Brak zamówień o wartości powyżej 100000,00 PLN",),
          note="Puste zdanie nazywa kwotę, po której filtrowało — inaczej czyta się "
               "jak „nie masz żadnych zamówień”."),
+    Case("get_sold_quantities__two_models", "get_sold_quantities",
+         {"names": ["jeans", "jeans plus"],
+          "date_from_local": _MONTH_START, "date_to_local": _TODAY_ISO},
+         "W ciągu ostatnich 3 miesięcy podaj mi ilość sztuk sprzedanych dla włóczek jeans i jeans plus",
+         ("„jeans” — 8 szt.", "„jeans plus” — 2 szt.", "zwroty nieodjęte"),
+         note="Produkcyjny błąd: to pytanie wracało listą zamówień. Dwa modele dzielą "
+              "słowo w tytule, więc dopasowanie po podciągu zlewa je w jedno — "
+              "'jeans plus' musi zabrać swoje sztuki 'jeansowi', a nie dołożyć się "
+              "do niego. 10 szt. z zamówienia anulowanego nie liczy się wcale."),
+    Case("get_sold_quantities__no_names", "get_sold_quantities",
+         {"date_from_local": _MONTH_START, "date_to_local": _TODAY_ISO},
+         "Ile sztuk sprzedałem w tym miesiącu?",
+         ("Sprzedane sztuki", "Razem:"),
+         note="Bez nazw — ranking wszystkich produktów po ilości sztuk."),
     Case("get_order_details__delivery_cost", "get_order_details", {"order_id": ds.ORD_3},
          "Ile kosztowała dostawa w tym zamówieniu?",
          ("- Koszt dostawy zapłacony przez kupującego: 12,99 PLN",

@@ -296,12 +296,27 @@ class AllegroAgent(BaseAgent):
         "for a pasted order_id gave 50 unrelated orders). If the right tool for that filter is "
         "in your list, call THAT one; if none of the available tools takes it, call "
         "ask_clarifying_question — never answer a 'czy X…' question with 'here is everything'.\n"
+        "…AND THAT IT COMPUTES THE FIGURE ASKED FOR: the same check applies to WHAT is being "
+        "asked, not just what it is filtered by. Units sold, revenue, stock on hand and order "
+        "count are four different numbers, and a tool that returns one of them is a wrong "
+        "answer to a question about another — no matter how well it filters. If no tool "
+        "produces the figure the question names, say so via ask_clarifying_question instead of "
+        "returning the closest thing you can call: an order listing served to 'ile sztuk "
+        "sprzedałem' reads as the answer, and nothing in it reveals that it is not.\n"
         "MANDATORY TOOL CALLS — these question types MUST trigger a tool, never be answered from memory:\n"
         "• Order LIST for a period, no cost/profit/earnings wording — 'lista zamówień', 'pokaż "
         "wszystkie zamówienia z tego miesiąca', 'zamówienia z ostatniego tygodnia' → get_orders "
         "(bought_after/before_local or paid_after/before_local for the period). Do NOT use "
         "get_sales_summary for this — that tool is ONLY for earnings/profit/fee questions "
         "(see BILLING ROUTING below), never for 'just show me the orders'.\n"
+        "• UNITS SOLD of a product in a period — 'ile sztuk sprzedanych dla <produkt>', 'ile "
+        "poszło <produkt> w tym miesiącu', 'ile zeszło włóczki jeans', 'co się najlepiej "
+        "sprzedawało' → get_sold_quantities. This counts PIECES: not get_sales_summary (money, "
+        "products ranked by revenue), not query_offers_by_stock/get_active_offers (stock left "
+        "NOW), and above all not an order listing — a list of orders is not a quantity. When the "
+        "question names several models, pass EACH as its own entry in names ('włóczki jeans i "
+        "jeans plus' → names=['jeans','jeans plus']): they are different products and must not "
+        "be merged into one term.\n"
         "• Order counts / 'ile zamówień' / 'ile jest wszystkich nowych' / 'ile mam nowych' "
         "(user wants a NUMBER, not the list) → get_new_orders with count_only=true. Do NOT return "
         "the whole order list when the user only asked HOW MANY.\n"
@@ -1801,6 +1816,100 @@ class AllegroAgent(BaseAgent):
             ),
             "```",
         ]
+
+    # How many product rows a no-filter ("ile sztuk sprzedałem w maju") answer
+    # lists before it stops. A seller with a wide catalogue does not want every
+    # SKU pasted into chat; the ones that matter are at the top of a
+    # units-sold ranking.
+    _SOLD_QUANTITIES_TOP_N = 20
+
+    @classmethod
+    def _render_sold_quantities(
+        cls, orders: list, names: list[str], period_label: str,
+    ) -> str:
+        """Units sold per product, grouped under the names the seller asked for.
+
+        Titles are never summed across different offer names. Where one term
+        matches several titles ("jeans" when the catalogue also has "Jeans
+        100g" and "Jeans 50g"), each title keeps its own line under the term's
+        subtotal — the tool cannot know whether two titles are one model, but
+        the seller can see it at a glance, and a single merged number would
+        hide the very distinction they asked about.
+        """
+        from agents.allegro.allegro_tools import match_product_term
+
+        # title → units, plus title → which requested term claimed it.
+        per_title: dict[str, int] = {}
+        title_term: dict[str, str] = {}
+        for order in orders:
+            for li in order.line_items:
+                title = li.offer_name
+                if names:
+                    term = match_product_term(title, names)
+                    if term is None:
+                        continue
+                    title_term[title] = term
+                per_title[title] = per_title.get(title, 0) + int(li.quantity or 0)
+
+        if not per_title:
+            asked = ", ".join(f"„{n}”" for n in names)
+            return (
+                f"W okresie {period_label} nie znalazłem sprzedaży dla: {asked}.\n\n"
+                "Sprawdź, czy nazwa zgadza się z tytułem oferty — dopasowanie idzie po "
+                "całych słowach z tytułu."
+            )
+
+        lines: list[str] = [f"**Sprzedane sztuki — {period_label}**", ""]
+
+        if names:
+            # Seller's own order of terms, so the answer reads back in the
+            # order they asked. Terms that sold nothing are reported at the
+            # end rather than silently dropped — "0" is an answer, absence
+            # looks like an oversight.
+            unmatched: list[str] = []
+            for term in names:
+                titles = sorted(
+                    (t for t, chosen in title_term.items() if chosen == term),
+                    key=lambda t: per_title[t],
+                    reverse=True,
+                )
+                if not titles:
+                    unmatched.append(term)
+                    continue
+                subtotal = sum(per_title[t] for t in titles)
+                lines.append(f"**„{term}” — {subtotal} szt.**")
+                # One title under one term needs no breakdown: the subtotal
+                # line already names the only thing it could be made of.
+                if len(titles) > 1:
+                    lines.extend(f"  - {t} — {per_title[t]} szt." for t in titles)
+                lines.append("")
+            if unmatched:
+                lines.append(
+                    "Brak sprzedaży dla: " + ", ".join(f"„{t}”" for t in unmatched) + "."
+                )
+                lines.append("")
+        else:
+            ranked = sorted(per_title.items(), key=lambda kv: kv[1], reverse=True)
+            shown = ranked[:cls._SOLD_QUANTITIES_TOP_N]
+            lines.extend(f"- {title} — {qty} szt." for title, qty in shown)
+            lines.append("")
+            if len(ranked) > len(shown):
+                lines.append(
+                    f"(pokazano {len(shown)} produktów z {len(ranked)}, "
+                    "od najliczniej sprzedanych)"
+                )
+                lines.append("")
+            lines.append(f"**Razem: {sum(per_title.values())} szt.**")
+            lines.append("")
+
+        # Stated, not assumed: both choices change the number, and a seller
+        # reconciling it against their own records has to know which one they
+        # are looking at.
+        lines.append(
+            "_Liczone ze sprzedanych sztuk w opłaconych zamówieniach z tego okresu; "
+            "anulowane pominięte, zwroty nieodjęte._"
+        )
+        return "\n".join(lines)
 
     @classmethod
     def _render_offers_table(
@@ -4125,6 +4234,29 @@ class AllegroAgent(BaseAgent):
                 "„(zakończona — wyprzedana)” Allegro zakończyło automatycznie po zejściu "
                 "stanu do zera — po dostawie towaru trzeba je wznowić.",
             ])
+
+        if tool_name == "get_sold_quantities":
+            date_from, date_to = self._local_day_bounds_to_utc(
+                tool_input["date_from_local"], tool_input["date_to_local"]
+            )
+            period_label = f"{tool_input['date_from_local']} – {tool_input['date_to_local']}"
+            raw_names = tool_input.get("names") or []
+            names = [n for n in (str(x).strip() for x in raw_names) if n]
+            logger.info(
+                "get_sold_quantities: %s → %s, names=%r", date_from, date_to, names,
+            )
+            orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
+            # Paid-but-then-cancelled orders are still returned by the period
+            # fetch (it filters the checkout-form status, not the fulfilment
+            # one). Counting them would report goods that never shipped as
+            # sold.
+            orders = [
+                o for o in orders
+                if str(o.fulfillment_status or "").upper() != "CANCELLED"
+            ]
+            if not orders:
+                return f"Brak opłaconych zamówień w okresie {period_label}."
+            return self._render_sold_quantities(orders, names, period_label)
 
         if tool_name == "get_sales_summary":
             date_from, date_to = self._local_day_bounds_to_utc(

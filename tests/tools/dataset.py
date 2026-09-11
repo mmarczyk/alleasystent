@@ -57,6 +57,13 @@ ORD_3 = "2e6a76c2-b868-33f3-a24a-55ae65cfe59c"
 ORD_4 = "3f7b87d3-c979-44f4-b35b-66bf76d0f6ad"
 ORD_5 = "4a8c98e4-da8a-55a5-c46c-77c087e1a7be"
 ORD_6 = "5b9da9f5-eb9b-66b6-d57d-88d198f2b8cf"
+# Yarn orders — the assortment this seller actually sells, and the case that
+# broke in production: "jeans" and "jeans plus" are two different models whose
+# titles share a word, so any naive substring match folds one into the other.
+# ORD_YARN_3 is paid AND cancelled: it must never be counted as sold.
+ORD_YARN_1 = "6cae1a06-fcac-77c7-e68e-99e2a9030c01"
+ORD_YARN_2 = "7dbf2b17-0dbd-88d8-f79f-a0f3ba141d12"
+ORD_YARN_3 = "8ec03c28-1ece-99e9-08a0-b104cb252e23"
 
 
 def _price(amount: float, currency: str = "PLN") -> dict:
@@ -254,6 +261,55 @@ CHECKOUT_FORMS: list[dict] = [
                 "countryCode": "PL",
             },
         },
+    },
+    # ── Włóczki: dwa modele o wspólnym słowie w tytule ───────────────────────
+    # Razem (bez anulowanego): jeans 3+5 = 8 szt., jeans plus 2 szt.
+    {
+        "id": ORD_YARN_1,
+        "status": "READY_FOR_PROCESSING",
+        "buyer": {"login": "monika.w", "email": "monika.w@allegromail.pl",
+                  "firstName": "Monika", "lastName": "Wrona", "phoneNumber": "+48 600 100 200"},
+        "fulfillment": {"status": "PICKED_UP"},
+        "payment": {"type": "ONLINE", "finishedAt": in_month(6.0)},
+        "boughtAt": in_month(6.1),
+        "summary": {"totalToPay": _price(139.50)},
+        "delivery": _delivery("INPOST_LOCKER", "Allegro Paczkomaty InPost", 9.99,
+                              hours_ahead(-40), recipient="Monika Wrona"),
+        "lineItems": [
+            _line_item("14587500101", "Włóczka Jeans 100g kolor 05", 3, 15.90),
+            _line_item("14587500202", "Włóczka Jeans Plus 100g kolor 12", 2, 19.90),
+        ],
+    },
+    {
+        "id": ORD_YARN_2,
+        "status": "READY_FOR_PROCESSING",
+        "buyer": {"login": "krystyna.b", "email": "krystyna.b@allegromail.pl",
+                  "firstName": "Krystyna", "lastName": "Bąk", "phoneNumber": "+48 600 300 400"},
+        "fulfillment": {"status": "PICKED_UP"},
+        "payment": {"type": "ONLINE", "finishedAt": in_month(4.0)},
+        "boughtAt": in_month(4.1),
+        "summary": {"totalToPay": _price(89.49)},
+        "delivery": _delivery("DPD", "Kurier DPD", 12.99,
+                              hours_ahead(-30), recipient="Krystyna Bąk"),
+        "lineItems": [
+            _line_item("14587500101", "Włóczka Jeans 100g kolor 05", 5, 15.90),
+        ],
+    },
+    {
+        # Opłacone, potem anulowane — 10 szt., które nigdy nie wyjechały.
+        "id": ORD_YARN_3,
+        "status": "READY_FOR_PROCESSING",
+        "buyer": {"login": "test.anulowane", "email": "test.anulowane@allegromail.pl",
+                  "firstName": "Jan", "lastName": "Nowak", "phoneNumber": "+48 600 500 600"},
+        "fulfillment": {"status": "CANCELLED"},
+        "payment": {"type": "ONLINE", "finishedAt": in_month(5.0)},
+        "boughtAt": in_month(5.1),
+        "summary": {"totalToPay": _price(199.00)},
+        "delivery": _delivery("DPD", "Kurier DPD", 12.99,
+                              hours_ahead(-35), recipient="Jan Nowak"),
+        "lineItems": [
+            _line_item("14587500202", "Włóczka Jeans Plus 100g kolor 12", 10, 19.90),
+        ],
     },
 ]
 
