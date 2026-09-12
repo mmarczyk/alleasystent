@@ -389,6 +389,12 @@ class TestLabelPhraseCoverage:
         ("czy mam klienta z takim nr telefonu +48 880 197 834", "find_buyer_by_contact"),
         ("czy kupował ode mnie ktoś z adresu jan@example.com", "find_buyer_by_contact"),
         ("jakie zamówienia czekają na fakturę", "get_orders_pending_invoice"),
+        # "Faktury do wysłania" is the invoice listing, not the shipping one —
+        # and the stage that scopes it keeps the order tools as candidates too,
+        # which is fine: the label filter only has to leave the right tool
+        # reachable.
+        ("jakie mam faktury do wysłania w zamówieniach nie nowych",
+         "get_orders_pending_invoice"),
         ("dane do faktury dla tego zamówienia", "get_order_invoice_data"),
         ("wystaw brakujące faktury za ten miesiąc", "preview_pending_invoices"),
         ("wystaw fakturę dla tego zamówienia", "issue_invoice_for_order"),

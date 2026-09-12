@@ -572,8 +572,18 @@ class AllegroAgent(BaseAgent):
         "SEPARATE entry and must be shown as a separate row. Showing 2 rows when there are 5 "
         "entries is WRONG. If the tool says '5 wpisów', show 5 rows, not 2. "
         "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order (no issuance verb) → get_order_invoice_data\n"
-        "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'brakujące faktury' "
-        "(read-only list, nothing created) → get_orders_pending_invoice (includes address automatically)\n"
+        "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'jakie mam faktury "
+        "do wysłania' / 'brakujące faktury' / 'zaległe faktury' (read-only list, nothing created) → "
+        "get_orders_pending_invoice (includes address automatically). 'Faktury do wysłania' is this "
+        "tool too — it is the DOCUMENT the seller still owes, never get_orders_delivery, whose "
+        "'do wysłania' is about parcels waiting for a courier.\n"
+        "  - SCOPED TO AN ORDER STAGE ('faktury do wysłania w zamówieniach nie nowych', 'jakie "
+        "faktury muszę wystawić do wysłanych zamówień', 'brakujące faktury w zamówieniach, których "
+        "jeszcze nie wysłałem') → the SAME tool with its stage filter: a positive stage goes to "
+        "fulfillment_status, a negated one ('nie nowych', 'niewysłanych') to "
+        "exclude_fulfillment_status. Never drop the stage and never answer a negation with one "
+        "positive status — both turn a scoped question into the month's whole pending list, which "
+        "reads like a real answer.\n"
         "• ISSUE/CREATE invoice(s) — ONLY with an explicit issuance verb ('wystaw fakturę/faktury', "
         "'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X'):\n"
         "  - ONE specific order named (a concrete order_id from context or given directly by the "
@@ -2052,6 +2062,44 @@ class AllegroAgent(BaseAgent):
     @classmethod
     def _fulfillment_pl(cls, status: str | None) -> str:
         return cls._FULFILLMENT_PL.get(status or "", status or "—")
+
+    @classmethod
+    def _stage_scope_note(cls, keep: list[str], drop: list[str]) -> str:
+        """The order-stage scope a listing actually ran with, as a phrase to put
+        inside its own count/empty sentence: " w innym statusie niż nowe".
+
+        Exists for the same reason as _filter_scope_note, and words the
+        exclusion exactly as that one does: the count and empty sentences ARE
+        the answer to a scoped question (see _PASSTHROUGH_TOOLS), so an empty
+        one that drops the scope — "Brak zamówień wymagających wystawienia
+        faktury." — is indistinguishable from owing nobody an invoice at all,
+        which is a different and usually false statement.
+        """
+        parts: list[str] = []
+        if keep:
+            parts.append("w statusie " + ", ".join(
+                cls._fulfillment_pl(status).lower() for status in keep
+            ))
+        if drop:
+            parts.append("w innym statusie niż " + ", ".join(
+                cls._fulfillment_pl(status).lower() for status in drop
+            ))
+        return (" " + " i ".join(parts)) if parts else ""
+
+    @staticmethod
+    def _stage_filter(tool_input: dict[str, Any], key: str) -> list[str]:
+        """One stage filter off a tool call, as a list of Allegro statuses.
+
+        A single string is accepted as well as a list: get_orders' own
+        fulfillment_status is one status (see _ORDER_PARAMS in
+        allegro_tools.py), so a model that has seen that schema will sooner or
+        later pass a bare "SENT" here too. Reading it as a one-element list is
+        exactly what it means; rejecting it would drop the scope silently.
+        """
+        raw = tool_input.get(key) or ()
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(v).upper() for v in raw if str(v).strip()]
 
     _PUBLICATION_PL: dict[str, str] = {
         "ACTIVE":    "Aktywna",
@@ -4866,12 +4914,25 @@ class AllegroAgent(BaseAgent):
             return await self._find_buyer_by_contact(tool_input)
 
         if tool_name == "get_orders_pending_invoice":
+            # The stage scope ("faktury do wysłania w zamówieniach nie nowych")
+            # narrows WHICH orders are asked about, so it has to reach both the
+            # fetch and the sentences that report the result — an unscoped
+            # "Brak zamówień…" for a scoped question says something else
+            # entirely. See _stage_scope_note.
+            keep = self._stage_filter(tool_input, "fulfillment_status")
+            drop = self._stage_filter(tool_input, "exclude_fulfillment_status")
+            scope = self._stage_scope_note(keep, drop)
             orders = await self._allegro.get_orders_needing_invoice(
                 month=tool_input.get("month"),
                 year=tool_input.get("year"),
+                fulfillment_status=keep,
+                exclude_fulfillment_status=drop,
             )
             if not orders:
-                return "Brak zamówień wymagających wystawienia faktury." + "\n\n" + await self._invoice_reminder_status_block()
+                return (
+                    f"Brak zamówień wymagających wystawienia faktury{scope}."
+                    + "\n\n" + await self._invoice_reminder_status_block()
+                )
             # Fetch invoice address data for all orders in parallel
             inv_results = await asyncio.gather(
                 *[self._allegro.get_order_invoice_data(o.order_id) for o in orders],
@@ -4886,7 +4947,7 @@ class AllegroAgent(BaseAgent):
                 invoice_ledger.user_id_of(self._allegro), [o.order_id for o in orders]
             )
             not_issued = sum(1 for o in orders if o.order_id not in issued)
-            header = f"**Zamówień bez faktury: {not_issued}**"
+            header = f"**Zamówień bez faktury{scope}: {not_issued}**"
             if issued:
                 header += (
                     f" (+{len(issued)}, dla których faktura już istnieje, ale nie jest dołączona "

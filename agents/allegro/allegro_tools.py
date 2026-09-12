@@ -14,6 +14,17 @@ import re
 # chat text while "zamówienia do wysłania" came back as a markdown table the
 # frontend then rendered as a document artifact — the same question answered
 # in two different shapes depending on which preset the model happened to pick.
+# Every fulfillment stage an Allegro order can be at, in the order it moves
+# through them. One list, because three different tools now let the seller
+# scope a question to a stage (get_orders, get_orders_delivery and — for
+# "faktury do wysłania w zamówieniach nie nowych" — get_orders_pending_invoice)
+# and a stage missing from one of their enums is a stage the model cannot name
+# there, whatever the seller asked.
+_FULFILLMENT_STATUSES: tuple[str, ...] = (
+    "NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT",
+    "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED",
+)
+
 _ORDER_PARAMS: dict[str, dict] = {
     "status": {
         "type": "string",
@@ -40,13 +51,7 @@ _ORDER_PARAMS: dict[str, dict] = {
     },
     "exclude_fulfillment_status": {
         "type": "array",
-        "items": {
-            "type": "string",
-            "enum": [
-                "NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT",
-                "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED",
-            ],
-        },
+        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
         "description": (
             "NEGATED stage filter — return every order whose fulfillment status is NOT one of "
             "these. A negated question is never one status, it is everything except one: "
@@ -894,7 +899,20 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Find all paid orders for a given month where the buyer requested a VAT invoice "
                 "but the seller has not yet uploaded one. Defaults to the current month. "
-                "Use when asked about missing invoices or invoice obligations."
+                "Use when asked about missing invoices or invoice obligations — 'jakie mam "
+                "faktury do wystawienia', 'jakie faktury mam do wysłania', 'brakujące faktury', "
+                "'zaległe faktury', 'do których zamówień muszę wystawić fakturę', 'komu jeszcze "
+                "nie wysłałem faktury'. "
+                "'FAKTURY DO WYSŁANIA' IS THIS TOOL, NOT A SHIPPING QUESTION: 'do wysłania' names "
+                "the DOCUMENT the seller still owes the buyer, so it is the invoice listing — "
+                "never get_orders_delivery, whose 'do wysłania' is about PARCELS waiting for the "
+                "courier and which knows nothing about invoices. "
+                "SCOPED TO AN ORDER STAGE — fulfillment_status / exclude_fulfillment_status: a "
+                "seller very often asks only about part of their orders ('faktury do wysłania w "
+                "zamówieniach nie nowych', 'jakie faktury muszę wystawić do wysłanych zamówień', "
+                "'brakujące faktury w zamówieniach, których jeszcze nie wysłałem'). That stage is "
+                "a FILTER and must be passed on — dropped, the reply lists every pending invoice "
+                "of the month, which reads like a real answer to a question nobody asked."
             ),
             "parameters": {
                 "type": "object",
@@ -906,6 +924,36 @@ ALLEGRO_TOOLS: list[dict] = [
                     "year": {
                         "type": "integer",
                         "description": "4-digit year. Defaults to current year.",
+                    },
+                    "fulfillment_status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
+                        "description": (
+                            "Keep only orders at one of these fulfillment stages — the POSITIVE "
+                            "stage scope ('faktury w nowych zamówieniach' → ['NEW'], 'w "
+                            "zamówieniach do wysłania / spakowanych' → ['READY_FOR_SHIPMENT'], "
+                            "'w zamówieniach w realizacji' → ['PROCESSING']). "
+                            "A LIST, not one status, because a stage the seller names is often a "
+                            "family: 'w wysłanych zamówieniach' means every parcel that has left "
+                            "— ['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'] — and "
+                            "answering it with SENT alone silently drops the orders already "
+                            "delivered, whose invoice is the most overdue of all. "
+                            "For a NEGATED scope use exclude_fulfillment_status instead."
+                        ),
+                    },
+                    "exclude_fulfillment_status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
+                        "description": (
+                            "Drop orders at these fulfillment stages — the NEGATED stage scope. "
+                            "A negation is never one status, it is everything except one: "
+                            "'w zamówieniach nie nowych' / 'poza nowymi' → exclude ['NEW'], "
+                            "'w zamówieniach, których nie wysłałem' → exclude ['SENT', "
+                            "'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'], 'w nieodebranych' → "
+                            "exclude ['PICKED_UP']. Never answer a negated scope with "
+                            "fulfillment_status: naming one stage where the seller excluded one "
+                            "hides every other stage they did ask about."
+                        ),
                     },
                 },
             },

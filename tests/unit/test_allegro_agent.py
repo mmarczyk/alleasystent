@@ -827,6 +827,110 @@ class TestCancelledOrdersAreNeverListed:
         assert "`anulowane`" in result
 
 
+class TestPendingInvoicesScopedToAStage:
+    """"Jakie mam faktury do wysłania w zamówieniach nie nowych" — an invoice
+    question narrowed to part of the seller's orders. The stage has to reach
+    the fetch AND the sentences that report the result: an unscoped "Brak
+    zamówień wymagających wystawienia faktury." answers a question nobody
+    asked, and is indistinguishable from owing nobody an invoice at all."""
+
+    def _agent(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders_needing_invoice = AsyncMock(return_value=orders)
+        agent._allegro.get_order_invoice_data = AsyncMock(return_value={})
+        agent._allegro._user_id = "u1"
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_a_negated_stage_reaches_the_fetch(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs == {
+            "month": None, "year": None,
+            "fulfillment_status": [], "exclude_fulfillment_status": ["NEW"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_positive_stage_reaches_the_fetch(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            await agent._dispatch(
+                "get_orders_pending_invoice",
+                {"fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]},
+            )
+
+        kwargs = agent._allegro.get_orders_needing_invoice.await_args.kwargs
+        assert kwargs["fulfillment_status"] == [
+            "SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP",
+        ]
+        assert kwargs["exclude_fulfillment_status"] == []
+
+    @pytest.mark.asyncio
+    async def test_one_status_as_a_bare_string_is_read_as_a_list(self):
+        """get_orders' own fulfillment_status is a single status, so a model
+        that has seen that schema will pass a bare string here too. Reading it
+        as a one-element list is what it means; rejecting it would drop the
+        scope silently."""
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"fulfillment_status": "sent"},
+            )
+
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs[
+            "fulfillment_status"
+        ] == ["SENT"]
+        assert "w statusie wysłane" in result
+
+    @pytest.mark.asyncio
+    async def test_the_header_names_the_scope(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert "**Zamówień bez faktury w innym statusie niż nowe: 1**" in result
+
+    @pytest.mark.asyncio
+    async def test_an_empty_scoped_answer_says_what_was_scoped(self):
+        agent = self._agent([])
+
+        with patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert result.startswith(
+            "Brak zamówień wymagających wystawienia faktury w innym statusie niż nowe."
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unscoped_question_reads_exactly_as_before(self):
+        agent = self._agent([])
+
+        with patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch("get_orders_pending_invoice", {})
+
+        assert result.startswith("Brak zamówień wymagających wystawienia faktury.")
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs == {
+            "month": None, "year": None,
+            "fulfillment_status": [], "exclude_fulfillment_status": [],
+        }
+
+
 class TestGetOrderDetailsDispatch:
     """_dispatch's get_order_details branch now builds the final, ready-to-
     display plain-text bullet list directly in Python instead of handing
