@@ -1079,7 +1079,10 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "The BUYER view of a period: one row per CUSTOMER instead of one row per order — "
                 "who bought, how many orders, for how much in total, when they last bought, and "
-                "how many of their orders already have a VAT invoice. "
+                "how many of their orders already have a VAT invoice. The summary under the "
+                "table also states the period's totals plus the AVERAGE ORDER VALUE and the "
+                "average number of pieces per order, so 'średnia wartość zamówienia u moich "
+                "klientów' needs no second tool. "
                 "USE THIS for any question about the buyers themselves: 'lista kupujących', "
                 "'lista klientów', 'kto u mnie kupował', 'ilu miałem klientów', 'moi najlepsi "
                 "klienci', 'stali klienci', 'kto kupuje najwięcej', 'jakie firmy u mnie kupowały', "

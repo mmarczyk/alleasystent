@@ -2827,6 +2827,7 @@ class AllegroAgent(BaseAgent):
                     "order_list": [],
                     "orders": 0,
                     "value": 0.0,
+                    "items": 0,
                     "currency": order.currency,
                     "invoices": 0,
                     "last_bought": "",
@@ -2850,6 +2851,7 @@ class AllegroAgent(BaseAgent):
                 group["logins"].append(order.buyer_login)
             group["orders"] += 1
             group["value"] += order.total_price
+            group["items"] += sum(li.quantity for li in order.line_items)
             if invoice_flags.get(order.order_id) is True:
                 group["invoices"] += 1
             # Kept as the raw UTC ISO string: it is both what sorts correctly
@@ -2962,6 +2964,7 @@ class AllegroAgent(BaseAgent):
 
         total_orders = sum(g["orders"] for g in buyers)
         total_value = sum(g["value"] for g in buyers)
+        total_items = sum(g["items"] for g in buyers)
         # Kept short on purpose: this sentence IS the chat bubble (the table goes
         # to the document viewer), and the preview cuts off at 220 characters.
         # Phrased as a noun phrase, not "kupowało u Ciebie N…": the Polish verb
@@ -2975,6 +2978,19 @@ class AllegroAgent(BaseAgent):
             f"{self._plural_pl(total_orders, 'zamówienie', 'zamówienia', 'zamówień')} "
             f"na **{self._format_price(total_value)}**."
         )
+        # Averages per ORDER, not per buyer: "ile średnio wychodzi jedno
+        # zamówienie" is the figure a seller compares between periods, while a
+        # per-buyer average moves on its own every time a one-off customer joins
+        # the list. Both are computed over ALL buyers in the period, like the
+        # totals above — not just the rows the table had room for.
+        if total_orders:
+            avg_value = self._format_price(total_value / total_orders)
+            # Pieces only when Allegro actually sent line items: "0,0 szt."
+            # would read as "sprzedałem nic", which is a different claim from
+            # "nie wiem, ile sztuk".
+            avg_qty = f"{total_items / total_orders:.1f}".replace(".", ",")
+            avg_items = f" i **{avg_qty} szt.**" if total_items else ""
+            summary += f" Średnio **{avg_value}**{avg_items} na zamówienie."
         if len(shown) < len(buyers):
             summary += f" W tabeli pokazano pierwszych {len(shown)}."
         unknown = sum(1 for value in flags.values() if value is None)
