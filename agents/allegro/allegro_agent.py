@@ -12,12 +12,14 @@ import json
 import logging
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from agents.allegro.allegro_tools import (
     ALLEGRO_TOOLS,
+    TOOL_FILTERS,
     TOOL_OUTPUT_FORMAT,
     matched_labels,
     named_buyer_login,
@@ -26,6 +28,8 @@ from agents.allegro.allegro_tools import (
 )
 from agents.allegro.deterministic_dispatch import (
     extract_value_bounds,
+    names_a_product,
+    names_an_order_stage,
     resolve_deterministic,
     wants_latest_order_details,
 )
@@ -107,6 +111,54 @@ _BUYER_LOGIN_TOOLS = frozenset(
     t["function"]["name"] for t in ALLEGRO_TOOLS
     if "buyer_login" in t["function"]["parameters"].get("properties", {})
 )
+# ── A narrowing the chosen tool has no parameter for ────────────────────────
+# The seller's question carries a filter — an amount, a product, a buyer
+# account, an order stage — and the tool that would answer it has nothing to
+# put that filter in. Answering anyway hands back a WIDER list than the
+# question asked for with nothing saying so, and that list reads like the
+# answer: "jakie mam faktury do wysłania powyżej 500 zł" came back as every
+# pending invoice of the month, the amount gone without a trace.
+#
+# So the turn stops and asks instead — the same shape as the buyer-login guard
+# above, which is this one's special case, and as ask_clarifying_question.
+# What each tool CAN narrow by is declared once, off the schemas
+# (allegro_tools.TOOL_FILTERS); what the query NAMES is read by the same
+# extractors the deterministic layer uses, so the guard and the dispatcher
+# always agree on what the wording means.
+_FILTER_DETECTORS: tuple[tuple[str, Callable[[str], bool]], ...] = (
+    ("value",   lambda q: bool(extract_value_bounds(q))),
+    ("product", names_a_product),
+    ("buyer",   lambda q: bool(named_buyer_login(q))),
+    ("stage",   names_an_order_stage),
+)
+_FILTER_LABEL_PL: dict[str, str] = {
+    "value":   "kwocie zamówienia",
+    "product": "produkcie w zamówieniu",
+    "buyer":   "koncie kupującego",
+    "stage":   "etapie realizacji zamówienia",
+}
+# OPT-IN, and deliberately so: a tool is guarded only once someone has written
+# down what its unnarrowed answer actually is, in the seller's words, because
+# that sentence is the question they get asked. A tool missing here behaves
+# exactly as it always did.
+#
+# Do not add a listing preset (get_orders & co.) without reading the CAUTION on
+# TOOL_FILTERS first — those narrow by more than their schema admits, so the
+# guard would refuse questions they can in fact answer.
+# This guard's own question, recognised in the previous assistant turn. It asks
+# ONCE: a seller who restates the filter ("tak, ale te powyżej 500 zł") has
+# already read that it cannot be applied, and asking again would be a loop with
+# no way out. The second time round they get the wider answer they were
+# offered, which is now an answer to a question they did say yes to.
+_ASSISTANT_ASKED_ABOUT_FILTER_RE = re.compile(r"nie mam na to filtra", re.IGNORECASE)
+
+_UNFILTERABLE_FALLBACK: dict[str, str] = {
+    "get_orders_pending_invoice": "Pokazać wszystkie zaległe faktury z tego miesiąca?",
+    "preview_pending_invoices": (
+        "Przygotować podgląd danych dla wszystkich zaległych faktur z tego miesiąca?"
+    ),
+}
+
 # The calendar-date half of a "YYYY-MM-DD HH:MM" local filter (see
 # AllegroAgent._filter_scope_note).
 _LOCAL_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
@@ -561,6 +613,12 @@ class AllegroAgent(BaseAgent):
         "ANTI-HALLUCINATION — Allegro offer IDs are always 11-digit numbers (e.g. '12345678901'). "
         "If you find yourself writing UUID-format IDs (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), "
         "STOP — you are hallucinating. Call get_active_offers instead. "
+        "A FILTER THE TOOL DOES NOT HAVE — CRITICAL: before calling a tool, check that it has a "
+        "parameter for every narrowing the user named (amount, product, buyer account, order "
+        "stage, period). If it does not, call ask_clarifying_question: say what you cannot narrow "
+        "by and ask whether to show the wider answer instead. Calling the tool anyway drops the "
+        "filter without a trace and the wider list reads like the answer — that is worse than not "
+        "answering. "
         "ANTI-HALLUCINATION — TOOL NAMES: only call a tool whose exact name appears in your tool list. "
         "Never invent a plausible-sounding tool name (e.g. 'get_orders_by_courier') just because it "
         "matches the phrasing of the question — find the closest EXISTING tool from the MANDATORY TOOL "
@@ -972,6 +1030,17 @@ class AllegroAgent(BaseAgent):
                 det_match = resolve_deterministic(query, query_labels)
         if det_match is not None:
             det_tool, det_input = det_match
+            # The matchers resolve the filters they CAN read; this catches the
+            # ones the chosen tool has no parameter for at all (see
+            # _unsupported_filter_question) — e.g. an amount on the pending
+            # invoice listing, which would otherwise be dropped in silence.
+            unsupported = self._unsupported_filter_question({det_tool}, query)
+            if unsupported is not None:
+                perf.log(result="ask_clarifying_question")
+                return AgentResponse(
+                    text=unsupported, agent_type=self.agent_name,
+                    metadata={"output_format": "chat"},
+                )
             det_input = self._with_value_bounds(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
@@ -1093,6 +1162,17 @@ class AllegroAgent(BaseAgent):
                     perf.log(result="ask_clarifying_question")
                     return AgentResponse(
                         text=question, agent_type=self.agent_name,
+                        metadata={"output_format": "chat"},
+                    )
+
+                # The same thing for every other narrowing the query names and
+                # the chosen tool cannot apply — the buyer-login guard above is
+                # this one's first and most costly special case.
+                unsupported = self._unsupported_filter_question(called_now, query)
+                if unsupported is not None:
+                    perf.log(result="ask_clarifying_question")
+                    return AgentResponse(
+                        text=unsupported, agent_type=self.agent_name,
                         metadata={"output_format": "chat"},
                     )
 
@@ -1352,6 +1432,39 @@ class AllegroAgent(BaseAgent):
         if not orders:
             return "get_new_orders", {"limit": 1}
         return "get_order_details", {"order_id": orders[0].order_id}
+
+    def _unsupported_filter_question(self, tool_names: set[str], query: str) -> str | None:
+        """The question to ask INSTEAD of answering, when `query` narrows the
+        answer in a way none of the tools about to run can apply — or None when
+        every narrowing it names can be served.
+
+        See _UNFILTERABLE_FALLBACK above for why this asks rather than answers:
+        the wider listing is not a partial answer, it is a different one, and
+        the seller has no way to tell from reading it.
+        """
+        if _ASSISTANT_ASKED_ABOUT_FILTER_RE.search(self._last_assistant_text or ""):
+            return None  # asked on the previous turn — see the regex's comment
+        for tool in sorted(tool_names):
+            fallback = _UNFILTERABLE_FALLBACK.get(tool)
+            if not fallback:
+                continue
+            supported = TOOL_FILTERS.get(tool, frozenset())
+            missing = [
+                dimension for dimension, detect in _FILTER_DETECTORS
+                if dimension not in supported and detect(query)
+            ]
+            if not missing:
+                continue
+            labels = " ani po ".join(_FILTER_LABEL_PL[d] for d in missing)
+            logger.info(
+                "[allegro] filter guard: %s cannot narrow by %s — asking | query=%.80r",
+                tool, missing, query,
+            )
+            return (
+                f"Nie umiem zawęzić tej odpowiedzi po {labels} — nie mam na to filtra, "
+                f"więc pokazałbym więcej, niż pytasz. {fallback}"
+            )
+        return None
 
     def _with_value_bounds(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
         """Put an order amount the seller stated back onto an order listing the

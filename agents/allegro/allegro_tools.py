@@ -1772,7 +1772,16 @@ ALLEGRO_TOOLS: list[dict] = [
                 "plainly, in one sentence and in the user's language, that you cannot answer this "
                 "one and what would be needed. Reaching for the nearest listing instead is the "
                 "worst available answer: the user reads it as the figure they asked for, and "
-                "nothing in the reply tells them it is not."
+                "nothing in the reply tells them it is not. "
+                "AND call this for the case in between the two — a tool that answers a WIDER "
+                "question than the one asked, because the user named a filter it has no parameter "
+                "for (an amount, a product, a buyer account, an order stage… — check the chosen "
+                "tool's parameters before you call it). Do NOT call that tool and do NOT quietly "
+                "drop the filter: say in one sentence what you cannot narrow by, then ask whether "
+                "to show the wider answer instead (e.g. 'Nie umiem zawęzić tej listy po kwocie "
+                "zamówienia — pokazać wszystkie zaległe faktury z tego miesiąca?'). The wider "
+                "listing is not a partial answer, it is a different one, and the user cannot tell "
+                "from reading it."
             ),
             "parameters": {
                 "type": "object",
@@ -1889,6 +1898,43 @@ def resolve_output_format(tool_names: list[str]) -> str:
         if fmt in formats:
             return fmt
     return "chat"
+
+
+# ── What a tool can actually NARROW an answer by ────────────────────────────
+# A seller's question usually carries a narrowing — an amount, a product, a
+# buyer account, an order stage — and the tool that answers it either has a
+# parameter for that narrowing or it does not. When it does not, the filter is
+# dropped and the seller is handed a WIDER answer than they asked for, with
+# nothing in the reply saying so; that is the failure shape this whole module
+# is written against, and the one thing worse than not answering.
+#
+# So the capability is declared here, once, and read off the schemas
+# themselves (the same trick as _BUYER_LOGIN_TOOLS in allegro_agent.py): a
+# parameter added to a tool automatically widens what that tool is considered
+# able to answer, and nothing has to be kept in sync by hand. The guard that
+# uses it — AllegroAgent._unsupported_filter_question — turns a question it
+# cannot narrow into a stop-and-ask instead of a wider listing.
+#
+# CAUTION for anything that goes through AllegroAgent._orders_listing: those
+# tools filter by amount and product even where their own schema does not say
+# so (_with_value_bounds injects the bounds in Python), so their entry here
+# understates them. It costs nothing today — the guard is opt-in per tool, see
+# _UNFILTERABLE_FALLBACK — but a listing preset added to it needs its extra
+# filters declared first.
+_FILTER_PARAMS: dict[str, tuple[str, ...]] = {
+    "value":   ("min_value", "max_value"),
+    "product": ("product_names", "names"),
+    "buyer":   ("buyer_login",),
+    "stage":   ("fulfillment_status", "exclude_fulfillment_status"),
+}
+
+TOOL_FILTERS: dict[str, frozenset[str]] = {
+    t["function"]["name"]: frozenset(
+        dimension for dimension, params in _FILTER_PARAMS.items()
+        if set(params) & set(t["function"]["parameters"].get("properties", {}))
+    )
+    for t in ALLEGRO_TOOLS
+}
 
 
 # ── Tool-select context filter ──────────────────────────────────────────────

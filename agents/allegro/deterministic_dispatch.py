@@ -684,6 +684,22 @@ def _match_orders_pending_invoice(query: str) -> dict | None:
     return None
 
 
+def names_an_order_stage(query: str) -> bool:
+    """True when `query` narrows the answer to an order STAGE, named either
+    positively ("w wysłanych zamówieniach") or under a negation ("nie nowych").
+
+    Exported for the guard in AllegroAgent.run() that refuses to answer with a
+    wider listing than the question asked for: a tool with no stage parameter
+    cannot serve such a question, and the seller has to be told that rather
+    than handed the unnarrowed list.
+
+    Blanks the invoice phrase out first for the same reason the matcher above
+    does — "faktury DO WYSŁANIA" is not a stage.
+    """
+    positive, negated = _stage_hits(_INVOICE_PHRASE_RE.sub(" ", query))
+    return bool(positive or negated)
+
+
 # ── wiadomosci: get_message_threads (list/count only — never content) ──────
 _MESSAGES_TOPIC_RE = re.compile(r"wiadomo", re.IGNORECASE)
 _MESSAGES_CONTENT_BAIL_RE = re.compile(
