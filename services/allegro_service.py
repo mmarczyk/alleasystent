@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -59,6 +60,21 @@ INVOICE_FILE_MAX_BYTES = 3 * 1024 * 1024
 # (Allegro cancels an unpaid order well within it), short enough to keep the
 # fetch small.
 _PAID_WINDOW_BACKDATE_DAYS = 30
+
+# The checkout-form status of an order that actually exists for the seller.
+#
+# Allegro keeps a checkout form from the moment a buyer clicks "kupuję", long
+# before there is anything for the seller to do with it: BOUGHT (the buyer has
+# not filled the form in) and FILLED_IN (filled in, not paid) are baskets in
+# progress, not orders. Only READY_FOR_PROCESSING is Allegro saying the order
+# is the seller's to handle — which includes cash-on-delivery, paid on receipt
+# and therefore carrying no payment date of its own.
+#
+# So a fetch that names no status gets this one rather than "every form Allegro
+# holds": an unpaid basket must not be counted, listed, invoiced, or matched to
+# a buyer's message anywhere. A caller that wants a different status (the
+# cancelled listing) still passes it and gets exactly that.
+ORDER_STATUS_READY = "READY_FOR_PROCESSING"
 
 
 def decode_token_scopes(access_token: str | None) -> list[str] | None:
@@ -699,10 +715,12 @@ class AllegroService:
         #
         # Every OTHER filter the caller passed is forwarded to that fetch. It
         # used to be dropped (buyer_login, fulfillment_status, line_items_sent
-        # and the boughtAt bounds all vanished, and the status was forced to
-        # READY_FOR_PROCESSING), so "czy w tym roku kupował ode mnie ktoś z
-        # konta np1988" — a buyer_login + payment-period call — came back as
-        # the whole store's last week, the login silently ignored.
+        # and the boughtAt bounds all vanished), so "czy w tym roku kupował ode
+        # mnie ktoś z konta np1988" — a buyer_login + payment-period call —
+        # came back as the whole store's last week, the login silently ignored.
+        # The status is the one argument this call fills in for a caller that
+        # left it out, and it fills in the same one either way (see
+        # ORDER_STATUS_READY) — never a filter of its own invention.
         #
         # The window start is derived from paid_at_gte instead of a fixed
         # "last 7 days", which made any period longer than a week unanswerable.
@@ -723,7 +741,7 @@ class AllegroService:
                 window_from - timedelta(days=_PAID_WINDOW_BACKDATE_DAYS)
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
             raw = await self.get_orders(
-                status=status or "READY_FOR_PROCESSING",
+                status=status or ORDER_STATUS_READY,
                 buyer_login=buyer_login,
                 fulfillment_status=fulfillment_status,
                 line_items_sent=line_items_sent,
@@ -738,9 +756,11 @@ class AllegroService:
                 result = [o for o in result if (o.paid_at or "") <= paid_at_lte]
             return result[:limit]
 
-        base_params: dict[str, Any] = {}
-        if status:
-            base_params["status"] = status
+        # An unpaid basket is not an order (see ORDER_STATUS_READY): the fetch
+        # asks Allegro for real ones, so nothing downstream — a listing, a
+        # count, an invoice run, a thread→order match — has to know that
+        # BOUGHT and FILLED_IN forms exist.
+        base_params: dict[str, Any] = {"status": status or ORDER_STATUS_READY}
         if buyer_login:
             base_params["buyer.login"] = buyer_login
         if fulfillment_status:
@@ -804,7 +824,7 @@ class AllegroService:
         offset = 0
         while True:
             params: dict[str, Any] = {
-                "status": "READY_FOR_PROCESSING",
+                "status": ORDER_STATUS_READY,
                 "lineItems.boughtAt.gte": date_from,
                 "lineItems.boughtAt.lte": date_to,
                 "limit": page_size,
@@ -992,6 +1012,8 @@ class AllegroService:
         month: int | None = None,
         year: int | None = None,
         shipped_only: bool = False,
+        fulfillment_status: Sequence[str] | None = None,
+        exclude_fulfillment_status: Sequence[str] | None = None,
     ) -> list[AllegroOrder]:
         """
         Return orders for the given month (default: current month) where:
@@ -1001,6 +1023,14 @@ class AllegroService:
             (fulfillment.status SENT or PICKED_UP) — used by the invoice
             reminder (services/invoice_reminder.py), which only nags about
             orders that already shipped, not ones still being packed.
+          - if fulfillment_status / exclude_fulfillment_status: the order is
+            (not) at one of those fulfillment stages — the seller scoping the
+            question to part of their orders ("faktury do wysłania w
+            zamówieniach nie nowych"). Both are LISTS because a stage a seller
+            names is often a family: "wysłane" covers SENT, IN_TRANSIT,
+            READY_FOR_PICKUP and PICKED_UP alike, and answering it with SENT
+            alone would drop the parcels already at the buyer's — orders whose
+            invoice is the most overdue of all.
         Paginates through all orders for the month, then checks invoice status.
         """
         import calendar
@@ -1018,7 +1048,7 @@ class AllegroService:
         offset = 0
         while True:
             page = await self.get_orders(
-                status="READY_FOR_PROCESSING",
+                status=ORDER_STATUS_READY,
                 bought_at_gte=first_day,
                 bought_at_lte=last_day,
                 limit=page_size,
@@ -1033,6 +1063,21 @@ class AllegroService:
         candidates = [o for o in all_orders if o.invoice_required]
         if shipped_only:
             candidates = [o for o in candidates if o.fulfillment_status in ("SENT", "PICKED_UP")]
+        # The stage filters run HERE, before the per-order invoice lookups
+        # below: those are one Allegro request each, and an order the seller
+        # scoped out is one we must not pay for.
+        keep = {str(st).upper() for st in (fulfillment_status or ())}
+        drop = {str(st).upper() for st in (exclude_fulfillment_status or ())}
+        # A cancelled order is never invoiced — there is nothing to document —
+        # so it stays out of this listing the same way it stays out of every
+        # order listing (see AllegroAgent._orders_listing). It matters most for
+        # a NEGATED scope ("w zamówieniach nie nowych"), whose whole meaning is
+        # "everything except X" and which would otherwise sweep them in.
+        if "CANCELLED" not in keep:
+            drop = drop | {"CANCELLED"}
+        if keep:
+            candidates = [o for o in candidates if (o.fulfillment_status or "") in keep]
+        candidates = [o for o in candidates if (o.fulfillment_status or "") not in drop]
 
         # Keep only those without any uploaded invoice. Asked of Allegro live,
         # never from a cache (see get_order_invoices), at bounded concurrency so

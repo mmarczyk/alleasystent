@@ -12,12 +12,14 @@ import json
 import logging
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from agents.allegro.allegro_tools import (
     ALLEGRO_TOOLS,
+    TOOL_FILTERS,
     TOOL_OUTPUT_FORMAT,
     matched_labels,
     named_buyer_login,
@@ -26,6 +28,8 @@ from agents.allegro.allegro_tools import (
 )
 from agents.allegro.deterministic_dispatch import (
     extract_value_bounds,
+    names_a_product,
+    names_an_order_stage,
     resolve_deterministic,
     wants_latest_order_details,
 )
@@ -107,6 +111,54 @@ _BUYER_LOGIN_TOOLS = frozenset(
     t["function"]["name"] for t in ALLEGRO_TOOLS
     if "buyer_login" in t["function"]["parameters"].get("properties", {})
 )
+# ── A narrowing the chosen tool has no parameter for ────────────────────────
+# The seller's question carries a filter — an amount, a product, a buyer
+# account, an order stage — and the tool that would answer it has nothing to
+# put that filter in. Answering anyway hands back a WIDER list than the
+# question asked for with nothing saying so, and that list reads like the
+# answer: "jakie mam faktury do wysłania powyżej 500 zł" came back as every
+# pending invoice of the month, the amount gone without a trace.
+#
+# So the turn stops and asks instead — the same shape as the buyer-login guard
+# above, which is this one's special case, and as ask_clarifying_question.
+# What each tool CAN narrow by is declared once, off the schemas
+# (allegro_tools.TOOL_FILTERS); what the query NAMES is read by the same
+# extractors the deterministic layer uses, so the guard and the dispatcher
+# always agree on what the wording means.
+_FILTER_DETECTORS: tuple[tuple[str, Callable[[str], bool]], ...] = (
+    ("value",   lambda q: bool(extract_value_bounds(q))),
+    ("product", names_a_product),
+    ("buyer",   lambda q: bool(named_buyer_login(q))),
+    ("stage",   names_an_order_stage),
+)
+_FILTER_LABEL_PL: dict[str, str] = {
+    "value":   "kwocie zamówienia",
+    "product": "produkcie w zamówieniu",
+    "buyer":   "koncie kupującego",
+    "stage":   "etapie realizacji zamówienia",
+}
+# OPT-IN, and deliberately so: a tool is guarded only once someone has written
+# down what its unnarrowed answer actually is, in the seller's words, because
+# that sentence is the question they get asked. A tool missing here behaves
+# exactly as it always did.
+#
+# Do not add a listing preset (get_orders & co.) without reading the CAUTION on
+# TOOL_FILTERS first — those narrow by more than their schema admits, so the
+# guard would refuse questions they can in fact answer.
+# This guard's own question, recognised in the previous assistant turn. It asks
+# ONCE: a seller who restates the filter ("tak, ale te powyżej 500 zł") has
+# already read that it cannot be applied, and asking again would be a loop with
+# no way out. The second time round they get the wider answer they were
+# offered, which is now an answer to a question they did say yes to.
+_ASSISTANT_ASKED_ABOUT_FILTER_RE = re.compile(r"nie mam na to filtra", re.IGNORECASE)
+
+_UNFILTERABLE_FALLBACK: dict[str, str] = {
+    "get_orders_pending_invoice": "Pokazać wszystkie zaległe faktury z tego miesiąca?",
+    "preview_pending_invoices": (
+        "Przygotować podgląd danych dla wszystkich zaległych faktur z tego miesiąca?"
+    ),
+}
+
 # The calendar-date half of a "YYYY-MM-DD HH:MM" local filter (see
 # AllegroAgent._filter_scope_note).
 _LOCAL_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
@@ -296,12 +348,27 @@ class AllegroAgent(BaseAgent):
         "for a pasted order_id gave 50 unrelated orders). If the right tool for that filter is "
         "in your list, call THAT one; if none of the available tools takes it, call "
         "ask_clarifying_question — never answer a 'czy X…' question with 'here is everything'.\n"
+        "…AND THAT IT COMPUTES THE FIGURE ASKED FOR: the same check applies to WHAT is being "
+        "asked, not just what it is filtered by. Units sold, revenue, stock on hand and order "
+        "count are four different numbers, and a tool that returns one of them is a wrong "
+        "answer to a question about another — no matter how well it filters. If no tool "
+        "produces the figure the question names, say so via ask_clarifying_question instead of "
+        "returning the closest thing you can call: an order listing served to 'ile sztuk "
+        "sprzedałem' reads as the answer, and nothing in it reveals that it is not.\n"
         "MANDATORY TOOL CALLS — these question types MUST trigger a tool, never be answered from memory:\n"
         "• Order LIST for a period, no cost/profit/earnings wording — 'lista zamówień', 'pokaż "
         "wszystkie zamówienia z tego miesiąca', 'zamówienia z ostatniego tygodnia' → get_orders "
         "(bought_after/before_local or paid_after/before_local for the period). Do NOT use "
         "get_sales_summary for this — that tool is ONLY for earnings/profit/fee questions "
         "(see BILLING ROUTING below), never for 'just show me the orders'.\n"
+        "• UNITS SOLD of a product in a period — 'ile sztuk sprzedanych dla <produkt>', 'ile "
+        "poszło <produkt> w tym miesiącu', 'ile zeszło włóczki jeans', 'co się najlepiej "
+        "sprzedawało' → get_sold_quantities. This counts PIECES: not get_sales_summary (money, "
+        "products ranked by revenue), not query_offers_by_stock/get_active_offers (stock left "
+        "NOW), and above all not an order listing — a list of orders is not a quantity. When the "
+        "question names several models, pass EACH as its own entry in names ('włóczki jeans i "
+        "jeans plus' → names=['jeans','jeans plus']): they are different products and must not "
+        "be merged into one term.\n"
         "• Order counts / 'ile zamówień' / 'ile jest wszystkich nowych' / 'ile mam nowych' "
         "(user wants a NUMBER, not the list) → get_new_orders with count_only=true. Do NOT return "
         "the whole order list when the user only asked HOW MANY.\n"
@@ -364,6 +431,10 @@ class AllegroAgent(BaseAgent):
         "wysyłać ani fakturować) — nie musisz ich odfiltrowywać, dzieje się to samo. Pytaj o nie "
         "tylko wtedy, gdy sprzedawca prosi wprost ('pokaż anulowane zamówienia' → "
         "fulfillment_status=CANCELLED) — to jedyny przypadek, w którym są pokazywane.\n"
+        "   – NIEOPŁACONE koszyki (kupujący kliknął „kupuję”, ale nie zapłacił) tak samo nie "
+        "trafiają do ŻADNEGO listowania ani do żadnej liczby — dla Allegro to jeszcze nie "
+        "zamówienie, więc też nie musisz ich odfiltrowywać. Zamówienia ZA POBRANIEM są zwykłymi "
+        "zamówieniami (płatność przy odbiorze, więc bez daty opłacenia) i są pokazywane normalnie.\n"
         "   – WARTOŚĆ ('powyżej 400 zł', 'ponad 1000', 'poniżej 50 zł', 'od 100 do 300 zł') → "
         "min_value / max_value on the same listing call, together with whatever stage or negation "
         "the question also names ('niewysłane powyżej 400 zł' → get_orders with "
@@ -452,6 +523,14 @@ class AllegroAgent(BaseAgent):
         "stage, so an order already sent (or not yet packed) is silently excluded, and it has no "
         "amount filter in its preset wording — a real bug seen in production, where 'dostawa "
         "zamówienia ponad 2000 zł' came back as 100 unrelated orders grouped by courier.\n"
+        "• A PRODUCT NAMED IN AN ORDER QUESTION IS A FILTER TOO — 'pokaż zamówienie z wczoraj, "
+        "które miało włóczkę yarnart jeans', 'zamówienia z jeans plus z tego tygodnia', 'kto kupił "
+        "kordonek' → get_orders with product_names=['yarnart jeans'] (the model name, WITHOUT the "
+        "category word 'włóczka'/'przędza') plus the period the question names. Add "
+        "product_match='only' when the question says the order held nothing else ('tylko', "
+        "'wyłącznie', 'same', 'jedynie'). Never answer it with the period's whole listing and "
+        "never with get_sold_quantities — that one returns a units total and never names an "
+        "order, so 'pokaż zamówienie' goes unanswered.\n"
         "• ORDER AMOUNT IS A FILTER, NEVER A HINT — any question naming a value ('powyżej 2000 "
         "zł', 'ponad 500 zł', 'poniżej 100 zł', 'między 500 a 1000 zł', 'najdroższe/największe "
         "zamówienie') MUST pass min_value and/or max_value on the order listing. Never fetch an "
@@ -534,6 +613,12 @@ class AllegroAgent(BaseAgent):
         "ANTI-HALLUCINATION — Allegro offer IDs are always 11-digit numbers (e.g. '12345678901'). "
         "If you find yourself writing UUID-format IDs (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), "
         "STOP — you are hallucinating. Call get_active_offers instead. "
+        "A FILTER THE TOOL DOES NOT HAVE — CRITICAL: before calling a tool, check that it has a "
+        "parameter for every narrowing the user named (amount, product, buyer account, order "
+        "stage, period). If it does not, call ask_clarifying_question: say what you cannot narrow "
+        "by and ask whether to show the wider answer instead. Calling the tool anyway drops the "
+        "filter without a trace and the wider list reads like the answer — that is worse than not "
+        "answering. "
         "ANTI-HALLUCINATION — TOOL NAMES: only call a tool whose exact name appears in your tool list. "
         "Never invent a plausible-sounding tool name (e.g. 'get_orders_by_courier') just because it "
         "matches the phrasing of the question — find the closest EXISTING tool from the MANDATORY TOOL "
@@ -545,8 +630,18 @@ class AllegroAgent(BaseAgent):
         "SEPARATE entry and must be shown as a separate row. Showing 2 rows when there are 5 "
         "entries is WRONG. If the tool says '5 wpisów', show 5 rows, not 2. "
         "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order (no issuance verb) → get_order_invoice_data\n"
-        "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'brakujące faktury' "
-        "(read-only list, nothing created) → get_orders_pending_invoice (includes address automatically)\n"
+        "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'jakie mam faktury "
+        "do wysłania' / 'brakujące faktury' / 'zaległe faktury' (read-only list, nothing created) → "
+        "get_orders_pending_invoice (includes address automatically). 'Faktury do wysłania' is this "
+        "tool too — it is the DOCUMENT the seller still owes, never get_orders_delivery, whose "
+        "'do wysłania' is about parcels waiting for a courier.\n"
+        "  - SCOPED TO AN ORDER STAGE ('faktury do wysłania w zamówieniach nie nowych', 'jakie "
+        "faktury muszę wystawić do wysłanych zamówień', 'brakujące faktury w zamówieniach, których "
+        "jeszcze nie wysłałem') → the SAME tool with its stage filter: a positive stage goes to "
+        "fulfillment_status, a negated one ('nie nowych', 'niewysłanych') to "
+        "exclude_fulfillment_status. Never drop the stage and never answer a negation with one "
+        "positive status — both turn a scoped question into the month's whole pending list, which "
+        "reads like a real answer.\n"
         "• ISSUE/CREATE invoice(s) — ONLY with an explicit issuance verb ('wystaw fakturę/faktury', "
         "'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X'):\n"
         "  - ONE specific order named (a concrete order_id from context or given directly by the "
@@ -937,6 +1032,17 @@ class AllegroAgent(BaseAgent):
                 det_match = resolve_deterministic(query, query_labels)
         if det_match is not None:
             det_tool, det_input = det_match
+            # The matchers resolve the filters they CAN read; this catches the
+            # ones the chosen tool has no parameter for at all (see
+            # _unsupported_filter_question) — e.g. an amount on the pending
+            # invoice listing, which would otherwise be dropped in silence.
+            unsupported = self._unsupported_filter_question({det_tool}, query)
+            if unsupported is not None:
+                perf.log(result="ask_clarifying_question")
+                return AgentResponse(
+                    text=unsupported, agent_type=self.agent_name,
+                    metadata={"output_format": "chat"},
+                )
             det_input = self._with_value_bounds(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
@@ -1058,6 +1164,17 @@ class AllegroAgent(BaseAgent):
                     perf.log(result="ask_clarifying_question")
                     return AgentResponse(
                         text=question, agent_type=self.agent_name,
+                        metadata={"output_format": "chat"},
+                    )
+
+                # The same thing for every other narrowing the query names and
+                # the chosen tool cannot apply — the buyer-login guard above is
+                # this one's first and most costly special case.
+                unsupported = self._unsupported_filter_question(called_now, query)
+                if unsupported is not None:
+                    perf.log(result="ask_clarifying_question")
+                    return AgentResponse(
+                        text=unsupported, agent_type=self.agent_name,
                         metadata={"output_format": "chat"},
                     )
 
@@ -1317,6 +1434,39 @@ class AllegroAgent(BaseAgent):
         if not orders:
             return "get_new_orders", {"limit": 1}
         return "get_order_details", {"order_id": orders[0].order_id}
+
+    def _unsupported_filter_question(self, tool_names: set[str], query: str) -> str | None:
+        """The question to ask INSTEAD of answering, when `query` narrows the
+        answer in a way none of the tools about to run can apply — or None when
+        every narrowing it names can be served.
+
+        See _UNFILTERABLE_FALLBACK above for why this asks rather than answers:
+        the wider listing is not a partial answer, it is a different one, and
+        the seller has no way to tell from reading it.
+        """
+        if _ASSISTANT_ASKED_ABOUT_FILTER_RE.search(self._last_assistant_text or ""):
+            return None  # asked on the previous turn — see the regex's comment
+        for tool in sorted(tool_names):
+            fallback = _UNFILTERABLE_FALLBACK.get(tool)
+            if not fallback:
+                continue
+            supported = TOOL_FILTERS.get(tool, frozenset())
+            missing = [
+                dimension for dimension, detect in _FILTER_DETECTORS
+                if dimension not in supported and detect(query)
+            ]
+            if not missing:
+                continue
+            labels = " ani po ".join(_FILTER_LABEL_PL[d] for d in missing)
+            logger.info(
+                "[allegro] filter guard: %s cannot narrow by %s — asking | query=%.80r",
+                tool, missing, query,
+            )
+            return (
+                f"Nie umiem zawęzić tej odpowiedzi po {labels} — nie mam na to filtra, "
+                f"więc pokazałbym więcej, niż pytasz. {fallback}"
+            )
+        return None
 
     def _with_value_bounds(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
         """Put an order amount the seller stated back onto an order listing the
@@ -1611,6 +1761,17 @@ class AllegroAgent(BaseAgent):
             parts.append(f"o wartości powyżej {cls._format_price(min_value)}")
         elif max_value is not None:
             parts.append(f"o wartości poniżej {cls._format_price(max_value)}")
+        product_names, product_terms, product_only = cls._product_filter(tool_input)
+        if product_terms:
+            products = " lub ".join(f"**{n}**" for n in product_names)
+            # "tylko" is the whole question in "zamówienie, które miało tylko
+            # włóczkę yarnart jeans" — an empty answer that doesn't repeat it
+            # reads as "you sold none of it", which is a different (and
+            # usually false) statement.
+            parts.append(
+                f"zawierających wyłącznie {products}" if product_only
+                else f"z produktem {products}"
+            )
         date_from = cls._local_date(tool_input, "bought_after_local", "paid_after_local")
         date_to = cls._local_date(tool_input, "bought_before_local", "paid_before_local")
         if date_from and date_to:
@@ -1820,6 +1981,100 @@ class AllegroAgent(BaseAgent):
             "```",
         ]
 
+    # How many product rows a no-filter ("ile sztuk sprzedałem w maju") answer
+    # lists before it stops. A seller with a wide catalogue does not want every
+    # SKU pasted into chat; the ones that matter are at the top of a
+    # units-sold ranking.
+    _SOLD_QUANTITIES_TOP_N = 20
+
+    @classmethod
+    def _render_sold_quantities(
+        cls, orders: list, names: list[str], period_label: str,
+    ) -> str:
+        """Units sold per product, grouped under the names the seller asked for.
+
+        Titles are never summed across different offer names. Where one term
+        matches several titles ("jeans" when the catalogue also has "Jeans
+        100g" and "Jeans 50g"), each title keeps its own line under the term's
+        subtotal — the tool cannot know whether two titles are one model, but
+        the seller can see it at a glance, and a single merged number would
+        hide the very distinction they asked about.
+        """
+        from agents.allegro.allegro_tools import match_product_term
+
+        # title → units, plus title → which requested term claimed it.
+        per_title: dict[str, int] = {}
+        title_term: dict[str, str] = {}
+        for order in orders:
+            for li in order.line_items:
+                title = li.offer_name
+                if names:
+                    term = match_product_term(title, names)
+                    if term is None:
+                        continue
+                    title_term[title] = term
+                per_title[title] = per_title.get(title, 0) + int(li.quantity or 0)
+
+        if not per_title:
+            asked = ", ".join(f"„{n}”" for n in names)
+            return (
+                f"W okresie {period_label} nie znalazłem sprzedaży dla: {asked}.\n\n"
+                "Sprawdź, czy nazwa zgadza się z tytułem oferty — dopasowanie idzie po "
+                "całych słowach z tytułu."
+            )
+
+        lines: list[str] = [f"**Sprzedane sztuki — {period_label}**", ""]
+
+        if names:
+            # Seller's own order of terms, so the answer reads back in the
+            # order they asked. Terms that sold nothing are reported at the
+            # end rather than silently dropped — "0" is an answer, absence
+            # looks like an oversight.
+            unmatched: list[str] = []
+            for term in names:
+                titles = sorted(
+                    (t for t, chosen in title_term.items() if chosen == term),
+                    key=lambda t: per_title[t],
+                    reverse=True,
+                )
+                if not titles:
+                    unmatched.append(term)
+                    continue
+                subtotal = sum(per_title[t] for t in titles)
+                lines.append(f"**„{term}” — {subtotal} szt.**")
+                # One title under one term needs no breakdown: the subtotal
+                # line already names the only thing it could be made of.
+                if len(titles) > 1:
+                    lines.extend(f"  - {t} — {per_title[t]} szt." for t in titles)
+                lines.append("")
+            if unmatched:
+                lines.append(
+                    "Brak sprzedaży dla: " + ", ".join(f"„{t}”" for t in unmatched) + "."
+                )
+                lines.append("")
+        else:
+            ranked = sorted(per_title.items(), key=lambda kv: kv[1], reverse=True)
+            shown = ranked[:cls._SOLD_QUANTITIES_TOP_N]
+            lines.extend(f"- {title} — {qty} szt." for title, qty in shown)
+            lines.append("")
+            if len(ranked) > len(shown):
+                lines.append(
+                    f"(pokazano {len(shown)} produktów z {len(ranked)}, "
+                    "od najliczniej sprzedanych)"
+                )
+                lines.append("")
+            lines.append(f"**Razem: {sum(per_title.values())} szt.**")
+            lines.append("")
+
+        # Stated, not assumed: both choices change the number, and a seller
+        # reconciling it against their own records has to know which one they
+        # are looking at.
+        lines.append(
+            "_Liczone ze sprzedanych sztuk w opłaconych zamówieniach z tego okresu; "
+            "anulowane pominięte, zwroty nieodjęte._"
+        )
+        return "\n".join(lines)
+
     @classmethod
     def _render_offers_table(
         cls, aggregated: list[dict], raw: list[dict], name_filter: str | None = None
@@ -1922,6 +2177,44 @@ class AllegroAgent(BaseAgent):
     @classmethod
     def _fulfillment_pl(cls, status: str | None) -> str:
         return cls._FULFILLMENT_PL.get(status or "", status or "—")
+
+    @classmethod
+    def _stage_scope_note(cls, keep: list[str], drop: list[str]) -> str:
+        """The order-stage scope a listing actually ran with, as a phrase to put
+        inside its own count/empty sentence: " w innym statusie niż nowe".
+
+        Exists for the same reason as _filter_scope_note, and words the
+        exclusion exactly as that one does: the count and empty sentences ARE
+        the answer to a scoped question (see _PASSTHROUGH_TOOLS), so an empty
+        one that drops the scope — "Brak zamówień wymagających wystawienia
+        faktury." — is indistinguishable from owing nobody an invoice at all,
+        which is a different and usually false statement.
+        """
+        parts: list[str] = []
+        if keep:
+            parts.append("w statusie " + ", ".join(
+                cls._fulfillment_pl(status).lower() for status in keep
+            ))
+        if drop:
+            parts.append("w innym statusie niż " + ", ".join(
+                cls._fulfillment_pl(status).lower() for status in drop
+            ))
+        return (" " + " i ".join(parts)) if parts else ""
+
+    @staticmethod
+    def _stage_filter(tool_input: dict[str, Any], key: str) -> list[str]:
+        """One stage filter off a tool call, as a list of Allegro statuses.
+
+        A single string is accepted as well as a list: get_orders' own
+        fulfillment_status is one status (see _ORDER_PARAMS in
+        allegro_tools.py), so a model that has seen that schema will sooner or
+        later pass a bare "SENT" here too. Reading it as a one-element list is
+        exactly what it means; rejecting it would drop the scope silently.
+        """
+        raw = tool_input.get(key) or ()
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(v).upper() for v in raw if str(v).strip()]
 
     _PUBLICATION_PL: dict[str, str] = {
         "ACTIVE":    "Aktywna",
@@ -2557,6 +2850,7 @@ class AllegroAgent(BaseAgent):
                     "order_list": [],
                     "orders": 0,
                     "value": 0.0,
+                    "items": 0,
                     "currency": order.currency,
                     "invoices": 0,
                     "last_bought": "",
@@ -2580,6 +2874,7 @@ class AllegroAgent(BaseAgent):
                 group["logins"].append(order.buyer_login)
             group["orders"] += 1
             group["value"] += order.total_price
+            group["items"] += sum(li.quantity for li in order.line_items)
             if invoice_flags.get(order.order_id) is True:
                 group["invoices"] += 1
             # Kept as the raw UTC ISO string: it is both what sorts correctly
@@ -2692,6 +2987,7 @@ class AllegroAgent(BaseAgent):
 
         total_orders = sum(g["orders"] for g in buyers)
         total_value = sum(g["value"] for g in buyers)
+        total_items = sum(g["items"] for g in buyers)
         # Kept short on purpose: this sentence IS the chat bubble (the table goes
         # to the document viewer), and the preview cuts off at 220 characters.
         # Phrased as a noun phrase, not "kupowało u Ciebie N…": the Polish verb
@@ -2705,6 +3001,19 @@ class AllegroAgent(BaseAgent):
             f"{self._plural_pl(total_orders, 'zamówienie', 'zamówienia', 'zamówień')} "
             f"na **{self._format_price(total_value)}**."
         )
+        # Averages per ORDER, not per buyer: "ile średnio wychodzi jedno
+        # zamówienie" is the figure a seller compares between periods, while a
+        # per-buyer average moves on its own every time a one-off customer joins
+        # the list. Both are computed over ALL buyers in the period, like the
+        # totals above — not just the rows the table had room for.
+        if total_orders:
+            avg_value = self._format_price(total_value / total_orders)
+            # Pieces only when Allegro actually sent line items: "0,0 szt."
+            # would read as "sprzedałem nic", which is a different claim from
+            # "nie wiem, ile sztuk".
+            avg_qty = f"{total_items / total_orders:.1f}".replace(".", ",")
+            avg_items = f" i **{avg_qty} szt.**" if total_items else ""
+            summary += f" Średnio **{avg_value}**{avg_items} na zamówienie."
         if len(shown) < len(buyers):
             summary += f" W tabeli pokazano pierwszych {len(shown)}."
         unknown = sum(1 for value in flags.values() if value is None)
@@ -3612,6 +3921,57 @@ class AllegroAgent(BaseAgent):
                 bounds.append(None)
         return bounds[0], bounds[1]
 
+    @staticmethod
+    def _product_filter(tool_input: dict[str, Any]) -> tuple[list[str], list[str], bool]:
+        """The product filter an order listing was asked for: the names as the
+        seller wrote them (for the scope note), the terms to match titles with,
+        and whether the order must contain NOTHING ELSE ('tylko włóczkę yarnart
+        jeans')."""
+        from agents.allegro.allegro_tools import product_filter_terms
+
+        raw = tool_input.get("product_names")
+        if isinstance(raw, str):
+            raw = [raw]
+        names = [str(n).strip() for n in (raw or ()) if str(n).strip()]
+        only = str(tool_input.get("product_match") or "any").strip().lower() == "only"
+        return names, product_filter_terms(names), only
+
+    @staticmethod
+    def _order_has_products(order: Any, terms: list[str], only: bool) -> bool:
+        """Does this order's contents answer the product question?
+
+        `only` is the difference between "an order containing X" and "an order
+        containing nothing but X" — the seller's 'tylko' — so it is checked
+        against EVERY line of the order, not just the matching ones. An order
+        whose lines Allegro didn't return is never a match: a product question
+        answered with an order nobody can see the contents of is a guess.
+        """
+        from agents.allegro.allegro_tools import match_product_term
+
+        lines = list(getattr(order, "line_items", None) or ())
+        if not lines:
+            return False
+        matched = sum(1 for li in lines if match_product_term(li.offer_name or "", terms))
+        if not matched:
+            return False
+        return matched == len(lines) if only else True
+
+    @classmethod
+    def _product_lines(cls, order: Any) -> list[str]:
+        """The order's contents as sub-bullets under a "Produkty:" heading.
+
+        Shown on a product-filtered listing (and only there): the seller asked
+        about what was inside the order, and 'tylko włóczkę yarnart jeans' is
+        a claim they have to be able to check — the bullet's bare "Ilość: 3
+        szt." cannot support it.
+        """
+        lines = list(getattr(order, "line_items", None) or ())
+        if not lines:
+            return []
+        return ["Produkty:"] + [
+            f"  - {li.offer_name} — {int(li.quantity or 0)} szt." for li in lines
+        ]
+
     async def _orders_listing(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """The one order-listing implementation, shared by all three order
         tools. `tool_name` only picks the preset defaults in _ORDERS_PRESETS;
@@ -3645,6 +4005,9 @@ class AllegroAgent(BaseAgent):
             str(v).upper() for v in (tool_input.get("exclude_fulfillment_status") or ())
         ) or preset.get("exclude_fulfillment") or frozenset()
         min_value, max_value = self._value_bounds(tool_input)
+        # The names themselves are only needed by the scope note, which reads
+        # them off tool_input itself (see _filter_scope_note).
+        _, product_terms, product_only = self._product_filter(tool_input)
         # A cancelled order is never part of an answer: there is nothing to
         # pack, send, invoice or count, so listing one only adds a line the
         # seller has to recognise and skip. It is dropped on BOTH statuses
@@ -3654,7 +4017,10 @@ class AllegroAgent(BaseAgent):
         # this matters most for a negated listing, whose whole point is
         # "everything other than X" and which would otherwise sweep them in.
         # The one exception is a question that explicitly asks for cancelled
-        # ones; nothing else could answer it.
+        # ones; nothing else could answer it. (A form cancelled at CHECKOUT
+        # no longer reaches the fetch either — it is not READY_FOR_PROCESSING,
+        # see allegro_service.ORDER_STATUS_READY — so what this drop still
+        # catches is the orders cancelled mid-fulfillment.)
         asked_for_cancelled = "CANCELLED" in {
             str(status or "").upper(), str(fulfillment_status or "").upper()
         }
@@ -3671,6 +4037,7 @@ class AllegroAgent(BaseAgent):
             dispatch_after or dispatch_before
             or (exclude_fulfillment - {"CANCELLED"}) or not fulfillment_status
             or min_value is not None or max_value is not None
+            or bool(product_terms)
         )
         fetch_limit = 100 if narrows_after_fetch else limit
 
@@ -3685,10 +4052,10 @@ class AllegroAgent(BaseAgent):
             paid_at_lte=self._optional_local_to_utc(tool_input.get("paid_before_local")),
             limit=fetch_limit,
         )
-        # A value filter narrows to a handful of orders out of a page of 100,
-        # so an answer built on it has to be able to say "out of the 100 most
-        # recent" rather than implying it saw everything — see value_scan_note
-        # below.
+        # A value or product filter narrows to a handful of orders out of a
+        # page of 100, so an answer built on it has to be able to say "out of
+        # the 100 most recent" rather than implying it saw everything — see
+        # scan_note below.
         scanned = len(orders)
         if exclude_fulfillment:
             orders = [o for o in orders if (o.fulfillment_status or "") not in exclude_fulfillment]
@@ -3700,6 +4067,10 @@ class AllegroAgent(BaseAgent):
             orders = [o for o in orders if (o.total_price or 0) >= min_value]
         if max_value is not None:
             orders = [o for o in orders if (o.total_price or 0) <= max_value]
+        if product_terms:
+            orders = [
+                o for o in orders if self._order_has_products(o, product_terms, product_only)
+            ]
         if preset.get("sort_by_dispatch"):
             # Soonest deadline first — the order the parcels have to be dealt
             # with, not the order they were bought in.
@@ -3731,20 +4102,24 @@ class AllegroAgent(BaseAgent):
         scope = self._filter_scope_note(tool_input)
         if scope:
             empty_msg = count_none = f"Brak zamówień{stage_note}{scope}."
-        # Allegro cannot filter by amount, so a value question is answered from
-        # the page this call fetched. When that page came back full, EVERY
-        # answer built on it is about those orders only — "nothing matched" may
-        # miss an order just outside the page, and so may a count ("masz 12"
-        # when the store had 40). Both say how far the search reached.
-        value_scan_note = ""
-        if (min_value is not None or max_value is not None) and scanned >= fetch_limit:
-            value_scan_note = f" (przeszukano {scanned} ostatnich zamówień)"
+        # Allegro cannot filter by amount or by what is inside an order, so a
+        # value or product question is answered from the page this call
+        # fetched. When that page came back full, EVERY answer built on it is
+        # about those orders only — "nothing matched" may miss an order just
+        # outside the page, and so may a count ("masz 12" when the store had
+        # 40). Both say how far the search reached.
+        scan_note = ""
+        narrowed_client_side = (
+            min_value is not None or max_value is not None or bool(product_terms)
+        )
+        if narrowed_client_side and scanned >= fetch_limit:
+            scan_note = f" (przeszukano {scanned} ostatnich zamówień)"
         if tool_input.get("count_only"):
             return self._count_sentence(
                 len(orders), count_lead, count_forms, count_none, scope=scope
-            ) + value_scan_note + suffix
+            ) + scan_note + suffix
         if not orders:
-            return empty_msg + value_scan_note + suffix
+            return empty_msg + scan_note + suffix
 
         carrier_map: dict[str, str] = {}
         if include_delivery:
@@ -3757,7 +4132,14 @@ class AllegroAgent(BaseAgent):
                 logger.warning("[allegro] carrier lookup failed, using order delivery names: %s", exc)
 
         blocks = [
-            self._order_bullet(o, carrier_map=carrier_map, include_delivery=include_delivery)
+            self._order_bullet(
+                o,
+                carrier_map=carrier_map,
+                include_delivery=include_delivery,
+                # Only on a product-filtered listing: see _product_lines. An
+                # ordinary "nowe zamówienia" stays the short bullet it is.
+                extra_lines=self._product_lines(o) if product_terms else None,
+            )
             for o in orders
         ]
         body = "\n\n".join(blocks)
@@ -3797,7 +4179,7 @@ class AllegroAgent(BaseAgent):
                     f"**{self._format_price(total_delivery, currency)}**{detail}"
                 )
             body = summary + "\n\n---\n\n" + body
-        if value_scan_note:
+        if scan_note:
             # Leading, not trailing: a listing ends with the last order's link,
             # and a caveat about what the search covered belongs before the
             # results, not tacked on where it reads as part of that order.
@@ -4171,6 +4553,29 @@ class AllegroAgent(BaseAgent):
                 "„(zakończona — wyprzedana)” Allegro zakończyło automatycznie po zejściu "
                 "stanu do zera — po dostawie towaru trzeba je wznowić.",
             ])
+
+        if tool_name == "get_sold_quantities":
+            date_from, date_to = self._local_day_bounds_to_utc(
+                tool_input["date_from_local"], tool_input["date_to_local"]
+            )
+            period_label = f"{tool_input['date_from_local']} – {tool_input['date_to_local']}"
+            raw_names = tool_input.get("names") or []
+            names = [n for n in (str(x).strip() for x in raw_names) if n]
+            logger.info(
+                "get_sold_quantities: %s → %s, names=%r", date_from, date_to, names,
+            )
+            orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
+            # Paid-but-then-cancelled orders are still returned by the period
+            # fetch (it filters the checkout-form status, not the fulfilment
+            # one). Counting them would report goods that never shipped as
+            # sold.
+            orders = [
+                o for o in orders
+                if str(o.fulfillment_status or "").upper() != "CANCELLED"
+            ]
+            if not orders:
+                return f"Brak opłaconych zamówień w okresie {period_label}."
+            return self._render_sold_quantities(orders, names, period_label)
 
         if tool_name == "get_sales_summary":
             date_from, date_to = self._local_day_bounds_to_utc(
@@ -4664,13 +5069,26 @@ class AllegroAgent(BaseAgent):
             return await self._find_buyer_by_contact(tool_input)
 
         if tool_name == "get_orders_pending_invoice":
+            # The stage scope ("faktury do wysłania w zamówieniach nie nowych")
+            # narrows WHICH orders are asked about, so it has to reach both the
+            # fetch and the sentences that report the result — an unscoped
+            # "Brak zamówień…" for a scoped question says something else
+            # entirely. See _stage_scope_note.
+            keep = self._stage_filter(tool_input, "fulfillment_status")
+            drop = self._stage_filter(tool_input, "exclude_fulfillment_status")
+            scope = self._stage_scope_note(keep, drop)
             orders = await self._allegro.get_orders_needing_invoice(
                 month=tool_input.get("month"),
                 year=tool_input.get("year"),
+                fulfillment_status=keep,
+                exclude_fulfillment_status=drop,
             )
             if not orders:
-                return "Brak zamówień wymagających wystawienia faktury." + self._block_suffix(
-                    await self._invoice_reminder_status_block(offer_only=True)
+                return (
+                    f"Brak zamówień wymagających wystawienia faktury{scope}."
+                    + self._block_suffix(
+                        await self._invoice_reminder_status_block(offer_only=True)
+                    )
                 )
             # Fetch invoice address data for all orders in parallel
             inv_results = await asyncio.gather(
@@ -4686,7 +5104,7 @@ class AllegroAgent(BaseAgent):
                 invoice_ledger.user_id_of(self._allegro), [o.order_id for o in orders]
             )
             not_issued = sum(1 for o in orders if o.order_id not in issued)
-            header = f"**Zamówień bez faktury: {not_issued}**"
+            header = f"**Zamówień bez faktury{scope}: {not_issued}**"
             if issued:
                 header += (
                     f" (+{len(issued)}, dla których faktura już istnieje, ale nie jest dołączona "

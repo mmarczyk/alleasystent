@@ -6,7 +6,64 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+# What an absent value looks like per field type, for _AllegroPayloadModel below.
+_EMPTY_BY_TYPE: dict[type, Any] = {str: "", int: 0, float: 0.0, bool: False}
+
+
+class _AllegroPayloadModel(BaseModel):
+    """Base for the models parsed straight out of an Allegro checkout form.
+
+    Allegro states a missing value as an explicit `null`, not by leaving the
+    key out: an order nobody has paid for yet carries `payment.finishedAt:
+    null`, a checkout form the buyer has not completed carries `buyer.email:
+    null`. A `.get("email", "")` hands that null straight through — the key IS
+    there — and pydantic then rejects None for a `str` field, so ONE such order
+    on the page raised a ValidationError that took the whole listing down with
+    it ("An internal error occurred. Please try again." for "pokaż zamówienia
+    jeszcze nie wysłane"). Nothing on the page could be shown because a single
+    order had no payment date.
+
+    Unfiltered listings are where this bites: every other order fetch pins
+    `status=READY_FOR_PROCESSING`, whose orders are paid and complete, while a
+    negated-stage question ("niewysłane") fetches every checkout form there is
+    — BOUGHT and FILLED_IN ones included.
+
+    So a null on a str/int/float/bool field becomes whatever that field already
+    holds when Allegro omits the key entirely — its own default ("PLN" for a
+    currency, "PL" for a country) or, for a field declared without one, the
+    empty value of its type. Only nulls are touched: a value Allegro did send
+    is passed to pydantic unchanged, so a genuinely wrong type still fails
+    loudly.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _nulls_become_empty(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        patched: dict[str, Any] | None = None
+        for key, value in data.items():
+            if value is not None:
+                continue
+            field = cls.model_fields.get(key)
+            if field is None:
+                continue
+            if field.annotation not in _EMPTY_BY_TYPE:
+                continue
+            absent = (
+                _EMPTY_BY_TYPE[field.annotation]  # type: ignore[index]
+                if field.is_required()
+                else field.get_default(call_default_factory=True)
+            )
+            if absent is None:
+                continue
+            if patched is None:
+                patched = dict(data)
+            patched[key] = absent
+        return data if patched is None else patched
 
 
 class AllegroTokens(BaseModel):
@@ -33,7 +90,7 @@ class DeliveryStatus(str, Enum):
     FAILED = "FAILED"
 
 
-class AllegroAddress(BaseModel):
+class AllegroAddress(_AllegroPayloadModel):
     first_name: str = ""
     last_name: str = ""
     street: str = ""
@@ -52,7 +109,7 @@ class AllegroOfferSummary(BaseModel):
     publication: dict[str, Any] = Field(default_factory=dict)
 
 
-class AllegroInvoiceBuyer(BaseModel):
+class AllegroInvoiceBuyer(_AllegroPayloadModel):
     """Who the VAT invoice for an order is made out to, as Allegro states it in
     `invoice.address` on the checkout form.
 
@@ -88,7 +145,7 @@ class AllegroInvoiceBuyer(BaseModel):
         return f"{self.first_name} {self.last_name}".strip()
 
 
-class AllegroOrderLine(BaseModel):
+class AllegroOrderLine(_AllegroPayloadModel):
     offer_id: str
     offer_name: str
     quantity: int
@@ -96,7 +153,7 @@ class AllegroOrderLine(BaseModel):
     currency: str = "PLN"
 
 
-class AllegroOrder(BaseModel):
+class AllegroOrder(_AllegroPayloadModel):
     order_id: str
     buyer_login: str
     buyer_email: str = ""

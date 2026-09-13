@@ -305,6 +305,19 @@ _STAGE_EXCLUDES: dict[str, list[str]] = {
 }
 
 
+# The same five stages read the other way round: which statuses a POSITIVE
+# stage keeps. Not derivable from _STAGE_EXCLUDES (that one answers "everything
+# except", which for 'niespakowane' also drops what has already gone), and
+# "wysłane" is a family rather than one status for the reason given above.
+_STAGE_STATUSES: dict[str, list[str]] = {
+    "new":         ["NEW"],
+    "in_progress": ["PROCESSING"],
+    "to_ship":     ["READY_FOR_SHIPMENT"],
+    "shipped":     list(_DISPATCHED_STATUSES),
+    "delivered":   ["PICKED_UP"],
+}
+
+
 def _split_compact_negations(query: str) -> str:
     """'niewysłane' → 'nie wysłane', so both spellings reach _NEGATION_LEAD_RE.
 
@@ -420,6 +433,34 @@ def refers_to_one_known_order(query: str) -> bool:
     return bool(_ORDER_ANAPHORA_RE.search(query) or _ORDER_CONTENTS_UNIT_RE.search(query))
 
 
+# A PRODUCT named inside an order question ("zamówienia z włóczką yarnart
+# jeans", "które miało tylko jeans plus") is a filter — get_orders'
+# product_names — and this layer cannot tell where the model name starts and
+# ends, so it hands the turn to the LLM instead of serving the unfiltered
+# listing the preset would produce. Exactly the failure shape this module's
+# docstring calls unacceptable: the seller gets every order of the period back
+# with the product silently dropped, and it reads like an answer.
+#
+# The stems are the assortment words a seller actually types (the same ones
+# allegro_tools' "oferty" label matches), plus the phrasings that describe an
+# order by its CONTENTS whatever the product is called — a brand name like
+# "yarnart" carries no stem this layer could know in advance.
+# Stems are cut short of the fill vowel Polish inserts ("kordonek" → "kordon"),
+# the same trick the assortment stems in allegro_tools use.
+_ORDER_NAMED_PRODUCT_RE = re.compile(
+    r"w[łl][óo]czk\w*|prz[ęe]dz\w*|tkanin\w*|motk\w*|kordon\w*|"
+    r"z\s+produktem|zawier\w*|"
+    r"kt[óo]r\w*\s+(?:mia[łl]\w*|by[łl]\w*\s+w\b)",
+    re.IGNORECASE,
+)
+
+
+def names_a_product(query: str) -> bool:
+    """True when an order question is scoped to what was INSIDE the order —
+    this layer's bail, see the comment above."""
+    return bool(_ORDER_NAMED_PRODUCT_RE.search(query))
+
+
 # Any of these means the query wants more than a bare listing — a specific
 # order's details/status/cost (get_order_details, usually chained off a
 # listing call this layer can't perform) or a date range (get_orders).
@@ -442,7 +483,7 @@ _ORDER_STAGE_BAIL_RE = re.compile(
 
 
 def _match_get_new_orders(query: str) -> dict | None:
-    if _ORDERS_BAIL_RE.search(query) or _negated_stage(query):
+    if _ORDERS_BAIL_RE.search(query) or _negated_stage(query) or names_a_product(query):
         return None
     stage = _order_stage(query)
     if stage is not None and stage != "new":
@@ -462,7 +503,11 @@ def _match_get_new_orders(query: str) -> dict | None:
 # on the LLM-free path.
 def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
     def _match(query: str) -> dict | None:
-        if _ORDER_STAGE_BAIL_RE.search(query) or _order_stage(query) != stage:
+        if (
+            _ORDER_STAGE_BAIL_RE.search(query)
+            or names_a_product(query)
+            or _order_stage(query) != stage
+        ):
             return None
         if _ORDERS_SINGULAR_RE.search(query):
             return None  # "ostatnie do wysłania" — a limit=1 guess isn't worth the risk
@@ -476,7 +521,7 @@ def _stage_matcher(stage: str) -> Callable[[str], dict | None]:
 def _match_negated_stage(query: str) -> dict | None:
     """"Niewysłane" / "nie zostały wysłane" / "nieodebrane" → get_orders with
     the negated stage's statuses excluded (see _STAGE_EXCLUDES)."""
-    if _ORDER_STAGE_BAIL_RE.search(query):
+    if _ORDER_STAGE_BAIL_RE.search(query) or names_a_product(query):
         return None
     stage = _negated_stage(query)
     if stage is None:
@@ -505,7 +550,11 @@ _DISPATCH_INTENT_RE = re.compile(
 def _match_get_orders_due_today(query: str) -> dict | None:
     if not (_TODAY_RE.search(query) and _DISPATCH_INTENT_RE.search(query)):
         return None
-    if _ORDER_DETAIL_INTENT_RE.search(query) or _ORDERS_SINGULAR_RE.search(query):
+    if (
+        _ORDER_DETAIL_INTENT_RE.search(query)
+        or _ORDERS_SINGULAR_RE.search(query)
+        or names_a_product(query)
+    ):
         return None
     # "ile dziś wysłałem?" is today + shipping words, but it asks about parcels
     # that already LEFT — the WYSŁANE stage, and a period one at that, so it
@@ -557,6 +606,98 @@ def wants_latest_order_details(query: str) -> bool:
         and _ORDERS_SINGULAR_RE.search(query)
         and _ORDER_DETAIL_INTENT_RE.search(query)
     )
+
+
+# ── faktury: get_orders_pending_invoice, scoped to an order stage ─────────
+# "Jakie mam faktury do wysłania w zamówieniach nie nowych" is one question
+# with two halves, and the model reliably answers only the first: the invoice
+# listing comes back for the WHOLE month with the stage silently dropped —
+# the failure shape this module's docstring calls unacceptable, and the reason
+# this matcher exists at all.
+#
+# It is deliberately the narrowest possible reading: the invoice topic AND a
+# pending sense AND exactly one order stage. Without a stage nothing is
+# resolved here — a plain "jakie mam faktury do wystawienia" goes to the LLM
+# exactly as it always did, since there the model has nothing to drop.
+_INVOICE_TOPIC_RE = re.compile(r"faktur", re.IGNORECASE)
+
+# The seller asking which invoices are still OWED, in the wordings that cannot
+# also be read as an instruction to issue one.
+_INVOICE_PENDING_RE = re.compile(
+    r"faktur\w*\s+(?:s[ąa]\s+|jest\s+|mam\s+|zosta[łl]\w*\s+)*"
+    r"(?:do|na)\s+(?:wys[łl]ani\w*|wysy[łl]k\w*|wystawieni\w*|zrobieni\w*|wygenerowani\w*)|"
+    r"(?:brakuj\w*|zaleg[łl]\w*|niewystawion\w*|nie\s+wystawion\w*|niewys[łl]an\w*)\s+faktur|"
+    r"bez\s+faktur|czek\w*\s+na\s+faktur|musz[ęe]\s+wystawi[ćc]\s+faktur",
+    re.IGNORECASE,
+)
+
+# 'faktury DO WYSŁANIA' is the DO WYSŁANIA stage vocabulary word for word, so
+# the phrase is blanked out before any stage is read — otherwise the invoice
+# noun itself counts as a positive stage and the query reads as naming two of
+# them, which bails. Only this one phrase collides ('do wystawienia',
+# 'brakujące', 'zaległe' match no stage pattern), so only this one is removed.
+_INVOICE_PHRASE_RE = re.compile(
+    r"faktur\w*\s+(?:s[ąa]\s+|jest\s+|mam\s+|zosta[łl]\w*\s+)*"
+    r"(?:do|na)\s+(?:wys[łl]ani\w*|wysy[łl]k\w*|nadani\w*)",
+    re.IGNORECASE,
+)
+
+# What this layer must not serve: an ISSUANCE command (a real invoice in
+# inFakt, or the preview — issue_invoice_for_order / preview_pending_invoices),
+# a DELIVERY step for one already-issued invoice, and the billing-address
+# lookup for one order (get_order_invoice_data). The imperative 'wystaw' is
+# matched as a whole word on purpose: the infinitive ('muszę wystawić') and
+# the noun ('do wystawienia') are the pending question, not a command.
+_INVOICE_BAIL_RE = re.compile(
+    r"\bwystaw\b|\bwystawcie\b|\butw[óo]rz\b|\bwygeneruj\b|\bzr[óo]b\b|podgl[ąa]d|"
+    r"do[łl][ąa]cz|za[łl][ąa]cz|wy[śs]lij|ksef|\bnip\b|dane\s+do|adres\b|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-",
+    re.IGNORECASE,
+)
+
+
+def _match_orders_pending_invoice(query: str) -> dict | None:
+    if not (_INVOICE_TOPIC_RE.search(query) and _INVOICE_PENDING_RE.search(query)):
+        return None
+    if _INVOICE_BAIL_RE.search(query) or _PERIOD_RE.search(query):
+        return None  # a month other than the current one needs a clock this layer lacks
+    if names_a_product(query) or refers_to_one_known_order(query):
+        return None
+    # The stage has to be said ABOUT the orders: without an order word in the
+    # query, "nowych"/"wysłanych" is describing something else entirely
+    # ("faktury do wysłania dla nowych klientów"), and filtering orders by it
+    # would answer a question nobody asked.
+    if not _ORDERS_COUNT_TOPIC_RE.search(query):
+        return None
+    # Read through the same two functions the order matchers use, so an
+    # invoice question scoped to a stage and a plain question about that stage
+    # agree on what the wording means — including the DO WYSŁANIA / WYSŁANE
+    # overlap _order_stage exists to tell apart. Either returns None for a
+    # query naming no stage, or several: both are the LLM's to read.
+    rest = _INVOICE_PHRASE_RE.sub(" ", query)
+    stage = _order_stage(rest)
+    if stage is not None:
+        return {"fulfillment_status": _STAGE_STATUSES[stage]}
+    stage = _negated_stage(rest)
+    if stage is not None:
+        return {"exclude_fulfillment_status": _STAGE_EXCLUDES[stage]}
+    return None
+
+
+def names_an_order_stage(query: str) -> bool:
+    """True when `query` narrows the answer to an order STAGE, named either
+    positively ("w wysłanych zamówieniach") or under a negation ("nie nowych").
+
+    Exported for the guard in AllegroAgent.run() that refuses to answer with a
+    wider listing than the question asked for: a tool with no stage parameter
+    cannot serve such a question, and the seller has to be told that rather
+    than handed the unnarrowed list.
+
+    Blanks the invoice phrase out first for the same reason the matcher above
+    does — "faktury DO WYSŁANIA" is not a stage.
+    """
+    positive, negated = _stage_hits(_INVOICE_PHRASE_RE.sub(" ", query))
+    return bool(positive or negated)
 
 
 # ── wiadomosci: get_message_threads (list/count only — never content) ──────
@@ -755,6 +896,7 @@ def _match_monitoring(query: str) -> tuple[str, dict] | None:
 # multi-outcome monitoring matcher (handled separately below).
 _LABEL_MATCHERS: dict[str, list[tuple[str, Callable[[str], dict | None]]]] = {
     "zamowienia": _ORDERS_MATCHERS,
+    "faktury":    [("get_orders_pending_invoice", _match_orders_pending_invoice)],
     "wiadomosci": [("get_message_threads", _match_get_message_threads)],
     "konto":      [("get_account_info", _match_get_account_info)],
     "oferty":     [("get_offers_summary", _match_get_offers_summary)],
@@ -791,6 +933,14 @@ def resolve_deterministic(query: str, labels: set[str]) -> tuple[str, dict] | No
         return None
     if "monitoring" in labels:
         return _match_monitoring(query)
+    # An invoice question scoped to an order stage ("jakie mam faktury do
+    # wysłania w zamówieniach nie nowych") always matches BOTH labels — the
+    # stage words ARE order vocabulary — so the single-topic rule would rule
+    # out the one query this pairing exists for. It is not two questions
+    # though: the stage is a filter on the invoice listing, and the order
+    # matchers all bail on "faktur" anyway, so nothing is taken from them.
+    if labels == {"faktury", "zamowienia"}:
+        labels = {"faktury"}
     if len(labels) != 1:
         return None
     label = next(iter(labels))

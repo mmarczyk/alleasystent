@@ -100,6 +100,22 @@ CASES: list[Case] = [
          (f"`{ds.ORD_1}`", f"`{ds.ORD_2}`"),
          note="Negacja + próg kwotowy w jednym pytaniu — dokładnie to zdanie "
               "odpowiadało wcześniej listą zamówień JUŻ wysłanych, bez filtra kwoty."),
+    Case("get_orders__product", "get_orders",
+         {"product_names": ["jeans plus"], "limit": 50},
+         "Pokaż mi zamówienie, które miało włóczkę jeans plus",
+         (f"`{ds.ORD_YARN_1}`", "Produkty:", "Włóczka Jeans Plus 100g kolor 12 — 2 szt."),
+         note="Produkt jako filtr zamówień. Bez product_names to pytanie wracało całą "
+              "listą zamówień z okresu — włóczka ginęła po drodze, a lista czytała się "
+              "jak odpowiedź. Listing pokazuje teraz zawartość zamówienia, żeby "
+              "sprzedawca mógł ją sprawdzić."),
+    Case("get_orders__product_only", "get_orders",
+         {"product_names": ["jeans plus"], "product_match": "only", "limit": 50},
+         "Pokaż mi zamówienie, które miało tylko włóczkę jeans plus",
+         ("Brak zamówień zawierających wyłącznie **jeans plus**",),
+         note="„Tylko” to inne pytanie niż „z” — ORD_YARN_1 ma jeans plus, ale obok "
+              "zwykłego jeansu, a jedyne czyste zamówienie na jeans plus jest "
+              "anulowane. Puste zdanie powtarza „wyłącznie”, inaczej czyta się jak "
+              "„nie sprzedałeś tej włóczki”."),
     Case("get_orders__value_range", "get_orders", {"min_value": 100, "max_value": 300},
          "Pokaż zamówienia od 100 do 300 zł",
          (f"`{ds.ORD_3}`", f"`{ds.ORD_4}`"),
@@ -121,6 +137,20 @@ CASES: list[Case] = [
          ("Brak zamówień o wartości powyżej 100000,00 PLN",),
          note="Puste zdanie nazywa kwotę, po której filtrowało — inaczej czyta się "
               "jak „nie masz żadnych zamówień”."),
+    Case("get_sold_quantities__two_models", "get_sold_quantities",
+         {"names": ["jeans", "jeans plus"],
+          "date_from_local": _MONTH_START, "date_to_local": _TODAY_ISO},
+         "W ciągu ostatnich 3 miesięcy podaj mi ilość sztuk sprzedanych dla włóczek jeans i jeans plus",
+         ("„jeans” — 8 szt.", "„jeans plus” — 2 szt.", "zwroty nieodjęte"),
+         note="Produkcyjny błąd: to pytanie wracało listą zamówień. Dwa modele dzielą "
+              "słowo w tytule, więc dopasowanie po podciągu zlewa je w jedno — "
+              "'jeans plus' musi zabrać swoje sztuki 'jeansowi', a nie dołożyć się "
+              "do niego. 10 szt. z zamówienia anulowanego nie liczy się wcale."),
+    Case("get_sold_quantities__no_names", "get_sold_quantities",
+         {"date_from_local": _MONTH_START, "date_to_local": _TODAY_ISO},
+         "Ile sztuk sprzedałem w tym miesiącu?",
+         ("Sprzedane sztuki", "Razem:"),
+         note="Bez nazw — ranking wszystkich produktów po ilości sztuk."),
     Case("get_order_details__delivery_cost", "get_order_details", {"order_id": ds.ORD_3},
          "Ile kosztowała dostawa w tym zamówieniu?",
          ("- Koszt dostawy zapłacony przez kupującego: 12,99 PLN",
@@ -319,6 +349,19 @@ CASES: list[Case] = [
          "Do których zamówień muszę wystawić fakturę?",
          ("Zamówień bez faktury", "Faktura: niewystawiona", "NIP"),
          note="Zamówienia z prośbą o fakturę + dane nabywcy."),
+    Case("get_orders_pending_invoice__new_orders", "get_orders_pending_invoice",
+         {"fulfillment_status": ["NEW"]},
+         "Jakie mam faktury do wysłania w nowych zamówieniach?",
+         ("Zamówień bez faktury w statusie nowe: 2", "Faktura: niewystawiona"),
+         note="Ta sama lista zawężona do jednego etapu zamówień — nagłówek nazywa "
+              "zawężenie, żeby liczba nie czytała się jako całość miesiąca."),
+    Case("get_orders_pending_invoice__not_new", "get_orders_pending_invoice",
+         {"exclude_fulfillment_status": ["NEW"]},
+         "Jakie mam faktury do wysłania w zamówieniach nie nowych?",
+         ("Brak zamówień wymagających wystawienia faktury w innym statusie niż nowe.",),
+         note="Negacja etapu jako wykluczenie. Pusta odpowiedź powtarza zawężenie — "
+              "bez tego brzmiałaby jak „nie masz żadnych zaległych faktur”, a to co "
+              "innego niż „nie masz ich poza nowymi zamówieniami”."),
     Case("get_order_invoice_data", "get_order_invoice_data", {"order_id": ds.ORD_1},
          f"Jakie są dane do faktury dla zamówienia {ds.ORD_1}?",
          ("Dane do faktury", "NIP", "Kod pocztowy"),

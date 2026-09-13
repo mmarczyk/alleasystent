@@ -14,11 +14,28 @@ import re
 # chat text while "zamówienia do wysłania" came back as a markdown table the
 # frontend then rendered as a document artifact — the same question answered
 # in two different shapes depending on which preset the model happened to pick.
+# Every fulfillment stage an Allegro order can be at, in the order it moves
+# through them. One list, because three different tools now let the seller
+# scope a question to a stage (get_orders, get_orders_delivery and — for
+# "faktury do wysłania w zamówieniach nie nowych" — get_orders_pending_invoice)
+# and a stage missing from one of their enums is a stage the model cannot name
+# there, whatever the seller asked.
+_FULFILLMENT_STATUSES: tuple[str, ...] = (
+    "NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT",
+    "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED",
+)
+
 _ORDER_PARAMS: dict[str, dict] = {
     "status": {
         "type": "string",
-        "description": "Filter by order status.",
-        "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
+        "description": (
+            "Checkout-form status. LEAVE IT OUT for every normal question: the listing then "
+            "covers exactly the orders that exist for the seller, cash-on-delivery included. "
+            "Pass CANCELLED only for a question that explicitly asks about cancelled orders "
+            "('pokaż anulowane zamówienia'). Baskets a buyer started but never paid for are "
+            "not orders and are never listed, whatever else the question asks for."
+        ),
+        "enum": ["READY_FOR_PROCESSING", "CANCELLED"],
     },
     "fulfillment_status": {
         "type": "string",
@@ -34,13 +51,7 @@ _ORDER_PARAMS: dict[str, dict] = {
     },
     "exclude_fulfillment_status": {
         "type": "array",
-        "items": {
-            "type": "string",
-            "enum": [
-                "NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT",
-                "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED",
-            ],
-        },
+        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
         "description": (
             "NEGATED stage filter — return every order whose fulfillment status is NOT one of "
             "these. A negated question is never one status, it is everything except one: "
@@ -104,6 +115,34 @@ _ORDER_PARAMS: dict[str, dict] = {
             "AT MOST this many PLN — 'zamówienia poniżej 100 zł', 'drobne zamówienia do 50 zł'. "
             "Combine with min_value for a range ('między 500 a 1000 zł')."
         ),
+    },
+    "product_names": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Only orders CONTAINING one of these products — the ONLY way to answer a question "
+            "that names what was inside the order: 'zamówienie z wczoraj z włóczką yarnart "
+            "jeans', 'pokaż zamówienia z jeans plus', 'kto kupił kordonek'. One entry per model "
+            "the user named, written as they wrote it but WITHOUT the generic category word: "
+            "'włóczkę yarnart jeans' → ['yarnart jeans'], 'jeans i jeans plus' → ['jeans', "
+            "'jeans plus'] (two models, never one merged entry). A name matches an offer title "
+            "on whole words and the most specific name wins, so 'jeans' never swallows 'jeans "
+            "plus'. Without it the product is silently dropped and the whole period's listing "
+            "comes back, which reads like an answer to a question nobody asked."
+        ),
+    },
+    "product_match": {
+        "type": "string",
+        "enum": ["any", "only"],
+        "description": (
+            "How product_names has to match the order's contents. 'any' (default) — the order "
+            "contains at least one of the named products, next to anything else. 'only' — the "
+            "order contains NOTHING BUT the named products: this is what 'tylko' / 'wyłącznie' / "
+            "'same' / 'jedynie' mean ('zamówienie, które miało tylko włóczkę yarnart jeans'), "
+            "and answering such a question with 'any' returns every mixed order too, which is a "
+            "different question. Ignored when product_names is empty."
+        ),
+        "default": "any",
     },
     "line_items_sent": {
         "type": "array",
@@ -223,7 +262,7 @@ ALLEGRO_TOOLS: list[dict] = [
             ),
             "parameters": _order_params(
                 "buyer_login", "dispatch_before_local", "min_value", "max_value",
-                "count_only", "limit",
+                "product_names", "product_match", "count_only", "limit",
                 limit={
                     "description": (
                         "Max orders to return (1–100). Set to 1 when the user asks about "
@@ -272,6 +311,20 @@ ALLEGRO_TOOLS: list[dict] = [
                 "pack, send or invoice — so they need no filtering on your side; ask for them only "
                 "when the user explicitly wants them ('pokaż anulowane zamówienia' → "
                 "fulfillment_status=CANCELLED), which is the one case they are shown. "
+                "UNPAID BASKETS — a buyer who clicked buy but never paid — are not orders "
+                "either and never reach a listing or a count, again with nothing to filter on "
+                "your side; a cash-on-delivery order, paid on receipt and therefore carrying no "
+                "payment date, IS an ordinary order and is always listed. "
+                "PRODUCT FILTERS: product_names is the ONLY way to answer a question naming what "
+                "was INSIDE the order — 'pokaż zamówienie z wczoraj, które miało włóczkę yarnart "
+                "jeans', 'zamówienia z kordonkiem z tego tygodnia', 'kto kupił jeans plus'. Pass "
+                "the model name without the category word ('włóczkę yarnart jeans' → "
+                "product_names=['yarnart jeans']) together with the period the question names, and "
+                "add product_match='only' when the question says the order held NOTHING ELSE "
+                "('tylko', 'wyłącznie', 'same', 'jedynie'). Never drop the product and return the "
+                "whole period's listing — it is handed to the seller as the answer. This is also "
+                "NOT get_sold_quantities: that one counts PIECES over a period and never shows "
+                "which orders they came from. "
                 "VALUE FILTERS: min_value/max_value are the ONLY way to answer a question that names "
                 "an amount — 'zamówienia powyżej 400 zł' → min_value=400, 'poniżej 50 zł' → "
                 "max_value=50, 'od 100 do 300 zł' → both. Never answer such a question without them: "
@@ -296,7 +349,7 @@ ALLEGRO_TOOLS: list[dict] = [
             ),
             "parameters": _order_params(
                 "status", "fulfillment_status", "exclude_fulfillment_status",
-                "buyer_login", "line_items_sent",
+                "buyer_login", "line_items_sent", "product_names", "product_match",
                 "bought_after_local", "bought_before_local",
                 "paid_after_local", "paid_before_local",
                 "dispatch_after_local", "dispatch_before_local",
@@ -784,7 +837,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "status", "fulfillment_status", "buyer_login",
                 "bought_after_local", "bought_before_local",
                 "dispatch_after_local", "dispatch_before_local",
-                "min_value", "max_value", "count_only", "limit",
+                "min_value", "max_value", "product_names", "product_match",
+                "count_only", "limit",
                 status={"description": "Order status filter. Default: READY_FOR_PROCESSING."},
                 fulfillment_status={
                     "description": (
@@ -845,7 +899,20 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Find all paid orders for a given month where the buyer requested a VAT invoice "
                 "but the seller has not yet uploaded one. Defaults to the current month. "
-                "Use when asked about missing invoices or invoice obligations."
+                "Use when asked about missing invoices or invoice obligations — 'jakie mam "
+                "faktury do wystawienia', 'jakie faktury mam do wysłania', 'brakujące faktury', "
+                "'zaległe faktury', 'do których zamówień muszę wystawić fakturę', 'komu jeszcze "
+                "nie wysłałem faktury'. "
+                "'FAKTURY DO WYSŁANIA' IS THIS TOOL, NOT A SHIPPING QUESTION: 'do wysłania' names "
+                "the DOCUMENT the seller still owes the buyer, so it is the invoice listing — "
+                "never get_orders_delivery, whose 'do wysłania' is about PARCELS waiting for the "
+                "courier and which knows nothing about invoices. "
+                "SCOPED TO AN ORDER STAGE — fulfillment_status / exclude_fulfillment_status: a "
+                "seller very often asks only about part of their orders ('faktury do wysłania w "
+                "zamówieniach nie nowych', 'jakie faktury muszę wystawić do wysłanych zamówień', "
+                "'brakujące faktury w zamówieniach, których jeszcze nie wysłałem'). That stage is "
+                "a FILTER and must be passed on — dropped, the reply lists every pending invoice "
+                "of the month, which reads like a real answer to a question nobody asked."
             ),
             "parameters": {
                 "type": "object",
@@ -857,6 +924,36 @@ ALLEGRO_TOOLS: list[dict] = [
                     "year": {
                         "type": "integer",
                         "description": "4-digit year. Defaults to current year.",
+                    },
+                    "fulfillment_status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
+                        "description": (
+                            "Keep only orders at one of these fulfillment stages — the POSITIVE "
+                            "stage scope ('faktury w nowych zamówieniach' → ['NEW'], 'w "
+                            "zamówieniach do wysłania / spakowanych' → ['READY_FOR_SHIPMENT'], "
+                            "'w zamówieniach w realizacji' → ['PROCESSING']). "
+                            "A LIST, not one status, because a stage the seller names is often a "
+                            "family: 'w wysłanych zamówieniach' means every parcel that has left "
+                            "— ['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'] — and "
+                            "answering it with SENT alone silently drops the orders already "
+                            "delivered, whose invoice is the most overdue of all. "
+                            "For a NEGATED scope use exclude_fulfillment_status instead."
+                        ),
+                    },
+                    "exclude_fulfillment_status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
+                        "description": (
+                            "Drop orders at these fulfillment stages — the NEGATED stage scope. "
+                            "A negation is never one status, it is everything except one: "
+                            "'w zamówieniach nie nowych' / 'poza nowymi' → exclude ['NEW'], "
+                            "'w zamówieniach, których nie wysłałem' → exclude ['SENT', "
+                            "'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'], 'w nieodebranych' → "
+                            "exclude ['PICKED_UP']. Never answer a negated scope with "
+                            "fulfillment_status: naming one stage where the seller excluded one "
+                            "hides every other stage they did ask about."
+                        ),
                     },
                 },
             },
@@ -925,11 +1022,67 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_sold_quantities",
+            "description": (
+                "HOW MANY UNITS of a product were SOLD in a period — the quantity question, not the "
+                "money one. USE THIS for: 'ile sztuk sprzedałem', 'ile sztuk sprzedanych dla <produkt>', "
+                "'ile poszło <produkt>', 'ile sztuk <produkt> zeszło w tym miesiącu', 'co się najlepiej "
+                "sprzedawało', 'ile zeszło włóczki jeans'. "
+                "Counts units from PAID orders in the period, cancelled ones excluded. Returns are NOT "
+                "subtracted — a returned item still counts as sold here, so say so if the number matters "
+                "to the seller. "
+                "NOT get_sales_summary: that one answers how much money came in and ranks products by "
+                "REVENUE; this one counts PIECES and can be narrowed to named products. "
+                "NOT get_active_offers/query_offers_by_stock: those report what is IN STOCK right now, "
+                "which is a different number from what was sold. "
+                "NOT for LISTING the orders a product was in ('pokaż zamówienie z wczoraj z włóczką "
+                "yarnart jeans', 'które zamówienia miały jeans plus') — this tool answers with a "
+                "units total and never names an order; that is get_orders with product_names. "
+                "PRODUCT NAMES — pass every model the user names as a SEPARATE entry in `names`, exactly "
+                "as they wrote it: 'włóczki jeans i jeans plus' is names=['jeans', 'jeans plus'], NOT "
+                "['jeans'] and NOT ['jeans i jeans plus']. They are different models and the tool keeps "
+                "them apart; merging them into one term is what makes the answer wrong. "
+                "Omit `names` entirely only when the user named no product at all ('ile sztuk sprzedałem "
+                "w maju') — then every product sold in the period is listed, most units first. "
+                "Same period rules as get_sales_summary: resolve 'ostatnie 3 miesiące', 'w tym roku' etc. "
+                "yourself into date_from_local/date_to_local and call this ONCE for the whole period."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Product/model names to count, one entry per model the user named. A name "
+                            "matches an offer title on whole words, and the most specific name wins, so "
+                            "'jeans' and 'jeans plus' never absorb each other's sales."
+                        ),
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": "Start of period as a Warsaw-local calendar date, 'YYYY-MM-DD'.",
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": "End of period as a Warsaw-local calendar date, 'YYYY-MM-DD' (inclusive).",
+                    },
+                },
+                "required": ["date_from_local", "date_to_local"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_buyers",
             "description": (
                 "The BUYER view of a period: one row per CUSTOMER instead of one row per order — "
                 "who bought, how many orders, for how much in total, when they last bought, and "
-                "how many of their orders already have a VAT invoice. "
+                "how many of their orders already have a VAT invoice. The summary under the "
+                "table also states the period's totals plus the AVERAGE ORDER VALUE and the "
+                "average number of pieces per order, so 'średnia wartość zamówienia u moich "
+                "klientów' needs no second tool. "
                 "USE THIS for any question about the buyers themselves: 'lista kupujących', "
                 "'lista klientów', 'kto u mnie kupował', 'ilu miałem klientów', 'moi najlepsi "
                 "klienci', 'stali klienci', 'kto kupuje najwięcej', 'jakie firmy u mnie kupowały', "
@@ -1615,7 +1768,23 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Ask ONE short, specific question, in the same language as the user's message, "
                 "naming exactly what you need (e.g. which order — ID or buyer login; which date "
                 "or period; which product). Do NOT call any other tool in the same turn — this is "
-                "a stop-and-ask, not a guess-and-verify."
+                "a stop-and-ask, not a guess-and-verify. "
+                "ALSO call this when NO tool here can answer the question AT ALL — not a missing "
+                "parameter, but a missing capability: a figure none of these tools computes, a "
+                "breakdown none of them produces. In that case do not ask a question — state "
+                "plainly, in one sentence and in the user's language, that you cannot answer this "
+                "one and what would be needed. Reaching for the nearest listing instead is the "
+                "worst available answer: the user reads it as the figure they asked for, and "
+                "nothing in the reply tells them it is not. "
+                "AND call this for the case in between the two — a tool that answers a WIDER "
+                "question than the one asked, because the user named a filter it has no parameter "
+                "for (an amount, a product, a buyer account, an order stage… — check the chosen "
+                "tool's parameters before you call it). Do NOT call that tool and do NOT quietly "
+                "drop the filter: say in one sentence what you cannot narrow by, then ask whether "
+                "to show the wider answer instead (e.g. 'Nie umiem zawęzić tej listy po kwocie "
+                "zamówienia — pokazać wszystkie zaległe faktury z tego miesiąca?'). The wider "
+                "listing is not a partial answer, it is a different one, and the user cannot tell "
+                "from reading it."
             ),
             "parameters": {
                 "type": "object",
@@ -1683,6 +1852,9 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_account_info": "chat",
     "get_billing_summary": "table",
     "get_sales_summary": "dashboard",
+    # "chat": a handful of product rows answering the question just asked,
+    # not a document — same reasoning as get_order_details above.
+    "get_sold_quantities": "chat",
     "get_buyers": "table",
     # "chat" (not "table") — a contact lookup answers a yes/no question about
     # ONE person, usually with a single match; a one-row table hidden behind
@@ -1731,6 +1903,43 @@ def resolve_output_format(tool_names: list[str]) -> str:
     return "chat"
 
 
+# ── What a tool can actually NARROW an answer by ────────────────────────────
+# A seller's question usually carries a narrowing — an amount, a product, a
+# buyer account, an order stage — and the tool that answers it either has a
+# parameter for that narrowing or it does not. When it does not, the filter is
+# dropped and the seller is handed a WIDER answer than they asked for, with
+# nothing in the reply saying so; that is the failure shape this whole module
+# is written against, and the one thing worse than not answering.
+#
+# So the capability is declared here, once, and read off the schemas
+# themselves (the same trick as _BUYER_LOGIN_TOOLS in allegro_agent.py): a
+# parameter added to a tool automatically widens what that tool is considered
+# able to answer, and nothing has to be kept in sync by hand. The guard that
+# uses it — AllegroAgent._unsupported_filter_question — turns a question it
+# cannot narrow into a stop-and-ask instead of a wider listing.
+#
+# CAUTION for anything that goes through AllegroAgent._orders_listing: those
+# tools filter by amount and product even where their own schema does not say
+# so (_with_value_bounds injects the bounds in Python), so their entry here
+# understates them. It costs nothing today — the guard is opt-in per tool, see
+# _UNFILTERABLE_FALLBACK — but a listing preset added to it needs its extra
+# filters declared first.
+_FILTER_PARAMS: dict[str, tuple[str, ...]] = {
+    "value":   ("min_value", "max_value"),
+    "product": ("product_names", "names"),
+    "buyer":   ("buyer_login",),
+    "stage":   ("fulfillment_status", "exclude_fulfillment_status"),
+}
+
+TOOL_FILTERS: dict[str, frozenset[str]] = {
+    t["function"]["name"]: frozenset(
+        dimension for dimension, params in _FILTER_PARAMS.items()
+        if set(params) & set(t["function"]["parameters"].get("properties", {}))
+    )
+    for t in ALLEGRO_TOOLS
+}
+
+
 # ── Tool-select context filter ──────────────────────────────────────────────
 # Every turn's tool-selection call sends all ~37 tool schemas regardless of
 # what the query is actually about — most of that is dead weight the model
@@ -1768,6 +1977,10 @@ _TOOL_LABELS: dict[str, str] = {
     # finanse
     "get_billing_summary":             "finanse",
     "get_sales_summary":               "finanse",
+    # A quantity-sold question names the PRODUCT, so it usually matches
+    # "oferty" too — but what it asks for is a sales figure, and the
+    # selling verbs ("sprzeda", "zarob") are what reliably fire here.
+    "get_sold_quantities":             "finanse",
     # "finanse", not "zamowienia", even though it takes an order_id: what makes
     # a query reach for it is the MONEY vocabulary ("zysk", "koszt", "marża"),
     # and a follow-up often names no order at all ("a jaki zysk przy 8 zł za
@@ -1831,7 +2044,14 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
                    "robocie", "nieskoncz", "nieukoncz", "dokoncz", "wywoz", "transporcie",
                    "przewozn", "poszl", "wyjecha", "dotar", "odebr", "odbior", "dostarcz",
                    "zakonczon", "zamkni", "odhaczy", "termin", "paczek", "nadac", "nadaj"),
-    "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj"),
+    # The assortment words are what a seller actually names instead of the
+    # generic "produkt"/"oferta" — "ile zostało włóczek", "jakie tkaniny mam".
+    # Without them such a query matched no label at all and fell back to the
+    # full ~37-tool list. Diacritics folded (see _normalize), and stems cut
+    # short of the fill vowel Polish inserts in the genitive plural:
+    # "włóczka" → "włóczek" ("wloczek"), so the stem has to be "wlocz".
+    "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj",
+                   "wlocz", "tkanin", "przedz", "motk"),
     "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),
     # "marz" is the margin vocabulary calculate_order_profit answers to
@@ -1839,7 +2059,11 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
     # prefixes the month "marzec" — a cheap miss: such a query keeps every
     # label it already had, it only loses the deterministic layer, which is
     # exactly the recall-over-precision trade this map is built on.
-    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz",
+    # "sprzeda", not "sprzedaz": the noun is "sprzedaż" but the seller asks with
+    # the PARTICIPLE — "ile sztuk sprzedanych", "co się sprzedało", "ile
+    # sprzedałem" — and none of those contain the "ż". The longer stem matched
+    # only the noun, which is the form that shows up least.
+    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzeda",
                    "bilans", "marz", "rentown", "narzut"),
     "faktury":    ("faktur", "nip", "ksef", "vat"),
     # A buyer question names the person, not the order: "lista kupujących",
@@ -2042,3 +2266,84 @@ def select_tools_for_context(text: str) -> list[dict] | None:
     if not labels:
         return None
     return tools_for_labels(labels)
+
+
+# ── Matching a product the seller named against real offer titles ───────────
+# "jeans" and "jeans plus" are two different yarns, and an Allegro title
+# carries far more than the model name ("Włóczka Jeans Plus 100g kolor 05").
+# A naive `term in title` therefore fails in BOTH directions: it counts every
+# Jeans Plus sale towards "jeans", and it matches "jeans" inside an unrelated
+# word. Two rules fix that:
+#
+#   1. Compare TOKENS, not characters. "jeans" matches the title token "Jeans",
+#      never the middle of "jeanswear", and a multi-word term has to appear as
+#      consecutive tokens.
+#   2. Most specific term wins. A title matching both "jeans" and "jeans plus"
+#      belongs to "jeans plus" — the longer term is the more precise claim
+#      about which model it is.
+#
+# Rule 2 only separates models the seller actually named. When one term alone
+# matches several different titles, nothing here decides that they are the
+# same model — the caller reports each title on its own line instead of
+# silently summing them, since the distinction it cannot make is exactly the
+# one the seller can read off the names.
+#
+# "+" becomes the token "plus" so "Jeans+" and "Jeans Plus" are one model,
+# which is how the seller writes them interchangeably.
+_TOKEN_SPLIT_RE = re.compile(r"[^0-9a-z]+")
+
+
+def product_tokens(text: str) -> list[str]:
+    """Offer title or search term as comparable tokens (diacritics folded)."""
+    return [t for t in _TOKEN_SPLIT_RE.split(_normalize(text).replace("+", " plus ")) if t]
+
+
+def _contains_run(haystack: list[str], needle: list[str]) -> bool:
+    """True when `needle` appears as consecutive items of `haystack`."""
+    if not needle or len(needle) > len(haystack):
+        return False
+    return any(
+        haystack[i:i + len(needle)] == needle
+        for i in range(len(haystack) - len(needle) + 1)
+    )
+
+
+# A seller names the model, but says the category out loud first — "włóczkę
+# yarnart jeans", "przędza jeans plus". Allegro titles carry that word too,
+# yet not always in front ("YarnArt Jeans 50g włóczka bawełniana"), and
+# match_product_term compares CONSECUTIVE tokens — so the category word the
+# seller prepended would break a match against a title that puts it elsewhere.
+# It is dropped from the front of a search term, never from the title, and
+# never when it is the whole term: "ile zeszło włóczki" names no model, and an
+# empty term would match every offer in the store.
+_PRODUCT_CATEGORY_PREFIXES = ("wloczk", "przedz", "tkanin", "motek", "motk")
+
+
+def product_filter_terms(names: list[str]) -> list[str]:
+    """Search terms as they should be matched against offer titles: normalized,
+    blank entries dropped, and a leading category word ("włóczka") removed when
+    the term names a model beyond it."""
+    terms: list[str] = []
+    for name in names:
+        toks = product_tokens(name)
+        while len(toks) > 1 and any(toks[0].startswith(p) for p in _PRODUCT_CATEGORY_PREFIXES):
+            toks = toks[1:]
+        if toks:
+            terms.append(" ".join(toks))
+    return terms
+
+
+def match_product_term(offer_name: str, terms: list[str]) -> str | None:
+    """Which of `terms` this offer title belongs to — the most specific one.
+
+    Returns the matching term as the caller passed it (so it can be echoed back
+    in the seller's own words), or None when the title matches none of them.
+    """
+    name_toks = product_tokens(offer_name)
+    best: str | None = None
+    best_len = 0
+    for term in terms:
+        term_toks = product_tokens(term)
+        if len(term_toks) > best_len and _contains_run(name_toks, term_toks):
+            best, best_len = term, len(term_toks)
+    return best

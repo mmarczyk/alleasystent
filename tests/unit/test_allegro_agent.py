@@ -827,6 +827,233 @@ class TestCancelledOrdersAreNeverListed:
         assert "`anulowane`" in result
 
 
+class TestPendingInvoicesScopedToAStage:
+    """"Jakie mam faktury do wysłania w zamówieniach nie nowych" — an invoice
+    question narrowed to part of the seller's orders. The stage has to reach
+    the fetch AND the sentences that report the result: an unscoped "Brak
+    zamówień wymagających wystawienia faktury." answers a question nobody
+    asked, and is indistinguishable from owing nobody an invoice at all."""
+
+    def _agent(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders_needing_invoice = AsyncMock(return_value=orders)
+        agent._allegro.get_order_invoice_data = AsyncMock(return_value={})
+        agent._allegro._user_id = "u1"
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_a_negated_stage_reaches_the_fetch(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs == {
+            "month": None, "year": None,
+            "fulfillment_status": [], "exclude_fulfillment_status": ["NEW"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_positive_stage_reaches_the_fetch(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            await agent._dispatch(
+                "get_orders_pending_invoice",
+                {"fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]},
+            )
+
+        kwargs = agent._allegro.get_orders_needing_invoice.await_args.kwargs
+        assert kwargs["fulfillment_status"] == [
+            "SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP",
+        ]
+        assert kwargs["exclude_fulfillment_status"] == []
+
+    @pytest.mark.asyncio
+    async def test_one_status_as_a_bare_string_is_read_as_a_list(self):
+        """get_orders' own fulfillment_status is a single status, so a model
+        that has seen that schema will pass a bare string here too. Reading it
+        as a one-element list is what it means; rejecting it would drop the
+        scope silently."""
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"fulfillment_status": "sent"},
+            )
+
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs[
+            "fulfillment_status"
+        ] == ["SENT"]
+        assert "w statusie wysłane" in result
+
+    @pytest.mark.asyncio
+    async def test_the_header_names_the_scope(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert "**Zamówień bez faktury w innym statusie niż nowe: 1**" in result
+
+    @pytest.mark.asyncio
+    async def test_an_empty_scoped_answer_says_what_was_scoped(self):
+        agent = self._agent([])
+
+        with patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert result.startswith(
+            "Brak zamówień wymagających wystawienia faktury w innym statusie niż nowe."
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unscoped_question_reads_exactly_as_before(self):
+        agent = self._agent([])
+
+        with patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch("get_orders_pending_invoice", {})
+
+        assert result.startswith("Brak zamówień wymagających wystawienia faktury.")
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs == {
+            "month": None, "year": None,
+            "fulfillment_status": [], "exclude_fulfillment_status": [],
+        }
+
+
+class TestAFilterTheToolDoesNotHave:
+    """A narrowing the chosen tool has no parameter for. Answering anyway hands
+    the seller a WIDER list than they asked for, with nothing saying so — and
+    that list reads like the answer. The turn stops and asks instead."""
+
+    def _agent(self, last_assistant_text: str = ""):
+        agent = _make_agent()
+        agent._last_assistant_text = last_assistant_text
+        return agent
+
+    @pytest.mark.parametrize("query,label", [
+        ("jakie mam faktury do wysłania powyżej 500 zł", "kwocie zamówienia"),
+        ("jakie faktury mam do wystawienia dla zamówień z włóczką yarnart jeans",
+         "produkcie w zamówieniu"),
+        ("jakie mam faktury do wysłania z konta anna.kowalska88", "koncie kupującego"),
+    ])
+    def test_it_says_what_it_cannot_narrow_by_and_asks(self, query, label):
+        question = self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, query,
+        )
+
+        assert question is not None
+        assert label in question
+        assert question.endswith("Pokazać wszystkie zaległe faktury z tego miesiąca?")
+
+    def test_several_missing_filters_are_all_named(self):
+        question = self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"},
+            "faktury do wystawienia powyżej 500 zł dla zamówień z włóczką jeans",
+        )
+
+        assert "kwocie zamówienia ani po produkcie w zamówieniu" in question
+
+    @pytest.mark.parametrize("query", [
+        # Nothing to narrow by at all.
+        "jakie mam faktury do wystawienia",
+        # The one narrowing this tool CAN apply — it must answer, not ask.
+        "jakie mam faktury do wysłania w zamówieniach nie nowych",
+        "jakie faktury mam do wystawienia w wysłanych zamówieniach",
+    ])
+    def test_a_filter_the_tool_has_is_answered_not_questioned(self, query):
+        assert self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, query,
+        ) is None
+
+    def test_a_tool_that_filters_by_everything_is_never_guarded(self):
+        """get_orders narrows by amount, product, buyer and stage alike — the
+        guard has nothing to protect there."""
+        assert self._agent()._unsupported_filter_question(
+            {"get_orders"}, "pokaż zamówienia powyżej 400 zł z włóczką jeans",
+        ) is None
+
+    def test_an_unguarded_tool_behaves_exactly_as_before(self):
+        """The guard is opt-in per tool (see _UNFILTERABLE_FALLBACK): a tool
+        with no fallback sentence written for it is left alone."""
+        assert self._agent()._unsupported_filter_question(
+            {"get_sales_summary"}, "ile zarobiłem na zamówieniach powyżej 500 zł",
+        ) is None
+
+    def test_the_preview_cannot_narrow_by_stage_either(self):
+        question = self._agent()._unsupported_filter_question(
+            {"preview_pending_invoices"}, "wystaw faktury do wysłanych zamówień",
+        )
+
+        assert "etapie realizacji zamówienia" in question
+
+    def test_it_asks_once_and_then_answers(self):
+        """A seller who restates the filter has already read that it cannot be
+        applied — asking again would be a loop with no way out."""
+        asked = self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, "faktury do wysłania powyżej 500 zł",
+        )
+
+        assert self._agent(last_assistant_text=asked)._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, "tak, ale tylko te powyżej 500 zł",
+        ) is None
+
+
+class TestFilterGuardStopsTheTurn:
+    """End-to-end: the guard has to stop the turn on BOTH routes to a tool —
+    the deterministic one and the model's — because either can reach a tool
+    that cannot serve the filter the query names."""
+
+    @pytest.mark.asyncio
+    async def test_the_deterministic_route_asks_instead_of_dispatching(self):
+        agent = _make_agent()
+        agent._allegro._tokens = MagicMock(is_expired=MagicMock(return_value=False))
+        agent._dispatch = AsyncMock(side_effect=AssertionError("no tool call expected"))
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected")
+        )
+
+        # The stage resolves here (see deterministic_dispatch), the amount has
+        # nowhere to go on this tool — so the turn asks rather than answering
+        # with every pending invoice of the month.
+        response = await agent.run(
+            "jakie mam faktury do wysłania w zamówieniach nie nowych powyżej 500 zł"
+        )
+
+        assert "kwocie zamówienia" in response.text
+        assert response.text.endswith("Pokazać wszystkie zaległe faktury z tego miesiąca?")
+        assert response.metadata["output_format"] == "chat"
+
+    @pytest.mark.asyncio
+    async def test_the_model_route_asks_instead_of_dispatching(self):
+        agent = _make_agent()
+        agent._allegro._tokens = MagicMock(is_expired=MagicMock(return_value=False))
+        agent._dispatch = AsyncMock(side_effect=AssertionError("no tool call expected"))
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_tool_select_response([
+                _tool_call("get_orders_pending_invoice", {}),
+            ])
+        )
+
+        # No stage named, so no deterministic matcher fires — the model picks
+        # the tool and drops the amount, the case this guard exists for.
+        response = await agent.run(
+            "czy mam jakieś zaległe faktury dla zamówień powyżej 500 zł"
+        )
+
+        assert "kwocie zamówienia" in response.text
+
+
 class TestGetOrderDetailsDispatch:
     """_dispatch's get_order_details branch now builds the final, ready-to-
     display plain-text bullet list directly in Python instead of handing
@@ -1668,7 +1895,7 @@ class TestBuyersReport:
     @staticmethod
     def _order(order_id, login, price, *, company="", nip="", first="", last="",
                invoice_required=False, paid_at="2026-03-04T10:00:00Z",
-               recipient="", recipient_company=""):
+               recipient="", recipient_company="", quantity=1, line_items=None):
         from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine
 
         recipient_first, _, recipient_last = recipient.partition(" ")
@@ -1690,7 +1917,10 @@ class TestBuyersReport:
                     "companyName": recipient_company,
                 },
             } if (recipient or recipient_company) else {},
-            line_items=[AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=1, price=price)],
+            line_items=(
+                [AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=quantity, price=price)]
+                if line_items is None else line_items
+            ),
             invoice_required=invoice_required,
             invoice_buyer=AllegroInvoiceBuyer(
                 required=invoice_required,
@@ -1887,6 +2117,45 @@ class TestBuyersReport:
         assert first_row(by_orders).startswith("| Katarzyna Wójcik |")  # 3 orders, lowest value
         assert first_row(by_recent).startswith("| Katarzyna Wójcik |")  # bought most recently
         assert first_row(await agent._dispatch("get_buyers", {})).startswith("| Kawa i Spółka |")
+
+    @pytest.mark.asyncio
+    async def test_summary_gives_the_average_order_value_and_quantity(self):
+        """The seller reads the totals as "how big is one order here?", so the
+        summary states it instead of leaving them to divide."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 100.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 50.0, quantity=2, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+
+        assert "łącznie **2** zamówienia na **150,00 PLN**." in summary
+        assert "Średnio **75,00 PLN** i **2,5 szt.** na zamówienie." in summary
+
+    @pytest.mark.asyncio
+    async def test_averages_cover_every_buyer_not_only_the_rows_shown(self):
+        """Same scope as the totals they sit next to: the table's limit cuts
+        rows, never the period the figures describe."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 300.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 100.0, quantity=1, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"limit": 1})
+
+        assert "Średnio **200,00 PLN** i **2,0 szt.** na zamówienie." in result
+        assert "W tabeli pokazano pierwszych 1." in result
+
+    @pytest.mark.asyncio
+    async def test_quantity_is_dropped_when_allegro_sent_no_line_items(self):
+        """"0,0 szt." would read as "sprzedałem nic" — a different claim from
+        "nie wiem, ile sztuk"."""
+        agent = self._agent_with([self._order("a1", "anna", 100.0, line_items=[])])
+
+        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+
+        assert "Średnio **100,00 PLN** na zamówienie." in summary
+        assert "szt." not in summary
 
     @pytest.mark.asyncio
     async def test_failed_invoice_lookup_is_reported_not_counted_as_missing(self):
@@ -2616,3 +2885,209 @@ class TestAppendedMonitoringBlock:
         out = await agent._dispatch("get_orders_pending_invoice", {})
 
         assert out == "Brak zamówień wymagających wystawienia faktury."
+
+
+class TestOrderProductFilter:
+    """Allegro cannot filter orders by what is INSIDE them, and until this
+    filter existed nothing else could either: "pokaż mi zamówienie z wczoraj,
+    które miało tylko włóczkę yarnart jeans" came back as every order of the
+    day, the product silently dropped — the unfiltered-list-as-an-answer shape
+    the value filter above was built to stop. Seen in production."""
+
+    def _order(self, order_id, *items, **overrides):
+        """`items` are (offer_name, quantity) pairs — this filter is about the
+        order's contents, so every test states them."""
+        from models.allegro import AllegroOrder, AllegroOrderLine
+        defaults = dict(
+            order_id=order_id,
+            buyer_login="jan_kowalski",
+            status="BOUGHT",
+            fulfillment_status="NEW",
+            total_price=120.00,
+            currency="PLN",
+            paid_at="2026-09-10T10:20:00Z",
+            delivery={"method": {"name": "Kurier DPD"},
+                      "cost": {"amount": "14.99", "currency": "PLN"}},
+            line_items=[
+                AllegroOrderLine(offer_id=str(i), offer_name=name, quantity=qty, price=10.0)
+                for i, (name, qty) in enumerate(items, start=1)
+            ],
+        )
+        defaults.update(overrides)
+        return AllegroOrder(**defaults)
+
+    def _agent(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders = AsyncMock(return_value=orders)
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_only_orders_containing_the_product_are_listed(self):
+        agent = self._agent([
+            self._order("yarn", ("Włóczka YarnArt Jeans 50g kolor 05", 3)),
+            self._order("other", ("Włóczka Merino 100g", 1)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"]}
+        )
+
+        assert "`yarn`" in result
+        assert "`other`" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_category_word_the_seller_says_out_loud_does_not_break_the_match(self):
+        """"włóczkę yarnart jeans" is how the question is asked; the title may
+        put that word anywhere or leave it out (see product_filter_terms)."""
+        agent = self._agent([self._order("yarn", ("YarnArt Jeans 50g bawełna", 2))])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["włóczka yarnart jeans"]}
+        )
+
+        assert "`yarn`" in result
+
+    @pytest.mark.asyncio
+    async def test_tylko_means_the_order_held_nothing_else(self):
+        """The seller's 'tylko': a mixed order contains the yarn too, but it is
+        not the order they asked about."""
+        orders = [
+            self._order("pure", ("Włóczka YarnArt Jeans 50g", 4)),
+            self._order("mixed",
+                        ("Włóczka YarnArt Jeans 50g", 1), ("Włóczka Merino 100g", 2)),
+        ]
+
+        only = await self._agent(orders)._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"], "product_match": "only"}
+        )
+        any_match = await self._agent(orders)._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"]}
+        )
+
+        assert "`pure`" in only and "`mixed`" not in only
+        assert "`pure`" in any_match and "`mixed`" in any_match, "'any' is the default"
+
+    @pytest.mark.asyncio
+    async def test_a_more_specific_model_is_not_swallowed_by_a_shorter_name(self):
+        """'jeans' and 'jeans plus' are two yarns — the whole point of
+        match_product_term, and it has to hold for orders too."""
+        agent = self._agent([
+            self._order("plus", ("Włóczka YarnArt Jeans Plus 100g", 1)),
+            self._order("base", ("Włóczka YarnArt Jeans 50g", 1)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["jeans plus"], "product_match": "only"}
+        )
+
+        assert "`plus`" in result and "`base`" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_filtered_listing_shows_what_was_in_the_order(self):
+        """'tylko włóczkę yarnart jeans' is a claim about the contents — the
+        seller has to be able to check it against the reply."""
+        agent = self._agent([self._order("yarn", ("Włóczka YarnArt Jeans 50g", 3))])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["yarnart jeans"]})
+
+        assert "Produkty:" in result
+        assert "  - Włóczka YarnArt Jeans 50g — 3 szt." in result
+
+    @pytest.mark.asyncio
+    async def test_an_unfiltered_listing_keeps_the_short_bullet(self):
+        agent = self._agent([self._order("yarn", ("Włóczka YarnArt Jeans 50g", 3))])
+
+        result = await agent._dispatch("get_orders", {})
+
+        assert "Produkty:" not in result
+
+    @pytest.mark.asyncio
+    async def test_empty_result_names_the_product_it_filtered_on(self):
+        agent = self._agent([self._order("other", ("Włóczka Merino 100g", 1))])
+
+        result = await agent._dispatch(
+            "get_orders",
+            {"product_names": ["yarnart jeans"], "bought_after_local": "2026-09-10 00:00"},
+        )
+
+        assert result.startswith(
+            "Brak zamówień z produktem **yarnart jeans** w okresie od 2026-09-10"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_result_repeats_the_tylko_too(self):
+        agent = self._agent([
+            self._order("mixed",
+                        ("Włóczka YarnArt Jeans 50g", 1), ("Włóczka Merino 100g", 2)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"], "product_match": "only"}
+        )
+
+        assert result.startswith(
+            "Brak zamówień zawierających wyłącznie **yarnart jeans**"
+        ), "'brak zamówień z tą włóczką' would be false — one order had it"
+
+    @pytest.mark.asyncio
+    async def test_a_count_names_the_product_as_well(self):
+        agent = self._agent([
+            self._order("yarn", ("Włóczka YarnArt Jeans 50g", 3)),
+            self._order("other", ("Włóczka Merino 100g", 1)),
+        ])
+
+        result = await agent._dispatch(
+            "get_orders", {"product_names": ["yarnart jeans"], "count_only": True}
+        )
+
+        assert result == "Masz łącznie **1** zamówienie z produktem **yarnart jeans**."
+
+    @pytest.mark.asyncio
+    async def test_a_full_page_scanned_says_how_far_it_looked(self):
+        """Same caveat as the amount filter: "nothing matched" is only true of
+        the page this call fetched."""
+        agent = self._agent([
+            self._order(f"o{i}", ("Włóczka Merino 100g", 1)) for i in range(100)
+        ])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["yarnart jeans"]})
+
+        assert "(przeszukano 100 ostatnich zamówień)" in result
+
+    @pytest.mark.asyncio
+    async def test_an_order_with_no_line_items_is_never_a_match(self):
+        """Allegro returned nothing about its contents, so no product question
+        can be answered with it."""
+        agent = self._agent([self._order("empty")])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["yarnart jeans"]})
+
+        assert "`empty`" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_blank_product_name_filters_nothing_out(self):
+        """A malformed argument must not turn the listing into "no orders at
+        all" — the same recoverable-over-raising rule as _value_bounds."""
+        agent = self._agent([self._order("yarn", ("Włóczka Merino 100g", 1))])
+
+        result = await agent._dispatch("get_orders", {"product_names": ["", "  "]})
+
+        assert "`yarn`" in result
+        assert "Produkty:" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_filter_reaches_the_new_orders_and_courier_presets_too(self):
+        """All three order tools are one listing (see _ORDERS_PRESETS), so the
+        product question is answerable whichever preset the model picks."""
+        orders = [
+            self._order("yarn", ("Włóczka YarnArt Jeans 50g", 1),
+                        fulfillment_status="READY_FOR_SHIPMENT"),
+            self._order("other", ("Włóczka Merino 100g", 1),
+                        fulfillment_status="READY_FOR_SHIPMENT"),
+        ]
+
+        result = await self._agent(orders)._dispatch(
+            "get_orders_delivery", {"product_names": ["yarnart jeans"]}
+        )
+
+        assert "`yarn`" in result and "`other`" not in result
