@@ -349,6 +349,19 @@ CASES: list[Case] = [
          "Do których zamówień muszę wystawić fakturę?",
          ("Zamówień bez faktury", "Faktura: niewystawiona", "NIP"),
          note="Zamówienia z prośbą o fakturę + dane nabywcy."),
+    Case("get_orders_pending_invoice__new_orders", "get_orders_pending_invoice",
+         {"fulfillment_status": ["NEW"]},
+         "Jakie mam faktury do wysłania w nowych zamówieniach?",
+         ("Zamówień bez faktury w statusie nowe: 2", "Faktura: niewystawiona"),
+         note="Ta sama lista zawężona do jednego etapu zamówień — nagłówek nazywa "
+              "zawężenie, żeby liczba nie czytała się jako całość miesiąca."),
+    Case("get_orders_pending_invoice__not_new", "get_orders_pending_invoice",
+         {"exclude_fulfillment_status": ["NEW"]},
+         "Jakie mam faktury do wysłania w zamówieniach nie nowych?",
+         ("Brak zamówień wymagających wystawienia faktury w innym statusie niż nowe.",),
+         note="Negacja etapu jako wykluczenie. Pusta odpowiedź powtarza zawężenie — "
+              "bez tego brzmiałaby jak „nie masz żadnych zaległych faktur”, a to co "
+              "innego niż „nie masz ich poza nowymi zamówieniami”."),
     Case("get_order_invoice_data", "get_order_invoice_data", {"order_id": ds.ORD_1},
          f"Jakie są dane do faktury dla zamówienia {ds.ORD_1}?",
          ("Dane do faktury", "NIP", "Kod pocztowy"),

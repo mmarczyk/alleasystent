@@ -575,6 +575,83 @@ class TestExtractValueBounds:
         assert extract_value_bounds(query) == {}
 
 
+class TestPendingInvoicesScopedToAStage:
+    """"Jakie mam faktury do wysłania w zamówieniach nie nowych" — one question
+    with two halves, of which only the first used to be answered: the invoice
+    listing came back for the whole month with the stage silently dropped."""
+
+    DISPATCHED = ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]
+
+    @pytest.mark.parametrize("query", [
+        "jakie mam faktury do wysłania w zamówieniach nie nowych",
+        "jakie mam faktury do wysłania w zamówieniach nienowych",
+        "jakie faktury mam do wystawienia w nie nowych zamówieniach",
+    ])
+    def test_the_seller_question(self, query):
+        assert _resolve(query) == (
+            "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+        )
+
+    @pytest.mark.parametrize("query,statuses", [
+        ("jakie faktury mam do wystawienia w wysłanych zamówieniach", DISPATCHED),
+        ("faktury do wysłania w zamówieniach spakowanych", ["READY_FOR_SHIPMENT"]),
+        ("jakie mam faktury do wysłania w zamówieniach do wysłania", ["READY_FOR_SHIPMENT"]),
+        ("jakie faktury mam do wysłania w zamówieniach w realizacji", ["PROCESSING"]),
+        ("jakie mam faktury do wystawienia w nowych zamówieniach", ["NEW"]),
+        ("faktury do wysłania w zamówieniach już odebranych", ["PICKED_UP"]),
+    ])
+    def test_a_positive_stage_is_kept(self, query, statuses):
+        assert _resolve(query) == (
+            "get_orders_pending_invoice", {"fulfillment_status": statuses},
+        )
+
+    def test_shipped_covers_the_whole_dispatched_family(self):
+        """An order IN_TRANSIT or PICKED_UP is every bit as "wysłane" as a SENT
+        one, and its invoice is the most overdue of all — answering with SENT
+        alone would hide exactly those."""
+        _, args = _resolve("jakie faktury mam do wysłania w wysłanych zamówieniach")
+        assert args == {"fulfillment_status": self.DISPATCHED}
+
+    @pytest.mark.parametrize("query,excluded", [
+        ("które faktury są do wysłania w zamówieniach nie odebranych", ["PICKED_UP"]),
+        ("jakie faktury mam do wystawienia w niewysłanych zamówieniach", DISPATCHED),
+    ])
+    def test_other_negations_exclude_the_same_way(self, query, excluded):
+        assert _resolve(query) == (
+            "get_orders_pending_invoice", {"exclude_fulfillment_status": excluded},
+        )
+
+    def test_without_a_stage_nothing_is_resolved_here(self):
+        """The half the model does not drop — it goes to the LLM exactly as it
+        always did."""
+        assert _resolve("jakie mam faktury do wystawienia") is None
+
+    @pytest.mark.parametrize("query", [
+        # An issuance command, not a question about what is pending.
+        "wystaw faktury do wysłanych zamówień",
+        "wygeneruj brakujące faktury w nowych zamówieniach",
+        # One named order, and the billing-address lookup — other tools.
+        "dane do faktury dla tego zamówienia",
+        "dołącz fakturę do wysłanego zamówienia",
+        # A month other than the current one needs a clock this layer lacks.
+        "jakie mam faktury do wysłania w zamówieniach nie nowych w zeszłym miesiącu",
+        # Two stages at once — the ambiguity this layer hands over.
+        "faktury do wystawienia w zamówieniach spakowanych, ale jeszcze nie wysłanych",
+    ])
+    def test_bails(self, query):
+        assert _resolve(query) is None
+
+    def test_a_stage_word_not_said_about_orders_is_not_a_stage(self):
+        """"Nowych" describes the CUSTOMERS here — filtering orders by it would
+        answer a question nobody asked."""
+        assert _resolve("jakie mam faktury do wysłania dla nowych klientów") is None
+
+    def test_the_order_stage_listings_are_untouched(self):
+        """The pairing of labels this matcher needs must not swallow a plain
+        order question that happens to mention neither invoices nor a stage."""
+        assert _resolve("co mam do wysłania") == ("get_orders_delivery", {})
+
+
 class TestMultiTopicAndUnrelatedQueries:
     def test_multi_topic_query_never_dispatches(self):
         assert _resolve("nowe zamówienia i moje konto") is None

@@ -827,6 +827,233 @@ class TestCancelledOrdersAreNeverListed:
         assert "`anulowane`" in result
 
 
+class TestPendingInvoicesScopedToAStage:
+    """"Jakie mam faktury do wysłania w zamówieniach nie nowych" — an invoice
+    question narrowed to part of the seller's orders. The stage has to reach
+    the fetch AND the sentences that report the result: an unscoped "Brak
+    zamówień wymagających wystawienia faktury." answers a question nobody
+    asked, and is indistinguishable from owing nobody an invoice at all."""
+
+    def _agent(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_orders_needing_invoice = AsyncMock(return_value=orders)
+        agent._allegro.get_order_invoice_data = AsyncMock(return_value={})
+        agent._allegro._user_id = "u1"
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_a_negated_stage_reaches_the_fetch(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs == {
+            "month": None, "year": None,
+            "fulfillment_status": [], "exclude_fulfillment_status": ["NEW"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_positive_stage_reaches_the_fetch(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            await agent._dispatch(
+                "get_orders_pending_invoice",
+                {"fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]},
+            )
+
+        kwargs = agent._allegro.get_orders_needing_invoice.await_args.kwargs
+        assert kwargs["fulfillment_status"] == [
+            "SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP",
+        ]
+        assert kwargs["exclude_fulfillment_status"] == []
+
+    @pytest.mark.asyncio
+    async def test_one_status_as_a_bare_string_is_read_as_a_list(self):
+        """get_orders' own fulfillment_status is a single status, so a model
+        that has seen that schema will pass a bare string here too. Reading it
+        as a one-element list is what it means; rejecting it would drop the
+        scope silently."""
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"fulfillment_status": "sent"},
+            )
+
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs[
+            "fulfillment_status"
+        ] == ["SENT"]
+        assert "w statusie wysłane" in result
+
+    @pytest.mark.asyncio
+    async def test_the_header_names_the_scope(self):
+        agent = self._agent([_plain_order("ord-1", fulfillment="SENT")])
+
+        with patch("services.invoice_ledger.get_records", AsyncMock(return_value={})), \
+             patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert "**Zamówień bez faktury w innym statusie niż nowe: 1**" in result
+
+    @pytest.mark.asyncio
+    async def test_an_empty_scoped_answer_says_what_was_scoped(self):
+        agent = self._agent([])
+
+        with patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch(
+                "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+            )
+
+        assert result.startswith(
+            "Brak zamówień wymagających wystawienia faktury w innym statusie niż nowe."
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unscoped_question_reads_exactly_as_before(self):
+        agent = self._agent([])
+
+        with patch("services.invoice_reminder.is_monitor_enabled", AsyncMock(return_value=False)):
+            result = await agent._dispatch("get_orders_pending_invoice", {})
+
+        assert result.startswith("Brak zamówień wymagających wystawienia faktury.")
+        assert agent._allegro.get_orders_needing_invoice.await_args.kwargs == {
+            "month": None, "year": None,
+            "fulfillment_status": [], "exclude_fulfillment_status": [],
+        }
+
+
+class TestAFilterTheToolDoesNotHave:
+    """A narrowing the chosen tool has no parameter for. Answering anyway hands
+    the seller a WIDER list than they asked for, with nothing saying so — and
+    that list reads like the answer. The turn stops and asks instead."""
+
+    def _agent(self, last_assistant_text: str = ""):
+        agent = _make_agent()
+        agent._last_assistant_text = last_assistant_text
+        return agent
+
+    @pytest.mark.parametrize("query,label", [
+        ("jakie mam faktury do wysłania powyżej 500 zł", "kwocie zamówienia"),
+        ("jakie faktury mam do wystawienia dla zamówień z włóczką yarnart jeans",
+         "produkcie w zamówieniu"),
+        ("jakie mam faktury do wysłania z konta anna.kowalska88", "koncie kupującego"),
+    ])
+    def test_it_says_what_it_cannot_narrow_by_and_asks(self, query, label):
+        question = self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, query,
+        )
+
+        assert question is not None
+        assert label in question
+        assert question.endswith("Pokazać wszystkie zaległe faktury z tego miesiąca?")
+
+    def test_several_missing_filters_are_all_named(self):
+        question = self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"},
+            "faktury do wystawienia powyżej 500 zł dla zamówień z włóczką jeans",
+        )
+
+        assert "kwocie zamówienia ani po produkcie w zamówieniu" in question
+
+    @pytest.mark.parametrize("query", [
+        # Nothing to narrow by at all.
+        "jakie mam faktury do wystawienia",
+        # The one narrowing this tool CAN apply — it must answer, not ask.
+        "jakie mam faktury do wysłania w zamówieniach nie nowych",
+        "jakie faktury mam do wystawienia w wysłanych zamówieniach",
+    ])
+    def test_a_filter_the_tool_has_is_answered_not_questioned(self, query):
+        assert self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, query,
+        ) is None
+
+    def test_a_tool_that_filters_by_everything_is_never_guarded(self):
+        """get_orders narrows by amount, product, buyer and stage alike — the
+        guard has nothing to protect there."""
+        assert self._agent()._unsupported_filter_question(
+            {"get_orders"}, "pokaż zamówienia powyżej 400 zł z włóczką jeans",
+        ) is None
+
+    def test_an_unguarded_tool_behaves_exactly_as_before(self):
+        """The guard is opt-in per tool (see _UNFILTERABLE_FALLBACK): a tool
+        with no fallback sentence written for it is left alone."""
+        assert self._agent()._unsupported_filter_question(
+            {"get_sales_summary"}, "ile zarobiłem na zamówieniach powyżej 500 zł",
+        ) is None
+
+    def test_the_preview_cannot_narrow_by_stage_either(self):
+        question = self._agent()._unsupported_filter_question(
+            {"preview_pending_invoices"}, "wystaw faktury do wysłanych zamówień",
+        )
+
+        assert "etapie realizacji zamówienia" in question
+
+    def test_it_asks_once_and_then_answers(self):
+        """A seller who restates the filter has already read that it cannot be
+        applied — asking again would be a loop with no way out."""
+        asked = self._agent()._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, "faktury do wysłania powyżej 500 zł",
+        )
+
+        assert self._agent(last_assistant_text=asked)._unsupported_filter_question(
+            {"get_orders_pending_invoice"}, "tak, ale tylko te powyżej 500 zł",
+        ) is None
+
+
+class TestFilterGuardStopsTheTurn:
+    """End-to-end: the guard has to stop the turn on BOTH routes to a tool —
+    the deterministic one and the model's — because either can reach a tool
+    that cannot serve the filter the query names."""
+
+    @pytest.mark.asyncio
+    async def test_the_deterministic_route_asks_instead_of_dispatching(self):
+        agent = _make_agent()
+        agent._allegro._tokens = MagicMock(is_expired=MagicMock(return_value=False))
+        agent._dispatch = AsyncMock(side_effect=AssertionError("no tool call expected"))
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected")
+        )
+
+        # The stage resolves here (see deterministic_dispatch), the amount has
+        # nowhere to go on this tool — so the turn asks rather than answering
+        # with every pending invoice of the month.
+        response = await agent.run(
+            "jakie mam faktury do wysłania w zamówieniach nie nowych powyżej 500 zł"
+        )
+
+        assert "kwocie zamówienia" in response.text
+        assert response.text.endswith("Pokazać wszystkie zaległe faktury z tego miesiąca?")
+        assert response.metadata["output_format"] == "chat"
+
+    @pytest.mark.asyncio
+    async def test_the_model_route_asks_instead_of_dispatching(self):
+        agent = _make_agent()
+        agent._allegro._tokens = MagicMock(is_expired=MagicMock(return_value=False))
+        agent._dispatch = AsyncMock(side_effect=AssertionError("no tool call expected"))
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_tool_select_response([
+                _tool_call("get_orders_pending_invoice", {}),
+            ])
+        )
+
+        # No stage named, so no deterministic matcher fires — the model picks
+        # the tool and drops the amount, the case this guard exists for.
+        response = await agent.run(
+            "czy mam jakieś zaległe faktury dla zamówień powyżej 500 zł"
+        )
+
+        assert "kwocie zamówienia" in response.text
+
+
 class TestGetOrderDetailsDispatch:
     """_dispatch's get_order_details branch now builds the final, ready-to-
     display plain-text bullet list directly in Python instead of handing

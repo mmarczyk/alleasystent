@@ -12,12 +12,14 @@ import json
 import logging
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from agents.allegro.allegro_tools import (
     ALLEGRO_TOOLS,
+    TOOL_FILTERS,
     TOOL_OUTPUT_FORMAT,
     matched_labels,
     named_buyer_login,
@@ -26,6 +28,8 @@ from agents.allegro.allegro_tools import (
 )
 from agents.allegro.deterministic_dispatch import (
     extract_value_bounds,
+    names_a_product,
+    names_an_order_stage,
     resolve_deterministic,
     wants_latest_order_details,
 )
@@ -107,6 +111,54 @@ _BUYER_LOGIN_TOOLS = frozenset(
     t["function"]["name"] for t in ALLEGRO_TOOLS
     if "buyer_login" in t["function"]["parameters"].get("properties", {})
 )
+# ── A narrowing the chosen tool has no parameter for ────────────────────────
+# The seller's question carries a filter — an amount, a product, a buyer
+# account, an order stage — and the tool that would answer it has nothing to
+# put that filter in. Answering anyway hands back a WIDER list than the
+# question asked for with nothing saying so, and that list reads like the
+# answer: "jakie mam faktury do wysłania powyżej 500 zł" came back as every
+# pending invoice of the month, the amount gone without a trace.
+#
+# So the turn stops and asks instead — the same shape as the buyer-login guard
+# above, which is this one's special case, and as ask_clarifying_question.
+# What each tool CAN narrow by is declared once, off the schemas
+# (allegro_tools.TOOL_FILTERS); what the query NAMES is read by the same
+# extractors the deterministic layer uses, so the guard and the dispatcher
+# always agree on what the wording means.
+_FILTER_DETECTORS: tuple[tuple[str, Callable[[str], bool]], ...] = (
+    ("value",   lambda q: bool(extract_value_bounds(q))),
+    ("product", names_a_product),
+    ("buyer",   lambda q: bool(named_buyer_login(q))),
+    ("stage",   names_an_order_stage),
+)
+_FILTER_LABEL_PL: dict[str, str] = {
+    "value":   "kwocie zamówienia",
+    "product": "produkcie w zamówieniu",
+    "buyer":   "koncie kupującego",
+    "stage":   "etapie realizacji zamówienia",
+}
+# OPT-IN, and deliberately so: a tool is guarded only once someone has written
+# down what its unnarrowed answer actually is, in the seller's words, because
+# that sentence is the question they get asked. A tool missing here behaves
+# exactly as it always did.
+#
+# Do not add a listing preset (get_orders & co.) without reading the CAUTION on
+# TOOL_FILTERS first — those narrow by more than their schema admits, so the
+# guard would refuse questions they can in fact answer.
+# This guard's own question, recognised in the previous assistant turn. It asks
+# ONCE: a seller who restates the filter ("tak, ale te powyżej 500 zł") has
+# already read that it cannot be applied, and asking again would be a loop with
+# no way out. The second time round they get the wider answer they were
+# offered, which is now an answer to a question they did say yes to.
+_ASSISTANT_ASKED_ABOUT_FILTER_RE = re.compile(r"nie mam na to filtra", re.IGNORECASE)
+
+_UNFILTERABLE_FALLBACK: dict[str, str] = {
+    "get_orders_pending_invoice": "Pokazać wszystkie zaległe faktury z tego miesiąca?",
+    "preview_pending_invoices": (
+        "Przygotować podgląd danych dla wszystkich zaległych faktur z tego miesiąca?"
+    ),
+}
+
 # The calendar-date half of a "YYYY-MM-DD HH:MM" local filter (see
 # AllegroAgent._filter_scope_note).
 _LOCAL_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
@@ -561,6 +613,12 @@ class AllegroAgent(BaseAgent):
         "ANTI-HALLUCINATION — Allegro offer IDs are always 11-digit numbers (e.g. '12345678901'). "
         "If you find yourself writing UUID-format IDs (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), "
         "STOP — you are hallucinating. Call get_active_offers instead. "
+        "A FILTER THE TOOL DOES NOT HAVE — CRITICAL: before calling a tool, check that it has a "
+        "parameter for every narrowing the user named (amount, product, buyer account, order "
+        "stage, period). If it does not, call ask_clarifying_question: say what you cannot narrow "
+        "by and ask whether to show the wider answer instead. Calling the tool anyway drops the "
+        "filter without a trace and the wider list reads like the answer — that is worse than not "
+        "answering. "
         "ANTI-HALLUCINATION — TOOL NAMES: only call a tool whose exact name appears in your tool list. "
         "Never invent a plausible-sounding tool name (e.g. 'get_orders_by_courier') just because it "
         "matches the phrasing of the question — find the closest EXISTING tool from the MANDATORY TOOL "
@@ -572,8 +630,18 @@ class AllegroAgent(BaseAgent):
         "SEPARATE entry and must be shown as a separate row. Showing 2 rows when there are 5 "
         "entries is WRONG. If the tool says '5 wpisów', show 5 rows, not 2. "
         "• Invoice address / 'dane do faktury' / 'NIP' / 'adres nabywcy' for a specific order (no issuance verb) → get_order_invoice_data\n"
-        "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'brakujące faktury' "
-        "(read-only list, nothing created) → get_orders_pending_invoice (includes address automatically)\n"
+        "• Which orders need an invoice / 'jakie mam faktury do wystawienia' / 'jakie mam faktury "
+        "do wysłania' / 'brakujące faktury' / 'zaległe faktury' (read-only list, nothing created) → "
+        "get_orders_pending_invoice (includes address automatically). 'Faktury do wysłania' is this "
+        "tool too — it is the DOCUMENT the seller still owes, never get_orders_delivery, whose "
+        "'do wysłania' is about parcels waiting for a courier.\n"
+        "  - SCOPED TO AN ORDER STAGE ('faktury do wysłania w zamówieniach nie nowych', 'jakie "
+        "faktury muszę wystawić do wysłanych zamówień', 'brakujące faktury w zamówieniach, których "
+        "jeszcze nie wysłałem') → the SAME tool with its stage filter: a positive stage goes to "
+        "fulfillment_status, a negated one ('nie nowych', 'niewysłanych') to "
+        "exclude_fulfillment_status. Never drop the stage and never answer a negation with one "
+        "positive status — both turn a scoped question into the month's whole pending list, which "
+        "reads like a real answer.\n"
         "• ISSUE/CREATE invoice(s) — ONLY with an explicit issuance verb ('wystaw fakturę/faktury', "
         "'wystaw brakujące faktury', 'utwórz fakturę dla zamówienia X'):\n"
         "  - ONE specific order named (a concrete order_id from context or given directly by the "
@@ -962,6 +1030,17 @@ class AllegroAgent(BaseAgent):
                 det_match = resolve_deterministic(query, query_labels)
         if det_match is not None:
             det_tool, det_input = det_match
+            # The matchers resolve the filters they CAN read; this catches the
+            # ones the chosen tool has no parameter for at all (see
+            # _unsupported_filter_question) — e.g. an amount on the pending
+            # invoice listing, which would otherwise be dropped in silence.
+            unsupported = self._unsupported_filter_question({det_tool}, query)
+            if unsupported is not None:
+                perf.log(result="ask_clarifying_question")
+                return AgentResponse(
+                    text=unsupported, agent_type=self.agent_name,
+                    metadata={"output_format": "chat"},
+                )
             det_input = self._with_value_bounds(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
@@ -1083,6 +1162,17 @@ class AllegroAgent(BaseAgent):
                     perf.log(result="ask_clarifying_question")
                     return AgentResponse(
                         text=question, agent_type=self.agent_name,
+                        metadata={"output_format": "chat"},
+                    )
+
+                # The same thing for every other narrowing the query names and
+                # the chosen tool cannot apply — the buyer-login guard above is
+                # this one's first and most costly special case.
+                unsupported = self._unsupported_filter_question(called_now, query)
+                if unsupported is not None:
+                    perf.log(result="ask_clarifying_question")
+                    return AgentResponse(
+                        text=unsupported, agent_type=self.agent_name,
                         metadata={"output_format": "chat"},
                     )
 
@@ -1342,6 +1432,39 @@ class AllegroAgent(BaseAgent):
         if not orders:
             return "get_new_orders", {"limit": 1}
         return "get_order_details", {"order_id": orders[0].order_id}
+
+    def _unsupported_filter_question(self, tool_names: set[str], query: str) -> str | None:
+        """The question to ask INSTEAD of answering, when `query` narrows the
+        answer in a way none of the tools about to run can apply — or None when
+        every narrowing it names can be served.
+
+        See _UNFILTERABLE_FALLBACK above for why this asks rather than answers:
+        the wider listing is not a partial answer, it is a different one, and
+        the seller has no way to tell from reading it.
+        """
+        if _ASSISTANT_ASKED_ABOUT_FILTER_RE.search(self._last_assistant_text or ""):
+            return None  # asked on the previous turn — see the regex's comment
+        for tool in sorted(tool_names):
+            fallback = _UNFILTERABLE_FALLBACK.get(tool)
+            if not fallback:
+                continue
+            supported = TOOL_FILTERS.get(tool, frozenset())
+            missing = [
+                dimension for dimension, detect in _FILTER_DETECTORS
+                if dimension not in supported and detect(query)
+            ]
+            if not missing:
+                continue
+            labels = " ani po ".join(_FILTER_LABEL_PL[d] for d in missing)
+            logger.info(
+                "[allegro] filter guard: %s cannot narrow by %s — asking | query=%.80r",
+                tool, missing, query,
+            )
+            return (
+                f"Nie umiem zawęzić tej odpowiedzi po {labels} — nie mam na to filtra, "
+                f"więc pokazałbym więcej, niż pytasz. {fallback}"
+            )
+        return None
 
     def _with_value_bounds(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
         """Put an order amount the seller stated back onto an order listing the
@@ -2052,6 +2175,44 @@ class AllegroAgent(BaseAgent):
     @classmethod
     def _fulfillment_pl(cls, status: str | None) -> str:
         return cls._FULFILLMENT_PL.get(status or "", status or "—")
+
+    @classmethod
+    def _stage_scope_note(cls, keep: list[str], drop: list[str]) -> str:
+        """The order-stage scope a listing actually ran with, as a phrase to put
+        inside its own count/empty sentence: " w innym statusie niż nowe".
+
+        Exists for the same reason as _filter_scope_note, and words the
+        exclusion exactly as that one does: the count and empty sentences ARE
+        the answer to a scoped question (see _PASSTHROUGH_TOOLS), so an empty
+        one that drops the scope — "Brak zamówień wymagających wystawienia
+        faktury." — is indistinguishable from owing nobody an invoice at all,
+        which is a different and usually false statement.
+        """
+        parts: list[str] = []
+        if keep:
+            parts.append("w statusie " + ", ".join(
+                cls._fulfillment_pl(status).lower() for status in keep
+            ))
+        if drop:
+            parts.append("w innym statusie niż " + ", ".join(
+                cls._fulfillment_pl(status).lower() for status in drop
+            ))
+        return (" " + " i ".join(parts)) if parts else ""
+
+    @staticmethod
+    def _stage_filter(tool_input: dict[str, Any], key: str) -> list[str]:
+        """One stage filter off a tool call, as a list of Allegro statuses.
+
+        A single string is accepted as well as a list: get_orders' own
+        fulfillment_status is one status (see _ORDER_PARAMS in
+        allegro_tools.py), so a model that has seen that schema will sooner or
+        later pass a bare "SENT" here too. Reading it as a one-element list is
+        exactly what it means; rejecting it would drop the scope silently.
+        """
+        raw = tool_input.get(key) or ()
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(v).upper() for v in raw if str(v).strip()]
 
     _PUBLICATION_PL: dict[str, str] = {
         "ACTIVE":    "Aktywna",
@@ -4866,12 +5027,25 @@ class AllegroAgent(BaseAgent):
             return await self._find_buyer_by_contact(tool_input)
 
         if tool_name == "get_orders_pending_invoice":
+            # The stage scope ("faktury do wysłania w zamówieniach nie nowych")
+            # narrows WHICH orders are asked about, so it has to reach both the
+            # fetch and the sentences that report the result — an unscoped
+            # "Brak zamówień…" for a scoped question says something else
+            # entirely. See _stage_scope_note.
+            keep = self._stage_filter(tool_input, "fulfillment_status")
+            drop = self._stage_filter(tool_input, "exclude_fulfillment_status")
+            scope = self._stage_scope_note(keep, drop)
             orders = await self._allegro.get_orders_needing_invoice(
                 month=tool_input.get("month"),
                 year=tool_input.get("year"),
+                fulfillment_status=keep,
+                exclude_fulfillment_status=drop,
             )
             if not orders:
-                return "Brak zamówień wymagających wystawienia faktury." + "\n\n" + await self._invoice_reminder_status_block()
+                return (
+                    f"Brak zamówień wymagających wystawienia faktury{scope}."
+                    + "\n\n" + await self._invoice_reminder_status_block()
+                )
             # Fetch invoice address data for all orders in parallel
             inv_results = await asyncio.gather(
                 *[self._allegro.get_order_invoice_data(o.order_id) for o in orders],
@@ -4886,7 +5060,7 @@ class AllegroAgent(BaseAgent):
                 invoice_ledger.user_id_of(self._allegro), [o.order_id for o in orders]
             )
             not_issued = sum(1 for o in orders if o.order_id not in issued)
-            header = f"**Zamówień bez faktury: {not_issued}**"
+            header = f"**Zamówień bez faktury{scope}: {not_issued}**"
             if issued:
                 header += (
                     f" (+{len(issued)}, dla których faktura już istnieje, ale nie jest dołączona "
