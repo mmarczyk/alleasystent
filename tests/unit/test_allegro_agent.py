@@ -1895,7 +1895,7 @@ class TestBuyersReport:
     @staticmethod
     def _order(order_id, login, price, *, company="", nip="", first="", last="",
                invoice_required=False, paid_at="2026-03-04T10:00:00Z",
-               recipient="", recipient_company=""):
+               recipient="", recipient_company="", quantity=1, line_items=None):
         from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine
 
         recipient_first, _, recipient_last = recipient.partition(" ")
@@ -1917,7 +1917,10 @@ class TestBuyersReport:
                     "companyName": recipient_company,
                 },
             } if (recipient or recipient_company) else {},
-            line_items=[AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=1, price=price)],
+            line_items=(
+                [AllegroOrderLine(offer_id="1", offer_name="Produkt", quantity=quantity, price=price)]
+                if line_items is None else line_items
+            ),
             invoice_required=invoice_required,
             invoice_buyer=AllegroInvoiceBuyer(
                 required=invoice_required,
@@ -2114,6 +2117,45 @@ class TestBuyersReport:
         assert first_row(by_orders).startswith("| Katarzyna Wójcik |")  # 3 orders, lowest value
         assert first_row(by_recent).startswith("| Katarzyna Wójcik |")  # bought most recently
         assert first_row(await agent._dispatch("get_buyers", {})).startswith("| Kawa i Spółka |")
+
+    @pytest.mark.asyncio
+    async def test_summary_gives_the_average_order_value_and_quantity(self):
+        """The seller reads the totals as "how big is one order here?", so the
+        summary states it instead of leaving them to divide."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 100.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 50.0, quantity=2, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+
+        assert "łącznie **2** zamówienia na **150,00 PLN**." in summary
+        assert "Średnio **75,00 PLN** i **2,5 szt.** na zamówienie." in summary
+
+    @pytest.mark.asyncio
+    async def test_averages_cover_every_buyer_not_only_the_rows_shown(self):
+        """Same scope as the totals they sit next to: the table's limit cuts
+        rows, never the period the figures describe."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 300.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 100.0, quantity=1, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"limit": 1})
+
+        assert "Średnio **200,00 PLN** i **2,0 szt.** na zamówienie." in result
+        assert "W tabeli pokazano pierwszych 1." in result
+
+    @pytest.mark.asyncio
+    async def test_quantity_is_dropped_when_allegro_sent_no_line_items(self):
+        """"0,0 szt." would read as "sprzedałem nic" — a different claim from
+        "nie wiem, ile sztuk"."""
+        agent = self._agent_with([self._order("a1", "anna", 100.0, line_items=[])])
+
+        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+
+        assert "Średnio **100,00 PLN** na zamówienie." in summary
+        assert "szt." not in summary
 
     @pytest.mark.asyncio
     async def test_failed_invoice_lookup_is_reported_not_counted_as_missing(self):
