@@ -27,6 +27,7 @@ from agents.allegro.allegro_tools import (
     tools_for_labels,
 )
 from agents.allegro.deterministic_dispatch import (
+    extract_buyer_scope,
     extract_value_bounds,
     names_a_product,
     names_an_order_stage,
@@ -508,8 +509,16 @@ class AllegroAgent(BaseAgent):
         "buyer with their order count, total spend and invoice count). Pass buyer_type='company' "
         "when the question names firms/NIP/B2B and 'person' for private buyers, invoice_status="
         "'issued' for 'dla których wystawiłem fakturę', 'missing' for buyers still owed one, "
-        "count_only=true for 'ilu/ile'. Resolve the period yourself ('w tym roku' → 1 January of "
-        "the current year through today) and omit both dates only when no period is named — the "
+        "count_only=true for 'ilu/ile'. Pass min_orders whenever the question keeps only "
+        "the repeat customers — 'tylko ci, którzy zrobili więcej niż 3 zamówienia' → "
+        "min_orders=4 (more than 3 means 4 and up), 'co najmniej 3' → min_orders=3, 'stali "
+        "klienci'/'kupili więcej niż raz' → min_orders=2; dropping that count answers with "
+        "every customer of the period, which reads like the answer and is not. "
+        "'Którzy klienci robią największe zamówienia' / 'kto składa duże zamówienia' → "
+        "sort_by='avg_value' (the biggest AVERAGE order, NOT the default 'value', which "
+        "answers with whoever placed forty small ones); 'kto bierze hurtowo' / 'najwięcej "
+        "sztuk na raz' → sort_by='avg_items'. "
+        "Resolve the period yourself ('w tym roku' → 1 January of the current year through today) and omit both dates only when no period is named — the "
         "tool then defaults to the current year. NEVER answer a buyer question with get_orders or "
         "get_sales_summary: neither groups anything by buyer, so the seller would be left counting "
         "rows themselves.\n"
@@ -1102,6 +1111,7 @@ class AllegroAgent(BaseAgent):
                     metadata={"output_format": "chat"},
                 )
             det_input = self._with_value_bounds(det_tool, det_input, query)
+            det_input = self._with_buyer_scope(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
             try:
@@ -1251,6 +1261,7 @@ class AllegroAgent(BaseAgent):
                     except json.JSONDecodeError:
                         tool_input = {}
                     tool_input = self._with_value_bounds(tool_name, tool_input, query)
+                    tool_input = self._with_buyer_scope(tool_name, tool_input, query)
                     if tool_name == "get_message_threads":
                         # The user's wording overrides whatever the model decided for
                         # count_only (see _wants_message_count_only above).
@@ -1600,6 +1611,33 @@ class AllegroAgent(BaseAgent):
             return tool_input
         logger.info("[allegro] value bounds read from the query: %s (%s)", bounds, tool_name)
         return {**tool_input, **bounds}
+
+    def _with_buyer_scope(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
+        """Put the narrowings a buyer question states — companies or private
+        people, the invoice state, an order count, the ordering — back onto a
+        get_buyers call the model made without them.
+
+        Same failure as _with_value_bounds, and the same answer to it: a dropped
+        narrowing comes back as a LONGER list that reads exactly like the answer
+        ("tylko ci, którzy zrobili więcej niż 3 zamówienia" → all 884 customers
+        of the period), and nothing in the reply says it was ignored. Sorting is
+        here for the same reason one step further in: "którzy klienci robią
+        największe zamówienia" answered in total-spend order is not a longer
+        list but a wrong one — it names whoever placed forty small orders.
+
+        Only ever ADDS: every argument the model passed itself stays untouched,
+        and a question stating none of this changes nothing.
+        """
+        if tool_name != "get_buyers":
+            return tool_input
+        missing = {
+            arg: value for arg, value in extract_buyer_scope(query).items()
+            if tool_input.get(arg) is None
+        }
+        if not missing:
+            return tool_input
+        logger.info("[allegro] get_buyers: %s read from the query", missing)
+        return {**tool_input, **missing}
 
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:
@@ -2994,6 +3032,16 @@ class AllegroAgent(BaseAgent):
             group["name"] = group["name"] or (group["logins"] or ["—"])[0]
         return list(groups.values())
 
+    @staticmethod
+    def _avg_items(group: dict[str, Any]) -> str:
+        """Average pieces per order for ONE buyer, or "" (the table renders it
+        as "—") when Allegro sent no line items for any of their orders: "0,0"
+        would read as "kupił zero sztuk", a different statement from "nie wiem,
+        ile sztuk"."""
+        if not group["items"]:
+            return ""
+        return f"{group['items'] / group['orders']:.1f}".replace(".", ",")
+
     async def _invoice_flags(self, orders: list[Any]) -> tuple[dict[str, bool | None], int]:
         """(order_id → invoice attached?, how many orders the cap left unchecked).
 
@@ -3019,6 +3067,9 @@ class AllegroAgent(BaseAgent):
         invoice_status = tool_input.get("invoice_status") or "any"
         sort_by = tool_input.get("sort_by") or "value"
         limit = max(1, min(int(tool_input.get("limit") or 100), self._BUYERS_TABLE_CAP))
+        min_orders = max(1, int(tool_input.get("min_orders") or 1))
+        min_value = tool_input.get("min_value")
+        max_value = tool_input.get("max_value")
 
         orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
         if buyer_type == "company":
@@ -3040,10 +3091,33 @@ class AllegroAgent(BaseAgent):
             orders = [o for o in orders if flags.get(o.order_id) is False]
 
         buyers = self._aggregate_buyers(orders, flags)
+        # Applied to BUYERS, after grouping — the question is about how many
+        # orders one customer made, which no per-order filter can answer. Before
+        # the totals below, so the summary counts the same people the table
+        # lists instead of the whole period.
+        if min_orders > 1:
+            buyers = [g for g in buyers if g["orders"] >= min_orders]
+        # The amount bounds the buyer's TOTAL over the period — "ile u mnie
+        # wydał" is a sum, and it is the only amount a buyer row states that is
+        # not derived. (The size of one order is a different question and has a
+        # different answer: sort_by='avg_value'.)
+        if min_value is not None:
+            buyers = [g for g in buyers if g["value"] >= float(min_value)]
+        if max_value is not None:
+            buyers = [g for g in buyers if g["value"] <= float(max_value)]
         if sort_by == "recent":
             buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)
         elif sort_by == "orders":
             buyers.sort(key=lambda g: (g["orders"], g["value"]), reverse=True)
+        elif sort_by == "avg_value":
+            # "Którzy klienci robią największe zamówienia" is a question about
+            # the SIZE of one order, which total spend answers wrong: somebody
+            # with forty small orders outranks a customer who orders a pallet
+            # twice a year. Ties break on the total, so the bigger customer of
+            # two with the same basket still comes first.
+            buyers.sort(key=lambda g: (g["value"] / g["orders"], g["value"]), reverse=True)
+        elif sort_by == "avg_items":
+            buyers.sort(key=lambda g: (g["items"] / g["orders"], g["value"]), reverse=True)
         else:
             buyers.sort(key=lambda g: (g["value"], g["orders"]), reverse=True)
 
@@ -3051,10 +3125,32 @@ class AllegroAgent(BaseAgent):
             label for (arg, value), label in self._BUYER_FILTER_LABELS.items()
             if {"buyer_type": buyer_type, "invoice_status": invoice_status}[arg] == value
         ]
+        # Spelled out in the reply, not just applied: a seller who asked for
+        # "więcej niż 3 zamówienia" has to be able to see from the answer that
+        # the bound really took, and which way round it was read.
+        if min_orders > 1:
+            filters.append(
+                f"co najmniej {min_orders} "
+                f"{self._plural_pl(min_orders, 'zamówienie', 'zamówienia', 'zamówień')}"
+            )
+        # "Łącznie" carries the whole reading of the bound: without it, "powyżej
+        # 5000 PLN" next to a table of order counts and averages could be read
+        # as a bound on one order, which is a different set of customers.
+        if min_value is not None and max_value is not None:
+            filters.append(
+                f"łącznie od {self._format_price(float(min_value))} "
+                f"do {self._format_price(float(max_value))}"
+            )
+        elif min_value is not None:
+            filters.append(f"łącznie od {self._format_price(float(min_value))}")
+        elif max_value is not None:
+            filters.append(f"łącznie do {self._format_price(float(max_value))}")
         filter_note = f" ({', '.join(filters)})" if filters else ""
         logger.info(
-            "get_buyers: %d orders → %d buyers (%s, typ=%s, faktury=%s)",
-            len(orders), len(buyers), period_label, buyer_type, invoice_status,
+            "get_buyers: %d orders → %d buyers (%s, typ=%s, faktury=%s, min_zamowien=%d, "
+            "kwota=%s–%s)",
+            len(orders), len(buyers), period_label, buyer_type, invoice_status, min_orders,
+            min_value, max_value,
         )
 
         if tool_input.get("count_only"):
@@ -3071,8 +3167,14 @@ class AllegroAgent(BaseAgent):
         # invoice_status='missing' every row is 0 by construction, and with 'any'
         # no lookup ran at all.
         with_invoices = invoice_status in ("issued", "requested")
-        headers = ["Kupujący", "Typ", "NIP", "Login Allegro", "Zamówienia", "Wartość"]
-        align = "llllrr"
+        # The averages belong to the ROW, not to the period: "ile średnio
+        # wydaje ten klient i ile sztuk bierze" is what separates a wholesale
+        # customer from someone who buys one skein a month, and a single
+        # period-wide figure says nothing about either. Same column name as the
+        # monthly breakdown's ("Śr. wartość") — one meaning per header.
+        headers = ["Kupujący", "Typ", "NIP", "Login Allegro", "Zamówienia", "Wartość",
+                   "Śr. wartość", "Śr. szt."]
+        align = "llllrrrr"
         if with_invoices:
             headers.append("Faktury VAT")
             align += "r"
@@ -3088,6 +3190,8 @@ class AllegroAgent(BaseAgent):
                 ", ".join(f"`{login}`" for login in group["logins"]),
                 group["orders"],
                 self._format_price(group["value"], group["currency"]),
+                self._format_price(group["value"] / group["orders"], group["currency"]),
+                self._avg_items(group),
             ]
             if with_invoices:
                 row.append(group["invoices"])
@@ -3096,7 +3200,6 @@ class AllegroAgent(BaseAgent):
 
         total_orders = sum(g["orders"] for g in buyers)
         total_value = sum(g["value"] for g in buyers)
-        total_items = sum(g["items"] for g in buyers)
         # Kept short on purpose: this sentence IS the chat bubble (the table goes
         # to the document viewer), and the preview cuts off at 220 characters.
         # Phrased as a noun phrase, not "kupowało u Ciebie N…": the Polish verb
@@ -3110,19 +3213,6 @@ class AllegroAgent(BaseAgent):
             f"{self._plural_pl(total_orders, 'zamówienie', 'zamówienia', 'zamówień')} "
             f"na **{self._format_price(total_value)}**."
         )
-        # Averages per ORDER, not per buyer: "ile średnio wychodzi jedno
-        # zamówienie" is the figure a seller compares between periods, while a
-        # per-buyer average moves on its own every time a one-off customer joins
-        # the list. Both are computed over ALL buyers in the period, like the
-        # totals above — not just the rows the table had room for.
-        if total_orders:
-            avg_value = self._format_price(total_value / total_orders)
-            # Pieces only when Allegro actually sent line items: "0,0 szt."
-            # would read as "sprzedałem nic", which is a different claim from
-            # "nie wiem, ile sztuk".
-            avg_qty = f"{total_items / total_orders:.1f}".replace(".", ",")
-            avg_items = f" i **{avg_qty} szt.**" if total_items else ""
-            summary += f" Średnio **{avg_value}**{avg_items} na zamówienie."
         if len(shown) < len(buyers):
             summary += f" W tabeli pokazano pierwszych {len(shown)}."
         unknown = sum(1 for value in flags.values() if value is None)

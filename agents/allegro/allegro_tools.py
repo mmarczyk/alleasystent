@@ -1079,15 +1079,21 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "The BUYER view of a period: one row per CUSTOMER instead of one row per order — "
                 "who bought, how many orders, for how much in total, when they last bought, and "
-                "how many of their orders already have a VAT invoice. The summary under the "
-                "table also states the period's totals plus the AVERAGE ORDER VALUE and the "
-                "average number of pieces per order, so 'średnia wartość zamówienia u moich "
-                "klientów' needs no second tool. "
+                "how many of their orders already have a VAT invoice. Every row also carries "
+                "THAT BUYER's average order value and average number of pieces per order, so "
+                "'ile średnio wydaje jeden klient', 'kto kupuje hurtowo' and 'średnia wartość "
+                "zamówienia u moich klientów' need no second tool. "
                 "USE THIS for any question about the buyers themselves: 'lista kupujących', "
                 "'lista klientów', 'kto u mnie kupował', 'ilu miałem klientów', 'moi najlepsi "
                 "klienci', 'stali klienci', 'kto kupuje najwięcej', 'jakie firmy u mnie kupowały', "
                 "'lista kupujących, dla których wystawiłem faktury VAT', 'klienci z NIP-em', "
                 "'zestawienie kontrahentów'. "
+                "ONLY THE REPEAT CUSTOMERS: min_orders keeps just the buyers who reached that "
+                "many orders in the period — 'tylko ci, którzy zrobili więcej niż 3 zamówienia', "
+                "'stali klienci', 'kto kupił u mnie więcej niż raz'. "
+                "ONLY THE BIG SPENDERS: min_value/max_value bound what the buyer spent IN TOTAL "
+                "over the period — 'klienci, którzy wydali u mnie powyżej 5000 zł', 'kto zostawił "
+                "ponad 1000 zł'. "
                 "FIRMA vs OSOBA PRYWATNA: the ONLY place Allegro states this is the VAT-invoice "
                 "address on the order (company name + NIP), so buyer_type='company' means exactly "
                 "'gave company invoice details on at least one order in the period' — a business "
@@ -1124,6 +1130,39 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "min_value": {
+                        "type": "number",
+                        "description": (
+                            "Keep only buyers whose TOTAL spend over the period is at least this "
+                            "much (inclusive), in PLN: 'klienci, którzy wydali powyżej 5000 zł', "
+                            "'kto zostawił u mnie ponad 1000 zł'. It bounds the buyer's SUM, not "
+                            "one order — a question about the size of a single order ('kto robi "
+                            "największe zamówienia') is sort_by='avg_value' instead."
+                        ),
+                    },
+                    "max_value": {
+                        "type": "number",
+                        "description": (
+                            "Keep only buyers whose TOTAL spend over the period is at most this "
+                            "much (inclusive), in PLN: 'klienci, którzy wydali mniej niż 200 zł'. "
+                            "Combine with min_value for 'między 500 a 1000 zł'."
+                        ),
+                    },
+                    "min_orders": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Keep ONLY buyers with AT LEAST this many orders in the period — the "
+                            "bound is INCLUSIVE, so convert the wording: 'więcej niż 3 "
+                            "zamówienia' / 'powyżej 3' / 'ponad 3' → 4, 'co najmniej 3' / "
+                            "'przynajmniej 3' / '3 lub więcej' → 3, 'stali klienci' / 'kupili "
+                            "więcej niż raz' / 'wracający klienci' → 2. The counts, the totals "
+                            "and the summary sentence then describe only those buyers. Omit it "
+                            "for every buyer of the period — NEVER drop a count the seller "
+                            "stated, the reply would be a much longer list that reads exactly "
+                            "like the answer they asked for."
+                        ),
+                    },
                     "date_from_local": {
                         "type": "string",
                         "description": (
@@ -1165,11 +1204,16 @@ ALLEGRO_TOOLS: list[dict] = [
                     "sort_by": {
                         "type": "string",
                         "description": (
-                            "Row order: 'value' = highest total spend first (default, the 'najlepsi "
+                            "Row order: 'value' = highest TOTAL spend first (default, the 'najlepsi "
                             "klienci' order), 'orders' = most orders first ('stali klienci', 'kto "
-                            "kupuje najczęściej'), 'recent' = most recent purchase first."
+                            "kupuje najczęściej'), 'avg_value' = biggest AVERAGE ORDER first "
+                            "('którzy klienci robią największe zamówienia', 'kto składa duże "
+                            "zamówienia' — NOT 'value', which puts someone with 40 small orders on "
+                            "top), 'avg_items' = most pieces per order first ('kto bierze "
+                            "hurtowo', 'kto kupuje po kilka sztuk na raz'), 'recent' = most recent "
+                            "purchase first."
                         ),
-                        "enum": ["value", "orders", "recent"],
+                        "enum": ["value", "orders", "avg_value", "avg_items", "recent"],
                         "default": "value",
                     },
                     "count_only": {

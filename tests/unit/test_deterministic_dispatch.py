@@ -6,6 +6,8 @@ import pytest
 
 from agents.allegro.allegro_tools import matched_labels
 from agents.allegro.deterministic_dispatch import (
+    extract_buyer_scope,
+    extract_min_orders,
     extract_value_bounds,
     resolve_deterministic,
     wants_latest_order_details,
@@ -487,6 +489,144 @@ class TestFollowUpAboutOneKnownOrder:
     ])
     def test_listing_questions_still_resolve(self, query):
         assert _resolve(query) is not None
+
+
+class TestExtractMinOrders:
+    """"Tylko ci, którzy zrobili więcej niż 3 zamówienia" — a narrowing the
+    model drops as readily as an amount, and just as invisibly: the answer comes
+    back as every customer of the period. See extract_min_orders."""
+
+    def test_the_production_question(self):
+        assert extract_min_orders(
+            "Podaj mi listę kupujących z ostatnich 3 miesięcy, uwzględnij tylko tych "
+            "którzy zrobili więcej niż 3 zamówienia"
+        ) == 4
+
+    @pytest.mark.parametrize("query,expected", [
+        # Strict: "more than 3" starts at 4. One word apart from the inclusive
+        # wordings below, and a silent off-by-one adds a whole row of customers.
+        ("kupujący, którzy zrobili więcej niż 3 zamówienia", 4),
+        ("klienci powyżej 3 zamówień", 4),
+        ("klienci ponad 10 zakupów", 11),
+        # Inclusive: the number itself.
+        ("kupujący z co najmniej 3 zamówieniami", 3),
+        ("klienci przynajmniej 2 transakcje", 2),
+        ("klienci z minimum 4 zamówieniami", 4),
+        ("klienci z 5 lub więcej zamówień", 5),
+        # The count IS the noun.
+        ("kto kupił u mnie więcej niż raz", 2),
+        ("klienci, którzy zamówili więcej niż jeden raz", 2),
+        # Spelled-out numerals.
+        ("kupujący z więcej niż dwa zamówienia", 3),
+    ])
+    def test_polish_wordings(self, query, expected):
+        assert extract_min_orders(query) == expected
+
+    @pytest.mark.parametrize("query,expected", [
+        ("buyers with more than 3 orders", 4),
+        ("customers with at least 5 purchases", 5),
+        ("who bought more than once", 2),
+    ])
+    def test_english_wording_too(self, query, expected):
+        assert extract_min_orders(query) == expected
+
+    @pytest.mark.parametrize("query", [
+        # The period is a count too, and it is not this one.
+        "lista kupujących z ostatnich 3 miesięcy",
+        "lista kupujących z tego roku",
+        # An amount, not an order count — the noun is what tells them apart.
+        "zamówienia powyżej 500 zł",
+        "faktury do wysłania powyżej 500 zł",
+        # A piece count, still not an order count.
+        "zamówienia z ponad 5 sztukami",
+        # No number stated: "stali klienci" alone is the model's judgement call,
+        # not a bound this layer may invent.
+        "stali klienci",
+        "moi najlepsi klienci",
+    ])
+    def test_reads_nothing_when_no_order_count_is_stated(self, query):
+        assert extract_min_orders(query) is None
+
+    def test_more_than_one_order_is_two_not_one(self):
+        """"więcej niż 1" must not come back as 1 — that keeps everybody."""
+        assert extract_min_orders("klienci z więcej niż 1 zamówieniem") == 2
+
+
+class TestExtractBuyerScope:
+    """What a buyer question narrows and orders by — companies, the invoice
+    state, an order count, the ordering. All four have a get_buyers parameter,
+    so reading them here only stops them evaporating between the seller's
+    sentence and the call. See extract_buyer_scope."""
+
+    @pytest.mark.parametrize("query,expected", [
+        # Sorting: "największe zamówienia" is about the size of ONE order, and
+        # the default (total spend) answers it with whoever ordered most often.
+        ("Którzy klienci robią największe zamówienia?", {"sort_by": "avg_value"}),
+        ("kto składa u mnie duże zamówienia", {"sort_by": "avg_value"}),
+        ("klienci z najwyższą średnią wartością zamówienia", {"sort_by": "avg_value"}),
+        ("kto kupuje u mnie hurtowo", {"sort_by": "avg_items"}),
+        ("którzy klienci biorą najwięcej sztuk na raz", {"sort_by": "avg_items"}),
+        # Who the buyer is.
+        ("którzy klienci firmowi kupują u mnie najczęściej", {"buyer_type": "company"}),
+        ("jakie firmy u mnie kupowały w tym roku", {"buyer_type": "company"}),
+        ("lista kontrahentów z tego roku", {"buyer_type": "company"}),
+        ("kupujący z NIP", {"buyer_type": "company"}),
+        ("pokaż klientów prywatnych", {"buyer_type": "person"}),
+        # The invoice state.
+        ("klienci zamawiający z fakturą", {"invoice_status": "requested"}),
+        ("którzy klienci proszą o fakturę VAT", {"invoice_status": "requested"}),
+        ("kupujący, dla których wystawiłem faktury VAT", {"invoice_status": "issued"}),
+        ("komu jeszcze nie wystawiłem faktury", {"invoice_status": "missing"}),
+        ("klienci, którzy czekają na fakturę", {"invoice_status": "missing"}),
+    ])
+    def test_one_narrowing_at_a_time(self, query, expected):
+        assert extract_buyer_scope(query) == expected
+
+    @pytest.mark.parametrize("query,expected", [
+        ("klienci, którzy wydali u mnie powyżej 5000 zł", {"min_value": 5000.0}),
+        ("kto zostawił u mnie ponad 1000 zł", {"min_value": 1000.0}),
+        ("klienci, którzy wydali mniej niż 200 zł", {"max_value": 200.0}),
+        ("kupujący, którzy wydali między 500 a 1000 zł", {"min_value": 500.0,
+                                                          "max_value": 1000.0}),
+    ])
+    def test_what_the_customer_spent(self, query, expected):
+        """The same amount wording an order listing uses — on a buyer question it
+        bounds the customer's total, which is what the reply then says
+        ("łącznie od …")."""
+        assert extract_buyer_scope(query) == expected
+
+    def test_the_amount_travels_with_the_other_narrowings(self):
+        assert extract_buyer_scope(
+            "które firmy wydały u mnie powyżej 5000 zł i zrobiły więcej niż 3 zamówienia"
+        ) == {"buyer_type": "company", "min_value": 5000.0, "min_orders": 4}
+
+    def test_a_question_carrying_several_of_them(self):
+        assert extract_buyer_scope(
+            "Lista kupujących z tego roku, dla których wystawiałem faktury VAT — tylko firmy"
+        ) == {"buyer_type": "company", "invoice_status": "issued"}
+
+    def test_the_order_count_travels_with_the_rest(self):
+        assert extract_buyer_scope(
+            "pokaż osoby prywatne, które zrobiły więcej niż 3 zamówienia"
+        ) == {"buyer_type": "person", "min_orders": 4}
+
+    @pytest.mark.parametrize("query", [
+        "lista kupujących z tego roku",
+        "pokaż listę klientów z ostatnich 3 miesięcy",
+        # "Najlepsi klienci" IS the default ordering — nothing to override, and
+        # reading it as anything else would answer a question nobody asked.
+        "moi najlepsi klienci",
+        "kto u mnie kupował",
+    ])
+    def test_a_plain_buyer_list_narrows_nothing(self, query):
+        assert extract_buyer_scope(query) == {}
+
+    def test_a_negated_invoice_beats_the_word_it_contains(self):
+        """"nie wystawiłem" contains "wystawiłem" — read as 'issued' it would
+        answer with exactly the customers the seller is NOT asking about."""
+        assert extract_buyer_scope("którym klientom nie wystawiłem faktury") == {
+            "invoice_status": "missing",
+        }
 
 
 class TestExtractValueBounds:

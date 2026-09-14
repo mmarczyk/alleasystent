@@ -1965,9 +1965,9 @@ class TestBuyersReport:
         rows = [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
 
         assert rows == [
-            "| Kawa i Spółka | Firma | 7792445588 | `anna.firma`, `anna` | 2 | 1000,00 PLN | 01.05.2026 |",
-            "| Marek Zieliński | Osoba prywatna | — | `marek` | 1 | 899,00 PLN | 01.03.2026 |",
-            "| Katarzyna Wójcik | Osoba prywatna | — | `kasia` | 1 | 137,70 PLN | 01.04.2026 |",
+            "| Kawa i Spółka | Firma | 7792445588 | `anna.firma`, `anna` | 2 | 1000,00 PLN | 500,00 PLN | 1,0 | 01.05.2026 |",
+            "| Marek Zieliński | Osoba prywatna | — | `marek` | 1 | 899,00 PLN | 899,00 PLN | 1,0 | 01.03.2026 |",
+            "| Katarzyna Wójcik | Osoba prywatna | — | `kasia` | 1 | 137,70 PLN | 137,70 PLN | 1,0 | 01.04.2026 |",
         ]
         assert result.splitlines()[0] == "# Kupujący"
         # The summary is LAST — that is the half the chat bubble shows.
@@ -2045,7 +2045,10 @@ class TestBuyersReport:
         # Only the invoiced order counts toward the row — the company's other
         # order in the period has no invoice, so neither its value nor its
         # count may leak into an "invoices I issued" report.
-        assert "| Kawa i Spółka | Firma | 7792445588 | `anna.firma` | 1 | 600,00 PLN | 1 | 01.05.2026 |" in result
+        assert (
+            "| Kawa i Spółka | Firma | 7792445588 | `anna.firma` | 1 | 600,00 PLN | 600,00 PLN | 1,0 | 1 | 01.05.2026 |"
+            in result
+        )
         assert "Faktury VAT" in result
 
     @pytest.mark.asyncio
@@ -2119,43 +2122,213 @@ class TestBuyersReport:
         assert first_row(await agent._dispatch("get_buyers", {})).startswith("| Kawa i Spółka |")
 
     @pytest.mark.asyncio
-    async def test_summary_gives_the_average_order_value_and_quantity(self):
-        """The seller reads the totals as "how big is one order here?", so the
-        summary states it instead of leaving them to divide."""
+    async def test_each_row_averages_that_buyers_own_orders(self):
+        """The averages are per CUSTOMER — what separates a wholesale buyer from
+        someone taking one skein a month — not one figure for the whole period."""
         agent = self._agent_with([
             self._order("a1", "anna", 100.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
+            self._order("a2", "anna", 500.0, quantity=7, paid_at="2026-04-01T10:00:00Z"),
             self._order("b1", "marek", 50.0, quantity=2, paid_at="2026-03-01T10:00:00Z"),
         ])
 
-        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+        result = await agent._dispatch("get_buyers", {})
 
-        assert "łącznie **2** zamówienia na **150,00 PLN**." in summary
-        assert "Średnio **75,00 PLN** i **2,5 szt.** na zamówienie." in summary
-
-    @pytest.mark.asyncio
-    async def test_averages_cover_every_buyer_not_only_the_rows_shown(self):
-        """Same scope as the totals they sit next to: the table's limit cuts
-        rows, never the period the figures describe."""
-        agent = self._agent_with([
-            self._order("a1", "anna", 300.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
-            self._order("b1", "marek", 100.0, quantity=1, paid_at="2026-03-01T10:00:00Z"),
-        ])
-
-        result = await agent._dispatch("get_buyers", {"limit": 1})
-
-        assert "Średnio **200,00 PLN** i **2,0 szt.** na zamówienie." in result
-        assert "W tabeli pokazano pierwszych 1." in result
+        # anna: 600,00 / 2 orders, 10 pieces / 2 orders
+        assert "| `anna` | 2 | 600,00 PLN | 300,00 PLN | 5,0 |" in result
+        assert "| `marek` | 1 | 50,00 PLN | 50,00 PLN | 2,0 |" in result
+        # Nothing period-wide sneaks into the sentence under the table.
+        assert "na zamówienie" not in result.splitlines()[-1]
 
     @pytest.mark.asyncio
-    async def test_quantity_is_dropped_when_allegro_sent_no_line_items(self):
-        """"0,0 szt." would read as "sprzedałem nic" — a different claim from
-        "nie wiem, ile sztuk"."""
+    async def test_average_columns_are_labelled_and_right_aligned(self):
+        agent = self._agent_with([self._order("a1", "anna", 100.0, quantity=2)])
+
+        header, separator = (await agent._dispatch("get_buyers", {})).splitlines()[2:4]
+
+        assert header.endswith("| Zamówienia | Wartość | Śr. wartość | Śr. szt. | Ostatni zakup |")
+        assert separator.count("---:") == 4  # zamówienia, wartość, obie średnie
+
+    @pytest.mark.asyncio
+    async def test_quantity_is_dashed_when_allegro_sent_no_line_items(self):
+        """"0,0" would read as "kupił zero sztuk" — a different claim from "nie
+        wiem, ile sztuk"."""
         agent = self._agent_with([self._order("a1", "anna", 100.0, line_items=[])])
 
-        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+        result = await agent._dispatch("get_buyers", {})
 
-        assert "Średnio **100,00 PLN** na zamówienie." in summary
-        assert "szt." not in summary
+        assert "| `anna` | 1 | 100,00 PLN | 100,00 PLN | — |" in result
+
+    @pytest.mark.asyncio
+    async def test_min_orders_keeps_only_the_repeat_customers(self):
+        """"tylko ci, którzy zrobili więcej niż 3 zamówienia" — the count is per
+        BUYER, so it can only be applied after grouping."""
+        orders = [
+            self._order(f"a{i}", "anna", 100.0, paid_at=f"2026-0{i}-01T10:00:00Z")
+            for i in range(1, 5)                      # anna: 4 orders
+        ] + [
+            self._order("b1", "marek", 900.0, paid_at="2026-03-01T10:00:00Z"),
+            self._order("b2", "marek", 900.0, paid_at="2026-04-01T10:00:00Z"),
+        ]                                             # marek: 2 orders, higher spend
+        agent = self._agent_with(orders)
+
+        result = await agent._dispatch("get_buyers", {"min_orders": 4})
+
+        assert "`anna`" in result
+        assert "`marek`" not in result, "a big spender with too few orders still fails the filter"
+
+    @pytest.mark.asyncio
+    async def test_min_orders_is_inclusive(self):
+        agent = self._agent_with([
+            self._order("a1", "anna", 10.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 10.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("a3", "anna", 10.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        assert "`anna`" in await agent._dispatch("get_buyers", {"min_orders": 3})
+        assert "`anna`" not in await agent._dispatch("get_buyers", {"min_orders": 4})
+
+    @pytest.mark.asyncio
+    async def test_the_summary_counts_only_the_buyers_that_passed_the_filter(self):
+        """The totals describe the same people the table lists — and the note
+        names the bound, so the seller can see it really took."""
+        orders = [
+            self._order("a1", "anna", 100.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 100.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 900.0, paid_at="2026-03-01T10:00:00Z"),
+        ]
+        agent = self._agent_with(orders)
+
+        summary = (await agent._dispatch("get_buyers", {"min_orders": 2})).splitlines()[-1]
+
+        assert summary.startswith("**1** kupujący (co najmniej 2 zamówienia) w okresie")
+        assert "łącznie **2** zamówienia na **200,00 PLN**." in summary
+
+    @pytest.mark.asyncio
+    async def test_min_orders_that_matches_nobody_says_so_with_the_filter(self):
+        agent = self._agent_with([self._order("a1", "anna", 100.0)])
+
+        result = await agent._dispatch("get_buyers", {"min_orders": 5})
+
+        assert result.startswith("Brak kupujących (co najmniej 5 zamówień) w okresie")
+        assert "|" not in result
+
+    @pytest.mark.asyncio
+    async def test_min_value_keeps_the_buyers_who_spent_that_much_in_total(self):
+        """"Klienci, którzy wydali u mnie powyżej 5000 zł" — the bound is on the
+        customer's SUM over the period, so small orders add up to it."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 3000.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 2500.0, paid_at="2026-02-01T10:00:00Z"),  # 5500 razem
+            self._order("b1", "marek", 4000.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"min_value": 5000})
+
+        assert "`anna`" in result, "two orders that add up to the bound still reach it"
+        assert "`marek`" not in result
+        assert "(łącznie od 5000,00 PLN)" in result
+
+    @pytest.mark.asyncio
+    async def test_max_value_and_a_range(self):
+        agent = self._agent_with([
+            self._order("a1", "anna", 100.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("b1", "marek", 700.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("c1", "zofia", 5000.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        cheap = await agent._dispatch("get_buyers", {"max_value": 200})
+        band = await agent._dispatch("get_buyers", {"min_value": 500, "max_value": 1000})
+
+        assert "`anna`" in cheap and "`marek`" not in cheap and "`zofia`" not in cheap
+        assert "(łącznie do 200,00 PLN)" in cheap
+        assert "`marek`" in band and "`anna`" not in band and "`zofia`" not in band
+        assert "(łącznie od 500,00 PLN do 1000,00 PLN)" in band
+
+    @pytest.mark.asyncio
+    async def test_the_amount_bound_is_the_total_not_one_order(self):
+        """A single 900 zł order does NOT reach a 1000 zł bound, and two 600 zł
+        ones do — the difference between the two readings, stated as a test."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 600.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 600.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 900.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"min_value": 1000})
+
+        assert "`anna`" in result and "`marek`" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_amount_bound_stacks_with_the_other_filters(self):
+        agent = self._agent_with([
+            self._order("a1", "anna", 3000.0, company="Hurt sp. z o.o.", nip="7792445588",
+                        invoice_required=True, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 3000.0, company="Hurt sp. z o.o.", nip="7792445588",
+                        invoice_required=True, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 9000.0, first="Marek", last="Zieliński",
+                        paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch(
+            "get_buyers", {"buyer_type": "company", "min_value": 5000, "min_orders": 2}
+        )
+
+        assert "Hurt sp. z o.o." in result
+        assert "Marek Zieliński" not in result, "spent more, but is neither a company nor a repeat"
+        assert "(firmy, co najmniej 2 zamówienia, łącznie od 5000,00 PLN)" in result
+
+    @pytest.mark.asyncio
+    async def test_sort_by_avg_value_finds_who_places_the_biggest_orders(self):
+        """"Którzy klienci robią największe zamówienia" — the default (total
+        spend) answers it with whoever ordered most often, which is a different
+        customer and a different question."""
+        orders = [
+            self._order(f"s{i}", "drobnica", 100.0, paid_at=f"2026-0{i}-01T10:00:00Z")
+            for i in range(1, 7)                       # 6 × 100 = 600 total, 100 per order
+        ] + [
+            self._order("h1", "hurt", 2000.0, paid_at="2026-03-05T10:00:00Z"),
+            self._order("h2", "hurt", 1000.0, paid_at="2026-04-05T10:00:00Z"),
+        ]                                              # 3000 total, 1500 per order
+        agent = self._agent_with(orders)
+
+        def first_row(result):
+            return [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1]
+
+        assert first_row(await agent._dispatch("get_buyers", {"sort_by": "avg_value"})).startswith(
+            "| hurt |"
+        )
+        # …and the total-spend default still answers its own question.
+        assert first_row(await agent._dispatch("get_buyers", {})).startswith("| hurt |")
+        assert first_row(await agent._dispatch("get_buyers", {"sort_by": "orders"})).startswith(
+            "| drobnica |"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sort_by_avg_value_beats_a_bigger_total_from_small_orders(self):
+        agent = self._agent_with(
+            [
+                self._order(f"s{i}", "drobnica", 500.0, paid_at=f"2026-0{i}-01T10:00:00Z")
+                for i in range(1, 7)                   # 3000 total, 500 per order
+            ]
+            + [self._order("h1", "hurt", 1200.0, paid_at="2026-03-05T10:00:00Z")]
+        )
+
+        result = await agent._dispatch("get_buyers", {"sort_by": "avg_value"})
+        rows = [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+
+        assert rows[0].startswith("| hurt |"), "the biggest single order, not the biggest total"
+
+    @pytest.mark.asyncio
+    async def test_sort_by_avg_items_finds_the_wholesale_buyers(self):
+        agent = self._agent_with([
+            self._order("h1", "hurt", 300.0, quantity=40, paid_at="2026-03-01T10:00:00Z"),
+            self._order("d1", "detal", 900.0, quantity=2, paid_at="2026-04-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"sort_by": "avg_items"})
+        rows = [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+
+        assert rows[0].startswith("| hurt |")   # 40 szt./zam. despite spending less
 
     @pytest.mark.asyncio
     async def test_failed_invoice_lookup_is_reported_not_counted_as_missing(self):

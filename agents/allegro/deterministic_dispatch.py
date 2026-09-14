@@ -26,7 +26,7 @@ which is unacceptable. Every matcher below is deliberately conservative:
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import Any, Callable
 
 from agents.allegro.allegro_tools import named_buyer_login, named_phone_number
 
@@ -168,6 +168,156 @@ def extract_value_bounds(query: str) -> dict[str, float]:
     if len(bounds) == 2 and bounds["min_value"] > bounds["max_value"]:
         return {}
     return bounds
+
+
+# ── kupujacy: "tylko ci, ktorzy zrobili wiecej niz 3 zamowienia" ────────────
+# A buyer list is almost never asked for whole: the seller wants the ones who
+# came back. That narrowing rides on a NOUN ("zamówienia", "zakupy", "razy"),
+# not on a currency, so it is read here rather than left to the model, which
+# drops it and answers with all 884 customers of the period — a longer list
+# that reads exactly like the answer to the question asked.
+#
+# "więcej niż 3" is 4 and up, "co najmniej 3" is 3 and up: the two operators
+# are one word apart in Polish and a silent off-by-one would quietly add a
+# whole row of customers, so each is spelled out instead of shared.
+_ORDER_COUNT_WORDS: dict[str, int] = {
+    "raz": 1, "jeden": 1, "jedno": 1, "jedn": 1,
+    "dwa": 2, "dwie": 2, "trzy": 3, "cztery": 4, "pięć": 5, "piec": 5,
+}
+_COUNT_ALT = r"\d+|" + "|".join(sorted(_ORDER_COUNT_WORDS, key=len, reverse=True))
+# The noun that makes this a count of ORDERS — without it "powyżej 3" could be
+# an amount, a month or a piece count, and half a filter is worse than none.
+_ORDER_NOUN = r"(?:zam[oó]wie\w*|zamowie\w*|zakup\w*|transakcj\w*|razy|orders?|purchases?)"
+_MIN_ORDERS_STRICT_RE = re.compile(
+    rf"(?:wi[eę]cej\s+ni[zż]|powy[zż]ej|ponad|more\s+than|over)\s+"
+    rf"(?P<count>{_COUNT_ALT})\s+{_ORDER_NOUN}",
+    re.IGNORECASE,
+)
+_MIN_ORDERS_INCLUSIVE_RE = re.compile(
+    rf"(?:co\s+najmniej|przynajmniej|minimum|min\.|at\s+least)\s+"
+    rf"(?P<count>{_COUNT_ALT})\s+{_ORDER_NOUN}",
+    re.IGNORECASE,
+)
+# "3 lub więcej zamówień" — the same inclusive meaning with the words the other
+# way round.
+_MIN_ORDERS_OR_MORE_RE = re.compile(
+    rf"(?P<count>{_COUNT_ALT})\s+(?:lub|albo)\s+wi[eę]cej\s+{_ORDER_NOUN}",
+    re.IGNORECASE,
+)
+# "kupili więcej niż raz", "zamówili nie tylko raz" — the count IS the noun.
+_MIN_ORDERS_MORE_THAN_ONCE_RE = re.compile(
+    r"wi[eę]cej\s+ni[zż]\s+(?:jeden\s+)?raz\b|more\s+than\s+once", re.IGNORECASE,
+)
+
+
+def _count_word(raw: str) -> int | None:
+    if raw.isdigit():
+        return int(raw)
+    return _ORDER_COUNT_WORDS.get(raw.lower())
+
+
+def extract_min_orders(query: str) -> int | None:
+    """The smallest order count a buyer must reach to belong in the answer, as
+    get_buyers' `min_orders` argument — or None when the query names no such
+    narrowing.
+
+    Always INCLUSIVE, so the strict wordings ("więcej niż 3", "powyżej 3") are
+    converted here once: they mean 4.
+    """
+    strict = _MIN_ORDERS_STRICT_RE.search(query)
+    if strict:
+        count = _count_word(strict.group("count"))
+        if count is not None:
+            return count + 1
+    for pattern in (_MIN_ORDERS_INCLUSIVE_RE, _MIN_ORDERS_OR_MORE_RE):
+        match = pattern.search(query)
+        if match:
+            count = _count_word(match.group("count"))
+            if count is not None and count > 1:
+                return count
+    if _MIN_ORDERS_MORE_THAN_ONCE_RE.search(query):
+        return 2
+    return None
+
+
+# ── kupujacy: firmy, faktury, "kto robi najwieksze zamowienia" ──────────────
+# The same silent-drop problem as the order count above, on the three other
+# narrowings a buyer question carries. Each one has a parameter on get_buyers,
+# so nothing here invents an answer the tool cannot give — it only stops the
+# narrowing from evaporating between the seller's sentence and the call.
+_BUYER_COMPANY_RE = re.compile(
+    r"firm\w*|b2b|\bnip\b|kontrahent\w*|dzia[łl]alno[śs]\w*|sp\.\s*z\s*o\.?\s*o|companies|business",
+    re.IGNORECASE,
+)
+_BUYER_PERSON_RE = re.compile(
+    r"(?:osob\w*|klient\w*|kupuj[aą]c\w*|nabywc\w*)\s+prywatn\w*|"
+    r"prywatn\w*\s+(?:osob\w*|klient\w*|kupuj[aą]c\w*)|konsument\w*|private\s+(?:person|buyer)",
+    re.IGNORECASE,
+)
+# Which invoice state, in the order that decides ties: a NEGATED invoice beats
+# the word "wystawiłem" it contains ("komu jeszcze NIE wystawiłem faktury"),
+# and an invoice actually issued beats the mere request that preceded it.
+_INVOICE_ANY_RE = re.compile(r"faktur|invoice", re.IGNORECASE)
+_INVOICE_MISSING_RE = re.compile(
+    r"nie\s+\w*\s*wystawi|bez\s+(?:wystawionej\s+)?faktur|czeka\w*\s+na\s+faktur|"
+    r"zaleg\w*\s+faktur|brakuj\w*\s+faktur|winien\w*\s+faktur|still\s+owed",
+    re.IGNORECASE,
+)
+_INVOICE_ISSUED_RE = re.compile(r"wystawi\w*|issued", re.IGNORECASE)
+_INVOICE_REQUESTED_RE = re.compile(
+    r"(?:z|na|o|po)\s+faktur\w*|faktur\w*\s+vat\b|prosi\w*\s+o\s+faktur|"
+    r"chc\w*\s+faktur|zamawiaj\w*\s+z\s+faktur|with\s+an?\s+invoice",
+    re.IGNORECASE,
+)
+# "Którzy klienci robią największe zamówienia" — about the size of ONE order,
+# which total spend answers wrong (see AllegroAgent._buyers_report).
+_SORT_AVG_VALUE_RE = re.compile(
+    r"(?:najwi[eę]ksz\w*|najdro[zż]sz\w*|du[zż]\w*|grub\w*|wysok\w*)\s+"
+    r"(?:pojedyncz\w*\s+)?(?:zam[oó]wie\w*|zamowie\w*|koszyk\w*)|"
+    r"[śs]redni\w*\s+warto[śs][cć]\w*\s+zam[oó]wie\w*|biggest\s+orders?",
+    re.IGNORECASE,
+)
+_SORT_AVG_ITEMS_RE = re.compile(
+    r"hurtow\w*|na\s+hurt\b|najwi[eę]cej\s+sztuk|du[zż]\w*\s+ilo[śs]ci|"
+    r"po\s+kilka\s+sztuk|wholesale",
+    re.IGNORECASE,
+)
+
+
+def extract_buyer_scope(query: str) -> dict[str, Any]:
+    """Everything a buyer question narrows or orders BY that get_buyers has a
+    parameter for — buyer_type, invoice_status, min_orders, sort_by — as its
+    arguments, keyed exactly as the schema names them.
+
+    Only what the sentence states plainly: anything unsaid is left out entirely
+    so the caller's own arguments (and the tool's defaults) stand. See
+    AllegroAgent._with_buyer_scope for why this is read in Python at all.
+    """
+    scope: dict[str, Any] = {}
+    if _BUYER_PERSON_RE.search(query):
+        scope["buyer_type"] = "person"
+    elif _BUYER_COMPANY_RE.search(query):
+        scope["buyer_type"] = "company"
+    if _INVOICE_ANY_RE.search(query):
+        if _INVOICE_MISSING_RE.search(query):
+            scope["invoice_status"] = "missing"
+        elif _INVOICE_ISSUED_RE.search(query):
+            scope["invoice_status"] = "issued"
+        elif _INVOICE_REQUESTED_RE.search(query):
+            scope["invoice_status"] = "requested"
+    minimum = extract_min_orders(query)
+    if minimum is not None:
+        scope["min_orders"] = minimum
+    # The same amount wording as an order listing's, read by the same extractor
+    # — on a buyer question it bounds what the CUSTOMER spent in total, which is
+    # what get_buyers' min_value/max_value mean (and what the reply says, see
+    # AllegroAgent._buyers_report: "łącznie od …").
+    scope.update(extract_value_bounds(query))
+    if _SORT_AVG_ITEMS_RE.search(query):
+        scope["sort_by"] = "avg_items"
+    elif _SORT_AVG_VALUE_RE.search(query):
+        scope["sort_by"] = "avg_value"
+    return scope
 
 
 # ── zamowienia: the order-stage vocabulary ──────────────────────────────────

@@ -311,6 +311,19 @@ CASES: list[Case] = [
          ("Biuro Serwis Paweł B.", "5252445566", "Faktury VAT",
           "(firmy, z wystawioną fakturą VAT)"),
          note="Firmy z realnie wystawioną fakturą — kolumna z liczbą faktur włączona."),
+    Case("get_buyers__requested_invoices", "get_buyers",
+         {"invoice_status": "requested", "sort_by": "avg_value"},
+         "Którzy klienci zamawiają u mnie z fakturą?",
+         ("(z prośbą o fakturę VAT)", "Marek Zieliński", "Faktury VAT"),
+         note="Kupujący, którzy poprosili o fakturę VAT — także osoby prywatne, bo o "
+              "fakturę prosi się niezależnie od firmy. Kolumna z liczbą faktur pokazuje, "
+              "komu już ją wystawiono."),
+    Case("get_buyers__biggest_orders", "get_buyers", {"sort_by": "avg_value"},
+         "Którzy klienci robią największe zamówienia?",
+         ("# Kupujący", "Śr. wartość", "Śr. szt."),
+         note="Pytanie o wielkość JEDNEGO zamówienia, nie o sumę wydatków — sortowanie "
+              "po średniej wartości zamówienia, żeby ktoś z czterdziestoma drobnymi "
+              "zamówieniami nie wypchnął hurtownika z góry listy."),
     Case("get_buyers__count", "get_buyers", {"buyer_type": "company", "count_only": True},
          "Ilu miałem w tym roku klientów-firm?",
          ("Miałeś **2** kupujących (firmy)",),
