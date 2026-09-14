@@ -308,6 +308,11 @@ def extract_buyer_scope(query: str) -> dict[str, Any]:
     minimum = extract_min_orders(query)
     if minimum is not None:
         scope["min_orders"] = minimum
+    # The same amount wording as an order listing's, read by the same extractor
+    # — on a buyer question it bounds what the CUSTOMER spent in total, which is
+    # what get_buyers' min_value/max_value mean (and what the reply says, see
+    # AllegroAgent._buyers_report: "łącznie od …").
+    scope.update(extract_value_bounds(query))
     if _SORT_AVG_ITEMS_RE.search(query):
         scope["sort_by"] = "avg_items"
     elif _SORT_AVG_VALUE_RE.search(query):

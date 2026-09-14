@@ -582,6 +582,24 @@ class TestExtractBuyerScope:
     def test_one_narrowing_at_a_time(self, query, expected):
         assert extract_buyer_scope(query) == expected
 
+    @pytest.mark.parametrize("query,expected", [
+        ("klienci, którzy wydali u mnie powyżej 5000 zł", {"min_value": 5000.0}),
+        ("kto zostawił u mnie ponad 1000 zł", {"min_value": 1000.0}),
+        ("klienci, którzy wydali mniej niż 200 zł", {"max_value": 200.0}),
+        ("kupujący, którzy wydali między 500 a 1000 zł", {"min_value": 500.0,
+                                                          "max_value": 1000.0}),
+    ])
+    def test_what_the_customer_spent(self, query, expected):
+        """The same amount wording an order listing uses — on a buyer question it
+        bounds the customer's total, which is what the reply then says
+        ("łącznie od …")."""
+        assert extract_buyer_scope(query) == expected
+
+    def test_the_amount_travels_with_the_other_narrowings(self):
+        assert extract_buyer_scope(
+            "które firmy wydały u mnie powyżej 5000 zł i zrobiły więcej niż 3 zamówienia"
+        ) == {"buyer_type": "company", "min_value": 5000.0, "min_orders": 4}
+
     def test_a_question_carrying_several_of_them(self):
         assert extract_buyer_scope(
             "Lista kupujących z tego roku, dla których wystawiałem faktury VAT — tylko firmy"

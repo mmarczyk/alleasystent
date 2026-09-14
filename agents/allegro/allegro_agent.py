@@ -2959,6 +2959,8 @@ class AllegroAgent(BaseAgent):
         sort_by = tool_input.get("sort_by") or "value"
         limit = max(1, min(int(tool_input.get("limit") or 100), self._BUYERS_TABLE_CAP))
         min_orders = max(1, int(tool_input.get("min_orders") or 1))
+        min_value = tool_input.get("min_value")
+        max_value = tool_input.get("max_value")
 
         orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
         if buyer_type == "company":
@@ -2986,6 +2988,14 @@ class AllegroAgent(BaseAgent):
         # lists instead of the whole period.
         if min_orders > 1:
             buyers = [g for g in buyers if g["orders"] >= min_orders]
+        # The amount bounds the buyer's TOTAL over the period — "ile u mnie
+        # wydał" is a sum, and it is the only amount a buyer row states that is
+        # not derived. (The size of one order is a different question and has a
+        # different answer: sort_by='avg_value'.)
+        if min_value is not None:
+            buyers = [g for g in buyers if g["value"] >= float(min_value)]
+        if max_value is not None:
+            buyers = [g for g in buyers if g["value"] <= float(max_value)]
         if sort_by == "recent":
             buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)
         elif sort_by == "orders":
@@ -3014,10 +3024,24 @@ class AllegroAgent(BaseAgent):
                 f"co najmniej {min_orders} "
                 f"{self._plural_pl(min_orders, 'zamówienie', 'zamówienia', 'zamówień')}"
             )
+        # "Łącznie" carries the whole reading of the bound: without it, "powyżej
+        # 5000 PLN" next to a table of order counts and averages could be read
+        # as a bound on one order, which is a different set of customers.
+        if min_value is not None and max_value is not None:
+            filters.append(
+                f"łącznie od {self._format_price(float(min_value))} "
+                f"do {self._format_price(float(max_value))}"
+            )
+        elif min_value is not None:
+            filters.append(f"łącznie od {self._format_price(float(min_value))}")
+        elif max_value is not None:
+            filters.append(f"łącznie do {self._format_price(float(max_value))}")
         filter_note = f" ({', '.join(filters)})" if filters else ""
         logger.info(
-            "get_buyers: %d orders → %d buyers (%s, typ=%s, faktury=%s, min_zamowien=%d)",
+            "get_buyers: %d orders → %d buyers (%s, typ=%s, faktury=%s, min_zamowien=%d, "
+            "kwota=%s–%s)",
             len(orders), len(buyers), period_label, buyer_type, invoice_status, min_orders,
+            min_value, max_value,
         )
 
         if tool_input.get("count_only"):

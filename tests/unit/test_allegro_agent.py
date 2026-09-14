@@ -2213,6 +2213,71 @@ class TestBuyersReport:
         assert "|" not in result
 
     @pytest.mark.asyncio
+    async def test_min_value_keeps_the_buyers_who_spent_that_much_in_total(self):
+        """"Klienci, którzy wydali u mnie powyżej 5000 zł" — the bound is on the
+        customer's SUM over the period, so small orders add up to it."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 3000.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 2500.0, paid_at="2026-02-01T10:00:00Z"),  # 5500 razem
+            self._order("b1", "marek", 4000.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"min_value": 5000})
+
+        assert "`anna`" in result, "two orders that add up to the bound still reach it"
+        assert "`marek`" not in result
+        assert "(łącznie od 5000,00 PLN)" in result
+
+    @pytest.mark.asyncio
+    async def test_max_value_and_a_range(self):
+        agent = self._agent_with([
+            self._order("a1", "anna", 100.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("b1", "marek", 700.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("c1", "zofia", 5000.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        cheap = await agent._dispatch("get_buyers", {"max_value": 200})
+        band = await agent._dispatch("get_buyers", {"min_value": 500, "max_value": 1000})
+
+        assert "`anna`" in cheap and "`marek`" not in cheap and "`zofia`" not in cheap
+        assert "(łącznie do 200,00 PLN)" in cheap
+        assert "`marek`" in band and "`anna`" not in band and "`zofia`" not in band
+        assert "(łącznie od 500,00 PLN do 1000,00 PLN)" in band
+
+    @pytest.mark.asyncio
+    async def test_the_amount_bound_is_the_total_not_one_order(self):
+        """A single 900 zł order does NOT reach a 1000 zł bound, and two 600 zł
+        ones do — the difference between the two readings, stated as a test."""
+        agent = self._agent_with([
+            self._order("a1", "anna", 600.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 600.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 900.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"min_value": 1000})
+
+        assert "`anna`" in result and "`marek`" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_amount_bound_stacks_with_the_other_filters(self):
+        agent = self._agent_with([
+            self._order("a1", "anna", 3000.0, company="Hurt sp. z o.o.", nip="7792445588",
+                        invoice_required=True, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 3000.0, company="Hurt sp. z o.o.", nip="7792445588",
+                        invoice_required=True, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 9000.0, first="Marek", last="Zieliński",
+                        paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch(
+            "get_buyers", {"buyer_type": "company", "min_value": 5000, "min_orders": 2}
+        )
+
+        assert "Hurt sp. z o.o." in result
+        assert "Marek Zieliński" not in result, "spent more, but is neither a company nor a repeat"
+        assert "(firmy, co najmniej 2 zamówienia, łącznie od 5000,00 PLN)" in result
+
+    @pytest.mark.asyncio
     async def test_sort_by_avg_value_finds_who_places_the_biggest_orders(self):
         """"Którzy klienci robią największe zamówienia" — the default (total
         spend) answers it with whoever ordered most often, which is a different

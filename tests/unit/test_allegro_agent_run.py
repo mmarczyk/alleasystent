@@ -523,6 +523,18 @@ class TestBuyerScopeReachesTheTool:
         })
 
     @pytest.mark.asyncio
+    async def test_the_amount_a_customer_spent_reaches_the_tool(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("Którzy klienci wydali u mnie w tym roku powyżej 5000 zł?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {"min_value": 5000.0})
+
+    @pytest.mark.asyncio
     async def test_other_tools_are_untouched(self):
         """An order listing counts ORDERS, not orders per buyer — "więcej niż 3
         zamówienia" there is about the answer's length, not its rows."""

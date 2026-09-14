@@ -1091,6 +1091,9 @@ ALLEGRO_TOOLS: list[dict] = [
                 "ONLY THE REPEAT CUSTOMERS: min_orders keeps just the buyers who reached that "
                 "many orders in the period — 'tylko ci, którzy zrobili więcej niż 3 zamówienia', "
                 "'stali klienci', 'kto kupił u mnie więcej niż raz'. "
+                "ONLY THE BIG SPENDERS: min_value/max_value bound what the buyer spent IN TOTAL "
+                "over the period — 'klienci, którzy wydali u mnie powyżej 5000 zł', 'kto zostawił "
+                "ponad 1000 zł'. "
                 "FIRMA vs OSOBA PRYWATNA: the ONLY place Allegro states this is the VAT-invoice "
                 "address on the order (company name + NIP), so buyer_type='company' means exactly "
                 "'gave company invoice details on at least one order in the period' — a business "
@@ -1127,6 +1130,24 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "min_value": {
+                        "type": "number",
+                        "description": (
+                            "Keep only buyers whose TOTAL spend over the period is at least this "
+                            "much (inclusive), in PLN: 'klienci, którzy wydali powyżej 5000 zł', "
+                            "'kto zostawił u mnie ponad 1000 zł'. It bounds the buyer's SUM, not "
+                            "one order — a question about the size of a single order ('kto robi "
+                            "największe zamówienia') is sort_by='avg_value' instead."
+                        ),
+                    },
+                    "max_value": {
+                        "type": "number",
+                        "description": (
+                            "Keep only buyers whose TOTAL spend over the period is at most this "
+                            "much (inclusive), in PLN: 'klienci, którzy wydali mniej niż 200 zł'. "
+                            "Combine with min_value for 'między 500 a 1000 zł'."
+                        ),
+                    },
                     "min_orders": {
                         "type": "integer",
                         "minimum": 1,
