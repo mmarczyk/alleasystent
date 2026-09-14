@@ -356,6 +356,20 @@ CASES: list[Case] = [
          "Czy mam w bazie klienta o NIP 779-244-55-88?",
          ("**Tak —", "Kawa i Spółka", "- NIP: 7792445588"),
          note="Ta sama wyszukiwarka po NIP-ie — myślniki ignorowane."),
+    Case("get_buyer_products", "get_buyer_products", {"name": "Kawa i Spółka"},
+         "Dla tego kupującego „Kawa i Spółka” pokaż mi zestawienie, jakie produkty kupował",
+         ("# Co kupował: Kawa i Spółka sp. z o.o.", "| Produkt | Sztuki | Wartość |",
+          "Ekspres do kawy DeLonghi Magnifica S ECAM", "W zestawieniu",
+          "sama wartość towaru, bez dostawy"),
+         note="Zestawienie sprzedaży dla JEDNEGO klienta — wiersz na produkt, nie na "
+              "zamówienie. Kwota z wiersza to wartość samego towaru; suma z zamówień "
+              "obejmuje jeszcze dostawę, dlatego obie są w podsumowaniu osobno."),
+    Case("get_buyer_products__unknown", "get_buyer_products", {"name": "Hurtownia Bez Zamówień"},
+         "Co kupował klient „Hurtownia Bez Zamówień”?",
+         ("**Nie znalazłem zakupów klienta", "nazwa „Hurtownia Bez Zamówień”",
+          "Przeszukałem"),
+         note="Klient spoza bazy — jednoznaczne „nie” z nazwą szukanej danej i okresem, "
+              "który sprawdzono, zamiast pustej tabeli."),
 
     # ── Faktury ──────────────────────────────────────────────────────────────
     Case("get_orders_pending_invoice", "get_orders_pending_invoice", {},

@@ -456,6 +456,51 @@ class TestFindBuyerByContact:
         assert resolved is None or resolved[0] != "find_buyer_by_contact"
 
 
+class TestBuyerProducts:
+    """"Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi
+    zestawienie, jakie produkty kupował" — the customer's name is quoted, which
+    is the one thing that says where a multi-word company name begins and ends,
+    so the whole call resolves here."""
+
+    @pytest.mark.parametrize("query,name", [
+        ("Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi "
+         "zestawienie jakie produkty kupował", "P.P.H.U. Gadżet z Jajem. Monika Sornat"),
+        ('co kupował klient "Kawa i Spółka"', "Kawa i Spółka"),
+        ("zestawienie zakupów firmy „Biuro Serwis sp. z o.o.”", "Biuro Serwis sp. z o.o."),
+        ("jaki asortyment bierze klient „Kawa i Spółka”", "Kawa i Spółka"),
+    ])
+    def test_resolves_the_product_summary_for_that_customer(self, query, name):
+        assert _resolve(query) == ("get_buyer_products", {"name": name})
+
+    @pytest.mark.parametrize("query", [
+        # A period needs a clock this layer doesn't have.
+        "co kupował klient „Kawa i Spółka” w tym roku",
+        # Another tool's job entirely.
+        "napisz do klienta „Kawa i Spółka” co kupował",
+        "wystaw fakturę klientowi „Kawa i Spółka” za produkty, które kupował",
+        # Who they are, not what they buy — find_buyer_by_contact's question.
+        "kim jest klient „Kawa i Spółka” i co kupował",
+        "co kupował klient „Kawa i Spółka”, telefon 880 197 834",
+        # No name to pass: the tool would answer about nobody.
+        "jakie produkty kupowali moi klienci",
+        "co kupowali klienci w tym miesiącu",
+    ])
+    def test_bails_to_the_llm(self, query):
+        resolved = _resolve(query)
+        assert resolved is None or resolved[0] != "get_buyer_products"
+
+    def test_the_product_word_does_not_make_it_a_two_topic_query(self):
+        """"produkty" pulls in the "oferty" label and "sprzedaży" the "finanse"
+        one, but neither is a second question — no tool under them can say what
+        ONE customer took."""
+        assert matched_labels(
+            "co kupował klient „Kawa i Spółka” — zestawienie sprzedaży, jakie produkty"
+        ) >= {"kupujacy", "oferty", "finanse"}
+        assert _resolve(
+            "co kupował klient „Kawa i Spółka” — zestawienie sprzedaży, jakie produkty"
+        ) == ("get_buyer_products", {"name": "Kawa i Spółka"})
+
+
 class TestFollowUpAboutOneKnownOrder:
     """A question about the CONTENTS of one order the assistant just showed
     reads exactly like a listing count to a stem matcher ('ile' + 'zamów'),

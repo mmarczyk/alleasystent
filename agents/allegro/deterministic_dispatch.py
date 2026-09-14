@@ -28,7 +28,11 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from agents.allegro.allegro_tools import named_buyer_login, named_phone_number
+from agents.allegro.allegro_tools import (
+    named_buyer_login,
+    named_buyer_purchases,
+    named_phone_number,
+)
 
 # ── Shared building blocks ──────────────────────────────────────────────────
 _COUNT_QUESTION_RE = re.compile(r"\b(czy|ile)\b", re.IGNORECASE)
@@ -1085,6 +1089,40 @@ def _match_find_buyer_by_contact(query: str) -> dict | None:
     return {"phone": phone}
 
 
+# ── kupujacy: get_buyer_products (a QUOTED customer + "co kupował") ────────
+# "Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi
+# zestawienie, jakie produkty kupował" — the one argument this tool needs is
+# the customer's name, and the seller wrote it out between quotes because that
+# is how a company name full of spaces and dots gets pasted into a sentence.
+# Those quotes are what makes the query resolvable HERE: they say where the
+# name begins and ends, which no other matcher in this module could work out
+# from the words alone. The reading itself lives in
+# allegro_tools.named_buyer_purchases, because Layer 1 needs the same signal
+# (see matched_labels); what is added here is this layer's own bails.
+_BUYER_PRODUCTS_BAIL_RE = re.compile(
+    r"faktur|napisz|wy[śs]lij|odpisz|zwrot|reklamacj|wiadomo|status\b|"
+    r"telefon|\bmail|kim\s+jest|kto\s+to",
+    re.IGNORECASE,
+)
+
+
+def _match_get_buyer_products(query: str) -> dict | None:
+    name = named_buyer_purchases(query)
+    if name is None:
+        return None
+    # "faktur" and the message verbs are the same bails find_buyer_by_contact
+    # makes; "telefon"/"mail"/"kim jest" are that tool's OWN question, which
+    # this one must not answer instead. A period, as everywhere here, this
+    # layer cannot resolve at all.
+    if _BUYER_PRODUCTS_BAIL_RE.search(query) or _PERIOD_RE.search(query):
+        return None
+    # A phone number in the same sentence is find_buyer_by_contact's question,
+    # and this layer resolves ONE tool per turn.
+    if named_phone_number(query):
+        return None
+    return {"name": name}
+
+
 # ── monitoring: 8 zero-argument UI-action toggles ───────────────────────────
 _ENABLE_RE = re.compile(
     r"w[łl][aą]cz|zacznij|chc[eę]\s+(dostawać|otrzymywać)|w[łl][aą]czy[cć]|powiadamiaj|informuj\s+mnie",
@@ -1186,6 +1224,9 @@ _LABEL_MATCHERS: dict[str, list[tuple[str, Callable[[str], dict | None]]]] = {
         ("get_new_returns", _match_get_new_returns),
         ("get_new_complaints", _match_get_new_complaints),
     ],
+    # get_buyer_products is NOT in this table — like deliver_invoices it is
+    # checked in resolve_deterministic() ahead of the single-label rule, see
+    # there.
     "kupujacy": [("find_buyer_by_contact", _match_find_buyer_by_contact)],
 }
 
@@ -1229,6 +1270,21 @@ def resolve_deterministic(query: str, labels: set[str]) -> tuple[str, dict] | No
         delivery = _match_deliver_invoices(query)
         if delivery is not None:
             return "deliver_invoices", delivery
+    # A customer question that asks WHAT THEY BUY is exempt from the
+    # single-topic rule below for the same reason: the way it is asked always
+    # drags in a second label. "jakie produkty kupował ten klient" matches
+    # {kupujacy, oferty} on "produkt", "zestawienie sprzedaży dla klienta X"
+    # matches {kupujacy, finanse} on "sprzeda" — and the single-topic rule
+    # would rule out the very queries this matcher exists for. It is not two
+    # questions: the product/sales word is the DIMENSION of the buyer
+    # question, and no tool under those labels can answer it (they report what
+    # is in stock now, or what the whole shop sold — never what ONE customer
+    # took). The matcher itself stays the narrow one: a quoted name, a buyer
+    # word and a buying-intent word, or it declines.
+    if "kupujacy" in labels and labels <= {"kupujacy", "oferty", "finanse"}:
+        products = _match_get_buyer_products(query)
+        if products is not None:
+            return "get_buyer_products", products
     # An invoice question scoped to an order stage ("jakie mam faktury do
     # wysłania w zamówieniach nie nowych") always matches BOTH labels — the
     # stage words ARE order vocabulary — so the single-topic rule would rule

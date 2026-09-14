@@ -357,6 +357,79 @@ class TestNamedBuyerAccountGuard:
         assert [c.args[0] for c in agent._execute_tool.await_args_list] == ["get_buyers", "get_orders"]
 
 
+class TestBuyerProductSummary:
+    """"Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi
+    zestawienie, jakie produkty kupował" — the customer is named, not
+    logged-in, and the answer wanted is a per-product zestawienie rather than
+    a list of orders."""
+
+    _QUERY = (
+        "Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi "
+        "zestawienie jakie produkty kupował"
+    )
+
+    @pytest.mark.asyncio
+    async def test_resolves_without_an_llm_call_and_hands_the_table_back(self):
+        table = "# Co kupował: P.P.H.U. Gadżet z Jajem. Monika Sornat\n\n| Produkt | ... |"
+        agent = _agent({"get_buyer_products": table})
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match")
+        )
+
+        response = await agent.run(self._QUERY)
+
+        agent._execute_tool.assert_awaited_once_with(
+            "get_buyer_products", {"name": "P.P.H.U. Gadżet z Jajem. Monika Sornat"},
+        )
+        assert response.text == table
+        assert response.metadata["output_format"] == "table"
+
+    @pytest.mark.asyncio
+    async def test_a_dotted_company_name_is_not_taken_for_a_buyer_login(self):
+        """„P.P.H.U. reads token by token exactly like a login — and a login
+        the chosen tool cannot filter by is what makes run() stop and ask
+        instead of answering. The quotes are what tell the two apart."""
+        agent = _agent({"get_buyer_products": "# Co kupował: P.P.H.U. Gadżet z Jajem"})
+
+        response = await agent.run(self._QUERY)
+
+        assert response.text.startswith("# Co kupował:")
+
+    @pytest.mark.asyncio
+    async def test_a_narrowing_it_cannot_apply_asks_instead_of_widening(self):
+        """It narrows by BUYER and by nothing else — an amount (or a product)
+        named next to the customer has nowhere to go, and the full zestawienie
+        would read as the answer to the narrower question."""
+        agent = _agent({"get_buyer_products": "# Co kupował: Kawa i Spółka"})
+
+        response = await agent.run("co kupował klient „Kawa i Spółka” za ponad 500 zł")
+
+        assert "nie mam na to filtra" in response.text
+        assert response.text.endswith("Pokazać całe zestawienie zakupów tego klienta?")
+        assert agent._execute_tool.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_period_hands_the_question_to_the_llm_with_the_tool_on_the_table(self):
+        """This layer has no clock, so "w tym roku" is the LLM's to resolve —
+        but the tool that answers the question has to be among the schemas it
+        is offered."""
+        agent = _agent({"get_buyer_products": "# Co kupował: Kawa i Spółka"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyer_products", {
+                "name": "Kawa i Spółka",
+                "date_from_local": "2026-01-01",
+                "date_to_local": "2026-09-14",
+            })]),
+            _resp(),
+        ])
+
+        response = await agent.run("co kupował w tym roku klient „Kawa i Spółka”")
+
+        sent_tools = agent._client.chat.completions.create.call_args_list[0].kwargs["tools"]
+        assert "get_buyer_products" in {t["function"]["name"] for t in sent_tools}
+        assert response.text == "# Co kupował: Kawa i Spółka"
+
+
 class TestFormatInstruction:
     """Every tool's dispatch renders the finished view (table, document,
     dashboard, bullet list) in Python — see _RENDERED_VIEW_TOOLS. So when the
