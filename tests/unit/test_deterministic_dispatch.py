@@ -861,3 +861,125 @@ class TestOrderQuestionNamingAProduct:
         on the LLM-free path."""
         assert _resolve("jakie mam nowe zamówienia") == ("get_new_orders", {})
         assert _resolve("ile paczek mam do nadania")[0] == "get_orders_delivery"
+
+
+class TestDeliverInvoices:
+    """The delivery commands from the thread that produced this matcher.
+
+    "Ok dodaj te faktury do Allegro a firmową wyślij również do ksef" — sent
+    right after four invoices were issued and linked — came back as a sentence
+    about there being no table data to copy. The follow-up, which spelled the
+    inFakt id out in full, came back as the details of an unrelated order.
+    Nothing was attached, and nothing said so."""
+
+    ORDER = "a076f250-af8f-11f1-b272-c766ff73256d"
+    INVOICE = "69bb3d97-1024-4d6c-b11a-813a38ce62e9"
+
+    def test_the_whole_batch_with_ksef(self):
+        assert _resolve("Ok dodaj te faktury do Allegro a firmowa wyślij również do ksef") == (
+            "deliver_invoices", {"attach": True, "ksef": True},
+        )
+
+    def test_one_invoice_named_by_its_infakt_id(self):
+        """Typos included: 'kser' is what the f/r slip produces, and the id is
+        the INVOICE's — the order it belongs to is the ledger's to supply."""
+        assert _resolve(
+            f"Te fakturę dodaj do Allegro u wyślij do kser ID faktury w inFakt: {self.INVOICE}"
+        ) == (
+            "deliver_invoices",
+            {"attach": True, "ksef": True, "invoice_uuids": [self.INVOICE]},
+        )
+
+    def test_one_order_named_by_its_allegro_id(self):
+        assert _resolve(f"dołącz fakturę do zamówienia {self.ORDER}") == (
+            "deliver_invoices", {"attach": True, "ksef": False, "order_ids": [self.ORDER]},
+        )
+
+    def test_ksef_alone_does_not_attach(self):
+        tool, args = _resolve(f"wyślij fakturę do KSeF dla zamówienia {self.ORDER}")
+        assert tool == "deliver_invoices"
+        assert args["ksef"] is True and args["attach"] is False
+
+    def test_several_orders_in_one_sentence(self):
+        other = "d1d48e50-af87-11f1-acdd-5126b12f3316"
+        tool, args = _resolve(
+            f"dołącz faktury do zamówienia {self.ORDER} i do zamówienia {other}"
+        )
+        assert tool == "deliver_invoices"
+        assert args["order_ids"] == [self.ORDER, other]
+
+    def test_a_single_invoice_with_nothing_to_point_at_is_left_to_the_llm(self):
+        """The ledger may hold several waiting invoices; "dołącz fakturę" did
+        not say to deliver all of them."""
+        assert _resolve("dołącz fakturę") is None
+
+    def test_a_question_about_delivery_is_not_a_command(self):
+        assert _resolve("czy dołączyłeś już te faktury do Allegro?") is None
+        assert _resolve("kiedy dołączysz te faktury") is None
+
+    def test_a_uuid_nobody_labelled_resolves_nothing(self):
+        """Order id and invoice id are the same 36 characters, and swapping them
+        addresses somebody else's document — so an id with no noun in front of
+        it is the LLM's to read from context, not this layer's to guess."""
+        assert _resolve(f"wyślij do ksef {self.INVOICE}") is None
+
+    def test_the_nearest_noun_decides_which_id_it_is(self):
+        """"faktury <id>" is the invoice; only a nearer "zamówienia" makes it an
+        order. A mislabelled id is recovered behind the tool (the ledger knows
+        both directions), never guessed here."""
+        _, args = _resolve(f"dołącz te faktury {self.INVOICE}")
+        assert args["invoice_uuids"] == [self.INVOICE]
+
+    def test_one_of_each_is_a_pair_and_needs_no_lookup(self):
+        assert _resolve(f"dołącz fakturę {self.INVOICE} do zamówienia {self.ORDER}") == (
+            "deliver_invoices",
+            {
+                "attach": True, "ksef": False,
+                "order_ids": [self.ORDER], "invoice_uuids": [self.INVOICE],
+            },
+        )
+
+    def test_the_genitive_plural_of_zamowienie_still_marks_an_order(self):
+        """"do zamówień" ends in "ń" — the form a stem looking for "zamówieni"
+        misses, and with it every id in the sentence would read as an invoice."""
+        other = "d1d48e50-af87-11f1-acdd-5126b12f3316"
+        _, args = _resolve(f"dołącz faktury do zamówień {self.ORDER} i {other}")
+        assert args["order_ids"] == [self.ORDER, other]
+
+    def test_several_of_each_are_left_to_the_llm(self):
+        """Which invoice belongs to which order is then an ordering guess, and
+        a wrong guess puts one buyer's invoice on another buyer's order."""
+        other_order = "d1d48e50-af87-11f1-acdd-5126b12f3316"
+        other_invoice = "9362a39f-37f1-4ce7-8d98-74bcf48ff00c"
+        assert _resolve(
+            f"dołącz faktury {self.INVOICE} i {other_invoice} do zamówień "
+            f"{self.ORDER} i {other_order}"
+        ) is None
+
+    def test_an_issuance_is_not_a_delivery(self):
+        """Issuing stays one order per call, on its own path — and delivery may
+        not ride along on the turn that issued anything."""
+        assert _resolve(f"wystaw fakturę dla zamówienia {self.ORDER} i dołącz ją") is None
+
+    def test_the_pending_listing_still_wins_its_own_questions(self):
+        assert _resolve("jakie mam faktury do wysłania w zamówieniach nie nowych") == (
+            "get_orders_pending_invoice", {"exclude_fulfillment_status": ["NEW"]},
+        )
+        assert _resolve("jakie mam faktury do wystawienia") is None
+
+    def test_kserokopia_is_not_ksef(self):
+        assert _resolve("wyślij kserokopię faktury") is None
+
+    @pytest.mark.parametrize("query", [
+        "pokaż wszystkie dołączone faktury",
+        "które faktury dołączyłem do Allegro",
+        "ile faktur wysłałem do ksef",
+        "lista faktur",
+        "sprawdź czy te faktury są dołączone",
+    ])
+    def test_a_listing_question_never_becomes_a_delivery(self, query):
+        """The failure that would cost the most here: "pokaż wszystkie dołączone
+        faktury" carries an attach stem and a set word, and served as a command
+        it would attach the whole backlog to answer a question."""
+        result = _resolve(query)
+        assert result is None or result[0] != "deliver_invoices"

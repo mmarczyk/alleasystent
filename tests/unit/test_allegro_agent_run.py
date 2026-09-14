@@ -908,3 +908,123 @@ class TestLatestOrderChain:
         response = await agent.run("jakie mam nowe zamówienia")
 
         assert response.text == "- Zamówienie: 1"
+
+
+class TestAnActionReportsItself:
+    """The invoices reached the buyers and the company one reached KSeF — and
+    the seller was told there was no table data to copy.
+
+    Four attaches and a KSeF send land in ONE round, so the single-tool bypass
+    does not apply and the turn went to the interpret call carrying an
+    instruction about handing tables and ```chart blocks back unchanged. The
+    model answered that there was nothing to hand back, and every line saying
+    what had just happened was gone. Nothing could be undone by then; only the
+    reply was lost, which is the version of this bug that gets an invoice
+    issued twice."""
+
+    ATTACHED = "✅ Faktura FV/1/2026 dołączona do zamówienia `o1` w Allegro"
+    ATTACHED_2 = "✅ Faktura FV/2/2026 dołączona do zamówienia `o2` w Allegro"
+    FILED = "📤 Faktura `inv-1` wysłana do KSeF (status zgłoszenia: sent)."
+
+    @pytest.mark.asyncio
+    async def test_every_report_from_a_multi_tool_turn_reaches_the_seller(self):
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED,
+                        "send_invoice_to_ksef": self.FILED})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[
+                _tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"}),
+                _tool_call("c2", "send_invoice_to_ksef", {"invoice_uuid": "inv-1"}),
+            ]),
+            _resp(),
+            _resp("Nie ma żadnych danych do przepisania."),
+        ])
+
+        # A confirmation, not a spelled-out command: this is the shape that
+        # reaches the tool-select model and comes back as several calls in one
+        # round (a spelled-out one is resolved before the model — see
+        # deterministic_dispatch._match_deliver_invoices).
+        response = await agent.run("potwierdzam, zrób to")
+
+        assert self.ATTACHED in response.text
+        assert self.FILED in response.text
+        assert "do przepisania" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_the_interpret_call_never_runs_for_such_a_turn(self):
+        """Not "runs and is checked afterwards" — there is nothing to check it
+        against, and a model given these results can only lose them."""
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED})
+        create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"})]),
+            _resp(),
+        ])
+        agent._client.chat.completions.create = create
+
+        response = await agent.run("dołącz fakturę do zamówienia o1")
+
+        assert response.text == self.ATTACHED
+        assert create.await_count == 2  # tool-select rounds only, no interpret
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_is_a_report_too(self):
+        """"I did NOT file this one, the buyer is a private person" is exactly
+        as important to the seller as a confirmation, and just as easy for a
+        model to drop."""
+        refused = "🚫 Faktury `inv-2` nie wyślę do KSeF — nabywcą jest osoba prywatna."
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED,
+                        "send_invoice_to_ksef": refused})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[
+                _tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"}),
+                _tool_call("c2", "send_invoice_to_ksef", {"invoice_uuid": "inv-2"}),
+            ]),
+            _resp(),
+        ])
+
+        response = await agent.run("ok, zrób to")
+
+        assert refused in response.text
+
+    @pytest.mark.asyncio
+    async def test_an_english_turn_keeps_the_polish_report_rather_than_risk_it(self):
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"})]),
+            _resp(),
+        ])
+
+        response = await agent.run("attach the invoice to order o1")
+
+        assert response.text == self.ATTACHED
+
+    @pytest.mark.asyncio
+    async def test_a_read_only_turn_is_untouched(self):
+        """The guard is scoped to tools whose effect leaves the app — a listing
+        still goes through the interpret call exactly as before."""
+        agent = _agent({"get_new_orders": "- Zamówienie: o1"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_new_orders", {})]),
+            _resp(),
+            _resp("Masz jedno nowe zamówienie."),
+        ])
+
+        response = await agent.run("show me my new orders")
+
+        assert response.text == "Masz jedno nowe zamówienie."
+
+    @pytest.mark.asyncio
+    async def test_a_data_lookup_alongside_the_action_is_kept_too(self):
+        """A chain that reads first and acts second reports both — the reading
+        is what the seller needs to judge the action by."""
+        agent = _agent({"get_order_invoice_data": "NIP: 1234563218, Dekarstwo sp. z o.o.",
+                        "attach_invoice_to_allegro_order": self.ATTACHED})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_order_invoice_data", {"order_id": "o1"})]),
+            _resp(tool_calls=[_tool_call("c2", "attach_invoice_to_allegro_order", {"order_id": "o1"})]),
+            _resp(),
+        ])
+
+        response = await agent.run("sprawdź dane i dołącz fakturę do zamówienia o1")
+
+        assert "Dekarstwo sp. z o.o." in response.text
+        assert self.ATTACHED in response.text

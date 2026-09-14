@@ -651,8 +651,10 @@ async def _issue_all(user_id: str, state: dict) -> str:
         f"Wystawiam {_count_phrase(len(order_ids))}:\n\n"
         + "\n\n---\n\n".join(results)
         + "\n\n---\n\nŻadnej z nich nie dołączyłem jeszcze do zamówienia w Allegro — "
-        "kupujący ich na razie nie widzą. Sprawdź je pod linkami i napisz „dołącz fakturę do "
-        "zamówienia `<id>`” dla każdej, która jest w porządku."
+        "kupujący ich na razie nie widzą. Sprawdź je pod linkami i napisz „dołącz te faktury "
+        "do Allegro”, jeśli wszystkie są w porządku — dołączę je wtedy za jednym razem. "
+        "Jeśli tylko część, napisz „dołącz fakturę do zamówienia `<id>`” dla tych, które mają "
+        "pójść do kupujących."
     )
 
 

@@ -2835,6 +2835,22 @@ class TestAttachingWaitsForTheSeller:
         assert "Nie mam zapisanej faktury" in out
 
     @pytest.mark.asyncio
+    async def test_an_invoice_we_already_attached_is_not_sent_a_second_time(self):
+        """Allegro takes one invoice per order and answers a second upload with
+        a 400 nobody can read. The reason a seller asks twice is usually that
+        the first time said nothing — see the action-report guard in run()."""
+        agent = self._agent("dołącz fakturę do zamówienia o1")
+        attach = AsyncMock(return_value="FV/1/2026")
+        with patch("services.invoice_ledger.get_record",
+                   AsyncMock(return_value={"invoice_uuid": "inv-1", "number": "FV/1/2026",
+                                           "attached": True})), \
+             patch("services.infakt_service.attach_invoice_to_order", attach):
+            out = await agent._dispatch(self.ATTACH, {"order_id": "o1"})
+
+        attach.assert_not_awaited()
+        assert "jest już dołączona" in out
+
+    @pytest.mark.asyncio
     async def test_ksef_is_blocked_on_the_issuing_turn_too(self):
         """Filing with the tax office is as final as showing the buyer the
         invoice, and it happens once."""
@@ -3264,3 +3280,222 @@ class TestOrderProductFilter:
         )
 
         assert "`yarn`" in result and "`other`" not in result
+
+
+class TestKsefIsFiledOnce:
+    """KSeF takes an invoice once and a submission cannot be withdrawn. The
+    send is asynchronous, so nothing in the reply proves it landed — and a
+    seller who was never told it went (the reply that got lost, see
+    TestAnActionReportsItself in test_allegro_agent_run.py) will reasonably ask
+    again. So it is written down at the moment it goes."""
+
+    def _agent(self, query: str = "wyślij fakturę do KSeF"):
+        agent = _make_agent()
+        agent._current_query = query
+        agent._last_assistant_text = ""
+        agent._allegro.get_order_invoice_data = AsyncMock(
+            return_value={"company_name": "Dekarstwo sp. z o.o.", "vat_id": "1234563218"}
+        )
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_a_successful_send_is_written_down(self):
+        agent = self._agent()
+        infakt = MagicMock()
+        infakt.send_to_ksef = AsyncMock(return_value={"status": "sent"})
+        mark = AsyncMock()
+        with patch("services.invoice_ledger.get_record", AsyncMock(return_value={})), \
+             patch("services.invoice_ledger.mark_ksef_sent", mark), \
+             patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-1", "order_id": "o1"}
+            )
+
+        assert mark.await_args[0][1] == "o1"
+        assert out.startswith("📤")
+
+    @pytest.mark.asyncio
+    async def test_a_second_send_never_reaches_infakt(self):
+        agent = self._agent()
+        infakt = MagicMock()
+        infakt.send_to_ksef = AsyncMock(return_value={"status": "sent"})
+        with patch("services.invoice_ledger.get_record",
+                   AsyncMock(return_value={"invoice_uuid": "inv-1", "ksef_sent": True})), \
+             patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-1", "order_id": "o1"}
+            )
+
+        infakt.send_to_ksef.assert_not_awaited()
+        assert "wysłałem już do KSeF" in out
+
+
+class TestDeliveringAWholeBatchOfInvoices:
+    """"Ok dodaj te faktury do Allegro a firmową wyślij również do ksef".
+
+    Four invoices had just been issued, each with its link and its inFakt id,
+    each explicitly waiting for the seller's word. The word came, and the reply
+    was a sentence about there being no table data to copy — nothing attached,
+    nothing sent, nothing said about it. The set is resolved from the ledger
+    here so that no part of it depends on the model re-reading its own message.
+    """
+
+    DELIVER = "deliver_invoices"
+
+    def _agent(self, query: str = "dodaj te faktury do Allegro"):
+        agent = _make_agent()
+        agent._current_query = query
+        agent._last_assistant_text = ""
+        return agent
+
+    @staticmethod
+    def _pending(*pairs):
+        return AsyncMock(return_value=[
+            (order_id, {"invoice_uuid": uuid, "attached": False}) for order_id, uuid in pairs
+        ])
+
+    @pytest.mark.asyncio
+    async def test_every_waiting_invoice_is_attached(self):
+        agent = self._agent()
+        attach = AsyncMock(side_effect=["FV/1/2026", "FV/2/2026", "FV/3/2026"])
+        with patch("services.invoice_ledger.pending_delivery",
+                   self._pending(("o1", "inv-1"), ("o2", "inv-2"), ("o3", "inv-3"))), \
+             patch("services.infakt_service.attach_invoice_to_order", attach), \
+             patch("services.invoice_ledger.mark_attached", AsyncMock()):
+            out = await agent._dispatch(self.DELIVER, {})
+
+        assert [c[0][1:3] for c in attach.await_args_list] == [
+            ("o1", "inv-1"), ("o2", "inv-2"), ("o3", "inv-3"),
+        ]
+        assert out.count("✅") == 3
+
+    @pytest.mark.asyncio
+    async def test_ksef_takes_the_company_invoice_and_refuses_the_rest(self):
+        """"a firmową wyślij również do KSeF" is not a decision the model makes:
+        every invoice is offered, and the per-order NIP check keeps the private
+        buyers' ones out — the same check a single send goes through."""
+        agent = self._agent("dodaj te faktury do Allegro a firmową wyślij również do ksef")
+        infakt = MagicMock()
+        infakt.send_to_ksef = AsyncMock(return_value={"status": "sent"})
+        agent._allegro.get_order_invoice_data = AsyncMock(side_effect=[
+            {"company_name": "Dekarstwo sp. z o.o.", "vat_id": "1234563218"},
+            {"first_name": "Jan", "last_name": "Kowalski"},
+        ])
+        with patch("services.invoice_ledger.pending_delivery",
+                   self._pending(("o1", "inv-1"), ("o2", "inv-2"))), \
+             patch("services.infakt_service.attach_invoice_to_order",
+                   AsyncMock(return_value="FV/1/2026")), \
+             patch("services.invoice_ledger.mark_attached", AsyncMock()), \
+             patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+            out = await agent._dispatch(self.DELIVER, {"attach": True, "ksef": True})
+
+        infakt.send_to_ksef.assert_awaited_once_with(
+            "inv-1", allegro=agent._allegro, order_id="o1"
+        )
+        assert "📤" in out and "🚫" in out
+
+    @pytest.mark.asyncio
+    async def test_one_invoice_named_only_by_its_infakt_id(self):
+        """"Te fakturę dodaj do Allegro, ID faktury w inFakt: 69bb…" — the id
+        the issuance reply printed. The order it belongs to is the ledger's to
+        remember; before this the turn died on the missing order_id and came
+        back as an answer about an unrelated order."""
+        agent = self._agent("te fakturę dodaj do Allegro, ID faktury w inFakt: inv-9")
+        attach = AsyncMock(return_value="FV/9/2026")
+        with patch("services.invoice_ledger.order_of_invoice", AsyncMock(return_value="o9")), \
+             patch("services.infakt_service.attach_invoice_to_order", attach), \
+             patch("services.invoice_ledger.mark_attached", AsyncMock()):
+            out = await agent._dispatch(self.DELIVER, {"invoice_uuids": ["inv-9"]})
+
+        assert attach.await_args[0][1:3] == ("o9", "inv-9")
+        assert out.count("✅") == 1
+
+    @pytest.mark.asyncio
+    async def test_an_id_that_is_really_an_order_id_is_recovered(self):
+        """The noun in front of an id is all the wording gives, and it can be
+        wrong. The ledger holds both directions, so this costs a lookup instead
+        of a refusal."""
+        agent = self._agent()
+        attach = AsyncMock(return_value="FV/9/2026")
+        with patch("services.invoice_ledger.order_of_invoice", AsyncMock(return_value=None)), \
+             patch("services.invoice_ledger.get_record",
+                   AsyncMock(return_value={"invoice_uuid": "inv-9"})), \
+             patch("services.infakt_service.attach_invoice_to_order", attach), \
+             patch("services.invoice_ledger.mark_attached", AsyncMock()):
+            await agent._dispatch(self.DELIVER, {"invoice_uuids": ["o9"]})
+
+        assert attach.await_args[0][1:3] == ("o9", "inv-9")
+
+    @pytest.mark.asyncio
+    async def test_an_id_nobody_has_a_record_of_attaches_nothing(self):
+        agent = self._agent()
+        attach = AsyncMock(return_value="FV/9/2026")
+        with patch("services.invoice_ledger.order_of_invoice", AsyncMock(return_value=None)), \
+             patch("services.invoice_ledger.get_record", AsyncMock(return_value=None)), \
+             patch("services.infakt_service.attach_invoice_to_order", attach):
+            out = await agent._dispatch(self.DELIVER, {"invoice_uuids": ["inv-nieznana"]})
+
+        attach.assert_not_awaited()
+        assert "Nie wiem, do którego zamówienia" in out
+
+    @pytest.mark.asyncio
+    async def test_the_sellers_word_is_required_for_the_batch_too(self):
+        """Delivering to N buyers at once needs at least as much authorization
+        as delivering to one — see _attach_authorized_by_seller."""
+        agent = self._agent("pokaż szczegóły zamówienia o1")
+        attach = AsyncMock(return_value="FV/1/2026")
+        with patch("services.invoice_ledger.pending_delivery", self._pending(("o1", "inv-1"))), \
+             patch("services.infakt_service.attach_invoice_to_order", attach):
+            out = await agent._dispatch(self.DELIVER, {})
+
+        attach.assert_not_awaited()
+        assert "bez Twojego wyraźnego polecenia" in out
+
+    @pytest.mark.asyncio
+    async def test_nothing_waiting_says_so_instead_of_reaching_for_orders(self):
+        agent = self._agent()
+        with patch("services.invoice_ledger.pending_delivery", AsyncMock(return_value=[])):
+            out = await agent._dispatch(self.DELIVER, {})
+
+        assert "czekałaby na dołączenie" in out
+
+    @pytest.mark.asyncio
+    async def test_the_batch_is_capped_and_says_what_is_left(self):
+        from agents.allegro.allegro_agent import _MAX_INVOICE_DELIVERY_BATCH as CAP
+
+        agent = self._agent()
+        waiting = [(f"o{i}", f"inv-{i}") for i in range(CAP + 3)]
+        attach = AsyncMock(return_value="FV/1/2026")
+        with patch("services.invoice_ledger.pending_delivery", self._pending(*waiting)), \
+             patch("services.infakt_service.attach_invoice_to_order", attach), \
+             patch("services.invoice_ledger.mark_attached", AsyncMock()):
+            out = await agent._dispatch(self.DELIVER, {})
+
+        assert attach.await_count == CAP
+        assert "czeka jeszcze 3" in out
+
+    @pytest.mark.asyncio
+    async def test_the_same_order_named_twice_is_delivered_once(self):
+        agent = self._agent()
+        attach = AsyncMock(return_value="FV/1/2026")
+        with patch("services.invoice_ledger.get_records",
+                   AsyncMock(return_value={"o1": {"invoice_uuid": "inv-1"}})), \
+             patch("services.infakt_service.attach_invoice_to_order", attach), \
+             patch("services.invoice_ledger.mark_attached", AsyncMock()):
+            await agent._dispatch(self.DELIVER, {"order_ids": ["o1", "o1"]})
+
+        assert attach.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_never_on_the_turn_that_issued_them(self):
+        agent = self._agent("wystaw te faktury i dodaj je do Allegro")
+        attach = AsyncMock(return_value="FV/1/2026")
+        with patch("services.infakt_service.issue_invoice_for_order",
+                   AsyncMock(return_value="✅ wystawiona")), \
+             patch("services.invoice_ledger.pending_delivery", self._pending(("o1", "inv-1"))), \
+             patch("services.infakt_service.attach_invoice_to_order", attach):
+            await agent._dispatch("issue_invoice_for_order", {"order_id": "o1"})
+            out = await agent._dispatch(self.DELIVER, {})
+
+        attach.assert_not_awaited()
+        assert "w tej samej wiadomości" in out
