@@ -75,8 +75,18 @@ _MESSAGE_TOPIC_WORD_RE = re.compile(r"wiadomo", re.IGNORECASE)
 #   2. they confirm it ("ok", "zgadza się") right after the assistant asked
 #      about attaching — the same last-assistant-turn test the invoice reminder
 #      uses to tell its own question apart from everyone else's.
+# "dodaj fakturę" is not the only order these words come in: a seller writing
+# in a hurry fronts the object ("Te fakturę dodaj do Allegro"), or drops it
+# entirely once it is obvious ("dodaj je do Allegro"). Both were read as NOT
+# authorizing anything, which stopped a clear instruction dead — so the verb is
+# matched on either side of the noun, and the object-less form only when the
+# destination is named. "dołącz"/"załącz"/"podepnij" need no such help: they
+# mean this and nothing else.
 _ATTACH_INSTRUCTION_RE = re.compile(
-    r"do[łl][ąa]cz|za[łl][ąa]cz|podepnij|wgraj|dodaj\s+(?:t[ęe]\s+|j[ąa]\s+)?faktur",
+    r"do[łl][ąa]cz|za[łl][ąa]cz|podepn|wgraj|"
+    r"dodaj\s+(?:t[ęe]\s+|te\s+|j[ąa]\s+|je\s+)?faktur|"
+    r"faktur\w*\s+(?:\w+\s+){0,3}?dodaj|"
+    r"dodaj\s+(?:j[ąa]|je|t[ęe]|te)\s+do\s+(?:allegro|zam[óo]wien)",
     re.IGNORECASE,
 )
 _INVOICE_CONFIRMATION_RE = re.compile(
@@ -93,6 +103,41 @@ _ASSISTANT_ASKED_ATTACH_RE = re.compile(
     r"(?:do[łl][ąa]cz|za[łl][ąa]cz|podepn)\w*\s+(?:j[ąa]\s+|t[ęe]\s+)?faktur",
     re.IGNORECASE,
 )
+
+# How many invoices one "dołącz te faktury" may deliver. Delivery is a step the
+# buyer sees, so a batch that ran away — a ledger holding a month of unattached
+# invoices against a seller who meant the four from this conversation — would be
+# visible to that many buyers at once. Over the cap the rest are named and left,
+# and the seller asks again.
+_MAX_INVOICE_DELIVERY_BATCH = 10
+
+# True of every KSeF submission, so in a batch it is said once under the list
+# instead of once per invoice. Kept as one string because _deliver_invoices
+# lifts it back out of the single-invoice wording by exact match.
+_KSEF_ASYNC_NOTE = (
+    "Wysyłka do KSeF jest asynchroniczna — ostateczny status sprawdź w panelu inFakt."
+)
+
+# The tools whose effect leaves this app: a document the buyer can see, a
+# filing with the tax office, a message in someone's inbox, a price or a stock
+# level live on the marketplace. What they return is the only record the seller
+# gets of something that already happened and mostly cannot be undone, so it
+# reaches them exactly as written — see the action-report guard in run().
+#
+# Deliberately NOT "every tool whose TOOL_OUTPUT_FORMAT is 'action'": that
+# label is about how a reply is presented. It also covers
+# preview_pending_invoices, which sends nothing at all, and the monitoring
+# toggles, which flip a stored flag this app owns and can flip back — neither
+# needs a turn's whole reply pinned to its wording.
+_OUTWARD_EFFECT_TOOLS = frozenset({
+    "issue_invoice_for_order",
+    "attach_invoice_to_allegro_order",
+    "send_invoice_to_ksef",
+    "deliver_invoices",
+    "send_message_to_buyer",
+    "update_offer_price",
+    "update_offer_stock",
+})
 
 # ── "…z konta np1988": one named buyer vs the whole period ──────────────────
 # buyer_login is the only filter in the tool list that narrows an answer to ONE
@@ -673,6 +718,14 @@ class AllegroAgent(BaseAgent):
         "  - send_invoice_to_ksef → submits the invoice to KSeF (Poland's e-invoicing system). Needs "
         "invoice_uuid — never guess it, call ask_clarifying_question instead. Same rule: only after "
         "the user asks for it on a later turn.\n"
+        "  - deliver_invoices → the SAME two steps for SEVERAL invoices at once, and the only right "
+        "answer to one instruction covering a batch: 'dodaj te faktury do Allegro', 'dołącz "
+        "wszystkie faktury, a firmową wyślij też do KSeF'. Called with no ids it takes every invoice "
+        "still waiting to be attached, so NEVER dig order ids out of your own earlier messages and "
+        "never fire attach_invoice_to_allegro_order once per order — that is how a turn ends up "
+        "answering about an unrelated order. Set ksef=true only when the user says KSeF (also "
+        "spelled 'kser', 'k-sef'); the private-person ones are refused per order by the tool "
+        "itself, so 'a firmową wyślij do KSeF' is just ksef=true, not a decision for you to make.\n"
         "  - KSeF IS FOR COMPANY BUYERS ONLY. An invoice for a PRIVATE PERSON ('osoba prywatna', no "
         "NIP) must NEVER go to KSeF: KSeF addresses the buyer by NIP, so the filing would be wrong "
         "and cannot be withdrawn. This is a hard rule, not a default — if the user asks for it "
@@ -1012,6 +1065,11 @@ class AllegroAgent(BaseAgent):
         # current query look multi-topic and needlessly skip this layer.
         query_labels = matched_labels(query)
         called_tools: list[str] = []
+        # What each of them returned, in call order — the interpret call reads
+        # the same strings out of `messages`, but a turn that CHANGED something
+        # must be able to report itself without asking a model to (see the
+        # action-report guard below).
+        tool_outputs: list[str] = []
         single_tool_raw_result: str | None = None
         # tool call signature → result, so a model that re-asks for data it was
         # already given costs no second Allegro API round-trip.
@@ -1053,6 +1111,7 @@ class AllegroAgent(BaseAgent):
                 logger.exception("[allegro] tool %s failed: %s", det_tool, exc)
                 result = "An internal error occurred. Please try again."
             single_tool_raw_result = result
+            tool_outputs.append(result)
             tool_results[f"{det_tool}:{json.dumps(det_input, sort_keys=True, default=str)}"] = result
             # Same assistant/tool message shape a real LLM tool call would
             # produce (see the loop below) — the interpret call, if it runs,
@@ -1213,6 +1272,7 @@ class AllegroAgent(BaseAgent):
                             result = "An internal error occurred. Please try again."
                         tool_results[signature] = result
                     single_tool_raw_result = result if len(msg.tool_calls) == 1 else None
+                    tool_outputs.append(result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -1243,6 +1303,55 @@ class AllegroAgent(BaseAgent):
                 # was forced to either guess an ID or call the listing tool alone, and
                 # the interpret step then had nothing that matched what was asked and
                 # sometimes replied with nothing at all. MAX_TOOL_ROUNDS still caps it.
+
+        # ── A turn that CHANGED something reports itself, verbatim ────────────
+        # The invoice went to the buyer, the filing went to the tax office, and
+        # the seller was told there was no table data to copy. That is what this
+        # guard is here to make impossible.
+        #
+        # The mechanism: four attach calls plus a KSeF send land in one round,
+        # so the single-tool bypass below (len(called_tools) == 1) does not
+        # apply, and the turn goes to the interpret call carrying
+        # _RENDERED_VIEW_INSTRUCTION — an instruction about handing back tables
+        # and ```chart blocks unchanged. Against five one-line action reports
+        # the model answered that there was nothing to hand back, and every
+        # record of what had just happened was gone. Allegro and inFakt had
+        # already done the work; only the reply was lost, which is the worst
+        # version of this bug: the seller reads "nothing happened" about an
+        # irreversible step and reasonably tries again.
+        #
+        # So an action's own report never passes through a model. Each of these
+        # tools already returns a finished Polish sentence saying exactly what
+        # it did or refused to do, and the turn is rendered by joining them in
+        # call order. A non-Polish query keeps the Polish wording here — the
+        # translation the interpret call would add is not worth the chance of it
+        # dropping the line that says an invoice is now visible to a buyer.
+        if any(tool in _OUTWARD_EFFECT_TOOLS for tool in called_tools):
+            # Identical strings only ever come from the repeat-call cache above
+            # (the same tool, the same arguments, executed once) — never from
+            # two different orders, whose reports name different ids. A blank
+            # result reports nothing, so it does not hold the turn here either:
+            # that one falls through and the interpret call answers as before.
+            reports: list[str] = []
+            for output in tool_outputs:
+                if output and output not in reports:
+                    reports.append(output)
+            if reports:
+                action_format = resolve_output_format(called_tools)
+                perf.log(
+                    source=self.agent_name, output_format=action_format,
+                    tools=",".join(called_tools), action_report=True,
+                )
+                return AgentResponse(
+                    text="\n\n".join(reports),
+                    agent_type=self.agent_name,
+                    metadata={
+                        "output_format": action_format,
+                        "tools": called_tools,
+                        "perf_stages": perf.snapshot(),
+                        "perf_total_ms": perf.elapsed_ms(),
+                    },
+                )
 
         # ── Skip the interpret call entirely when it would be pure passthrough ──
         # See _PASSTHROUGH_TOOLS above: the dispatch output IS the answer, down
@@ -3458,7 +3567,7 @@ class AllegroAgent(BaseAgent):
         )
 
     async def _attach_invoice_to_allegro_order(
-        self, order_id: str, invoice_uuid: str | None = None
+        self, order_id: str | None = None, invoice_uuid: str | None = None
     ) -> str:
         """Fetch the invoice PDF from inFakt and attach it to the Allegro order,
         once the seller has confirmed the invoice is correct.
@@ -3484,6 +3593,26 @@ class AllegroAgent(BaseAgent):
 
         user_id = invoice_ledger.user_id_of(self._allegro)
 
+        if not order_id:
+            # The seller named the INVOICE and nothing else ("tę fakturę dodaj
+            # do Allegro, ID faktury w inFakt: 69bb…") — which is what the
+            # issuance reply hands them, since that is the id it prints. The
+            # ledger indexes the invoice back to its order for exactly this;
+            # without it the turn used to die on a missing order_id and come
+            # back as an answer about some entirely different order.
+            order_id = await invoice_ledger.order_of_invoice(user_id, invoice_uuid or "")
+            if not order_id and invoice_uuid:
+                return (
+                    f"❓ Nie wiem, do którego zamówienia należy faktura `{invoice_uuid}` — "
+                    "nie mam jej w swoich zapisach, a bez zamówienia nie mam czego dołączyć. "
+                    "Podaj ID zamówienia (np. „dołącz fakturę do zamówienia `<id>`”)."
+                )
+            if not order_id:
+                return (
+                    "❓ Nie wiem, którą fakturę i do którego zamówienia mam dołączyć. "
+                    "Podaj ID zamówienia (np. „dołącz fakturę do zamówienia `<id>`”)."
+                )
+
         if order_id in self._issued_this_turn:
             return (
                 f"⏸️ Nie dołączam faktury do zamówienia `{order_id}` w tej samej wiadomości, "
@@ -3499,13 +3628,29 @@ class AllegroAgent(BaseAgent):
                 f"Napisz „dołącz fakturę do zamówienia `{order_id}`”, kiedy ją sprawdzisz."
             )
 
+        # Read once, for both the duplicate check and the invoice id: the ledger
+        # knows which invoice belongs to this order and whether it has already
+        # gone up, and asking the model to remember either is how a wrong UUID
+        # gets attached to the wrong order.
+        record = await invoice_ledger.get_record(user_id, order_id) or {}
+
+        if record.get("attached"):
+            # A second upload is refused by Allegro anyway (one invoice per
+            # order) — with a 400 the seller has no way to read. And the reason
+            # they are asking twice is usually that the first time said nothing:
+            # see the action-report guard in run().
+            number = record.get("number") or invoice_uuid or ""
+            return (
+                f"ℹ️ Faktura {number} jest już dołączona do zamówienia `{order_id}` — "
+                "dołączyłem ją wcześniej, a Allegro przyjmuje jedną fakturę na zamówienie, "
+                "więc nie wysyłam jej drugi raz. Kupujący widzi ją na stronie zamówienia; "
+                "jeśli jej tam nie ma, sprawdź zamówienie w panelu Allegro."
+            )
+
         if not invoice_uuid:
             # The seller says "dołącz fakturę do zamówienia X" without an ID —
-            # which is the normal case when the invoice was issued hours ago or
-            # from another conversation thread. The ledger knows which invoice
-            # belongs to this order; asking the model to remember it is how a
-            # wrong UUID gets attached to the wrong order.
-            record = await invoice_ledger.get_record(user_id, order_id) or {}
+            # the normal case when the invoice was issued hours ago or from
+            # another conversation thread.
             invoice_uuid = record.get("invoice_uuid") or ""
             if not invoice_uuid:
                 return (
@@ -3614,6 +3759,14 @@ class AllegroAgent(BaseAgent):
                 "Podaj ID zamówienia (np. „wyślij fakturę do KSeF dla zamówienia `<id>`”)."
             )
 
+        record = await invoice_ledger.get_record(user_id, order_id) or {}
+        if record.get("ksef_sent"):
+            return (
+                f"ℹ️ Fakturę `{invoice_uuid}` wysłałem już do KSeF — do KSeF wysyła się raz i "
+                "drugiego zgłoszenia nie da się wycofać, więc nie wysyłam jej ponownie. "
+                "Ostateczny status zgłoszenia sprawdź w panelu inFakt."
+            )
+
         try:
             address = await self._allegro.get_order_invoice_data(order_id)
         except AllegroAPIError as exc:
@@ -3644,11 +3797,172 @@ class AllegroAgent(BaseAgent):
                 return self._unknown_infakt_invoice(invoice_uuid)
             return f"❌ Nie udało się wysłać faktury `{invoice_uuid}` do KSeF: {exc}"
 
+        await invoice_ledger.mark_ksef_sent(user_id, order_id)
         status = result.get("status", "?")
         return (
             f"📤 Faktura `{invoice_uuid}` wysłana do KSeF (status zgłoszenia: {status}). "
-            "Wysyłka do KSeF jest asynchroniczna — ostateczny status sprawdź w panelu inFakt."
+            + _KSEF_ASYNC_NOTE
         )
+
+    @staticmethod
+    async def _target_for_invoice_id(user_id: str, uuid: str) -> tuple[str | None, str]:
+        """(order_id, invoice_uuid) for an id the seller gave as an INVOICE id.
+
+        An id pasted into a chat message carries no type, and the noun in front
+        of it ("ID faktury w inFakt: 69bb…", "do zamówienia a076…") is all
+        anyone has to go on. When that reading turns out wrong the ledger says
+        so for free: an ORDER id has a record of its own under it, an invoice id
+        never does. So a mislabelled id is corrected rather than sent to inFakt
+        as an invoice it will never find — and an id neither lookup knows comes
+        back with no order, which is what makes the caller refuse.
+        """
+        from services import invoice_ledger
+
+        order_id = await invoice_ledger.order_of_invoice(user_id, uuid)
+        if order_id:
+            return order_id, uuid
+        record = await invoice_ledger.get_record(user_id, uuid)
+        if record:
+            return uuid, record.get("invoice_uuid") or ""
+        return None, uuid
+
+    async def _deliver_invoices(
+        self,
+        *,
+        order_ids: list[str] | None = None,
+        invoice_uuids: list[str] | None = None,
+        attach: bool = True,
+        ksef: bool = False,
+    ) -> str:
+        """Deliver invoices that ALREADY EXIST in inFakt: attach them to their
+        Allegro orders, send them to KSeF, or both — for one named invoice/order
+        or for every invoice still waiting.
+
+        Issuance stays one order per call (see _issue_invoice_for_order): a
+        misfire there creates a real, numbered document that cannot be undone.
+        Delivery is different. The invoices are already written, the seller has
+        been shown a link to each one, and what they answer is about the SET —
+        "dodaj te faktury do Allegro, a firmową wyślij też do KSeF". Served one
+        tool call per invoice, that turn needs the model to recover four order
+        ids out of its own previous message and chain five calls; what it
+        actually did was answer about an unrelated order. So the set is resolved
+        HERE, from the ledger, and every call still goes through
+        _attach_invoice_to_allegro_order / _send_invoice_to_ksef — every guard
+        they carry (the seller's own word, never on the issuing turn, and the
+        per-order NIP check that keeps a private person's invoice out of KSeF)
+        applies to each one exactly as it does to a single delivery.
+        """
+        from services import invoice_ledger
+
+        user_id = invoice_ledger.user_id_of(self._allegro)
+        if not attach and not ksef:
+            attach = True
+
+        # Whichever way the seller named the invoices, a target is always the
+        # PAIR: Allegro is asked about the order, inFakt about the invoice.
+        targets: list[tuple[str | None, str]] = []
+        if order_ids and invoice_uuids:
+            # Both spelled out ("dołącz fakturę <inv> do zamówienia <ord>") —
+            # taken as given, in the order they were written, and nothing is
+            # looked up. Different lengths mean the pairing is a guess, and a
+            # guess here attaches one buyer's invoice to another buyer's order.
+            if len(order_ids) != len(invoice_uuids):
+                return (
+                    f"❓ Podałeś {len(order_ids)} zamówień i {len(invoice_uuids)} faktur — "
+                    "nie wiem, która faktura należy do którego zamówienia, więc nic nie "
+                    "dołączam. Napisz je parami albo podaj same zamówienia."
+                )
+            targets = list(zip(order_ids, invoice_uuids))
+        elif order_ids:
+            records = await invoice_ledger.get_records(user_id, list(order_ids))
+            targets = [
+                (order_id, records.get(order_id, {}).get("invoice_uuid") or "")
+                for order_id in order_ids
+            ]
+        elif invoice_uuids:
+            targets = [
+                await self._target_for_invoice_id(user_id, uuid) for uuid in invoice_uuids
+            ]
+        else:
+            targets = [
+                (order_id, record.get("invoice_uuid") or "")
+                for order_id, record in await invoice_ledger.pending_delivery(user_id)
+            ]
+            if not targets:
+                return (
+                    "✅ Nie mam żadnej wystawionej faktury, która czekałaby na dołączenie — "
+                    "wszystkie, które wystawiłem, są już dołączone do zamówień w Allegro. "
+                    "Jeśli chodzi o konkretną fakturę, podaj ID zamówienia albo ID faktury z inFakt."
+                )
+
+        # Deduplicated on the order, which is what Allegro accepts one invoice
+        # for — the same order named twice in one message must not be attached
+        # twice (the second call fails).
+        seen: set[str] = set()
+        unique: list[tuple[str | None, str]] = []
+        for order_id, uuid in targets:
+            key = order_id or uuid
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((order_id, uuid))
+        targets = unique
+
+        if attach and not self._attach_authorized_by_seller():
+            return (
+                "⏸️ Nie dołączam faktur do zamówień bez Twojego wyraźnego polecenia — to krok, "
+                "który pokazuje faktury kupującym i jest nieodwracalny. Napisz „dołącz faktury "
+                "do zamówień w Allegro”, kiedy je sprawdzisz."
+            )
+
+        overflow = targets[_MAX_INVOICE_DELIVERY_BATCH:]
+        targets = targets[:_MAX_INVOICE_DELIVERY_BATCH]
+
+        batch = len(targets) > 1
+        blocks: list[str] = []
+        sent_to_ksef = False
+        for order_id, uuid in targets:
+            lines: list[str] = []
+            if attach:
+                lines.append(await self._attach_invoice_to_allegro_order(order_id, uuid or None))
+            if ksef:
+                if not uuid:
+                    lines.append(
+                        "❓ Do KSeF nie wysyłam — nie mam zapisanego ID faktury z inFakt dla tego "
+                        "zamówienia. Podaj je, jeśli chcesz ją tam zgłosić."
+                    )
+                else:
+                    ksef_line = await self._send_invoice_to_ksef(uuid, order_id)
+                    sent_to_ksef = sent_to_ksef or ksef_line.startswith("📤")
+                    if batch:
+                        # The per-invoice wordings are written to stand alone.
+                        # Repeated down a list, the five-line explanation of why
+                        # KSeF needs a NIP and the async caveat under every send
+                        # bury the one line per invoice that actually reports
+                        # what happened — so both are said once, below.
+                        if ksef_line.startswith("🚫"):
+                            ksef_line = (
+                                "🚫 Do KSeF nie poszła — nabywcą jest osoba prywatna wg danych "
+                                "do faktury z Allegro, a KSeF przyjmuje faktury dla firm, z NIP-em."
+                            )
+                        ksef_line = ksef_line.replace(" " + _KSEF_ASYNC_NOTE, "")
+                    lines.append(ksef_line)
+            if not batch:
+                # One invoice reads exactly as it did before this tool existed.
+                return "\n".join(lines)
+            label = f"`{order_id}`" if order_id else f"faktura `{uuid}`"
+            blocks.append(f"**Zamówienie {label}**\n" + "\n".join(lines))
+
+        what = " i ".join(
+            part for part, on in (("dołączenie do Allegro", attach), ("wysyłka do KSeF", ksef)) if on
+        )
+        footer = f"\n\n{_KSEF_ASYNC_NOTE}" if sent_to_ksef else ""
+        if overflow:
+            footer += (
+                f"\n\nZatrzymałem się na {_MAX_INVOICE_DELIVERY_BATCH} fakturach — czeka jeszcze "
+                f"{len(overflow)}. Napisz ponownie „dołącz faktury”, a wezmę kolejne."
+            )
+        return f"**Faktury — {what} ({len(targets)}):**\n\n" + "\n\n".join(blocks) + footer
 
     # ── Zysk jednego zamówienia ──────────────────────────────────────────────
     # The one number this app cannot derive from Allegro is the seller's own
@@ -5155,12 +5469,20 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "attach_invoice_to_allegro_order":
             return await self._attach_invoice_to_allegro_order(
-                tool_input["order_id"], tool_input.get("invoice_uuid")
+                tool_input.get("order_id"), tool_input.get("invoice_uuid")
             )
 
         if tool_name == "send_invoice_to_ksef":
             return await self._send_invoice_to_ksef(
                 tool_input["invoice_uuid"], tool_input.get("order_id")
+            )
+
+        if tool_name == "deliver_invoices":
+            return await self._deliver_invoices(
+                order_ids=tool_input.get("order_ids") or None,
+                invoice_uuids=tool_input.get("invoice_uuids") or None,
+                attach=tool_input.get("attach", True),
+                ksef=tool_input.get("ksef", False),
             )
 
         # Both the "suggest" and "disable" tool for each monitor type resolve to the
