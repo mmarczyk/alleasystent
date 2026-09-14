@@ -27,7 +27,7 @@ from agents.allegro.allegro_tools import (
     tools_for_labels,
 )
 from agents.allegro.deterministic_dispatch import (
-    extract_min_orders,
+    extract_buyer_scope,
     extract_value_bounds,
     names_a_product,
     names_an_order_stage,
@@ -469,6 +469,10 @@ class AllegroAgent(BaseAgent):
         "min_orders=4 (more than 3 means 4 and up), 'co najmniej 3' → min_orders=3, 'stali "
         "klienci'/'kupili więcej niż raz' → min_orders=2; dropping that count answers with "
         "every customer of the period, which reads like the answer and is not. "
+        "'Którzy klienci robią największe zamówienia' / 'kto składa duże zamówienia' → "
+        "sort_by='avg_value' (the biggest AVERAGE order, NOT the default 'value', which "
+        "answers with whoever placed forty small ones); 'kto bierze hurtowo' / 'najwięcej "
+        "sztuk na raz' → sort_by='avg_items'. "
         "Resolve the period yourself ('w tym roku' → 1 January of the current year through today) and omit both dates only when no period is named — the "
         "tool then defaults to the current year. NEVER answer a buyer question with get_orders or "
         "get_sales_summary: neither groups anything by buyer, so the seller would be left counting "
@@ -1049,7 +1053,7 @@ class AllegroAgent(BaseAgent):
                     metadata={"output_format": "chat"},
                 )
             det_input = self._with_value_bounds(det_tool, det_input, query)
-            det_input = self._with_min_orders(det_tool, det_input, query)
+            det_input = self._with_buyer_scope(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
             try:
@@ -1198,7 +1202,7 @@ class AllegroAgent(BaseAgent):
                     except json.JSONDecodeError:
                         tool_input = {}
                     tool_input = self._with_value_bounds(tool_name, tool_input, query)
-                    tool_input = self._with_min_orders(tool_name, tool_input, query)
+                    tool_input = self._with_buyer_scope(tool_name, tool_input, query)
                     if tool_name == "get_message_threads":
                         # The user's wording overrides whatever the model decided for
                         # count_only (see _wants_message_count_only above).
@@ -1499,27 +1503,32 @@ class AllegroAgent(BaseAgent):
         logger.info("[allegro] value bounds read from the query: %s (%s)", bounds, tool_name)
         return {**tool_input, **bounds}
 
-    def _with_min_orders(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
-        """Put an order count the seller stated back onto a buyer list the model
-        called without it ("tylko ci, którzy zrobili więcej niż 3 zamówienia").
+    def _with_buyer_scope(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
+        """Put the narrowings a buyer question states — companies or private
+        people, the invoice state, an order count, the ordering — back onto a
+        get_buyers call the model made without them.
 
         Same failure as _with_value_bounds, and the same answer to it: a dropped
         narrowing comes back as a LONGER list that reads exactly like the answer
-        — every customer of the period where four were asked for — and nothing
-        in the reply says the count was ignored. The wording is unambiguous
-        enough to read in Python (see extract_min_orders, which also resolves
-        "więcej niż 3" to 4), so it is read there rather than left to the
-        model's discretion.
+        ("tylko ci, którzy zrobili więcej niż 3 zamówienia" → all 884 customers
+        of the period), and nothing in the reply says it was ignored. Sorting is
+        here for the same reason one step further in: "którzy klienci robią
+        największe zamówienia" answered in total-spend order is not a longer
+        list but a wrong one — it names whoever placed forty small orders.
 
-        Only ever ADDS: a min_orders the model passed itself stays untouched.
+        Only ever ADDS: every argument the model passed itself stays untouched,
+        and a question stating none of this changes nothing.
         """
-        if tool_name != "get_buyers" or tool_input.get("min_orders") is not None:
+        if tool_name != "get_buyers":
             return tool_input
-        minimum = extract_min_orders(query)
-        if minimum is None:
+        missing = {
+            arg: value for arg, value in extract_buyer_scope(query).items()
+            if tool_input.get(arg) is None
+        }
+        if not missing:
             return tool_input
-        logger.info("[allegro] get_buyers: min_orders=%d read from the query", minimum)
-        return {**tool_input, "min_orders": minimum}
+        logger.info("[allegro] get_buyers: %s read from the query", missing)
+        return {**tool_input, **missing}
 
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:
@@ -2981,6 +2990,15 @@ class AllegroAgent(BaseAgent):
             buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)
         elif sort_by == "orders":
             buyers.sort(key=lambda g: (g["orders"], g["value"]), reverse=True)
+        elif sort_by == "avg_value":
+            # "Którzy klienci robią największe zamówienia" is a question about
+            # the SIZE of one order, which total spend answers wrong: somebody
+            # with forty small orders outranks a customer who orders a pallet
+            # twice a year. Ties break on the total, so the bigger customer of
+            # two with the same basket still comes first.
+            buyers.sort(key=lambda g: (g["value"] / g["orders"], g["value"]), reverse=True)
+        elif sort_by == "avg_items":
+            buyers.sort(key=lambda g: (g["items"] / g["orders"], g["value"]), reverse=True)
         else:
             buyers.sort(key=lambda g: (g["value"], g["orders"]), reverse=True)
 

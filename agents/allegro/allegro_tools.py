@@ -1183,11 +1183,16 @@ ALLEGRO_TOOLS: list[dict] = [
                     "sort_by": {
                         "type": "string",
                         "description": (
-                            "Row order: 'value' = highest total spend first (default, the 'najlepsi "
+                            "Row order: 'value' = highest TOTAL spend first (default, the 'najlepsi "
                             "klienci' order), 'orders' = most orders first ('stali klienci', 'kto "
-                            "kupuje najczęściej'), 'recent' = most recent purchase first."
+                            "kupuje najczęściej'), 'avg_value' = biggest AVERAGE ORDER first "
+                            "('którzy klienci robią największe zamówienia', 'kto składa duże "
+                            "zamówienia' — NOT 'value', which puts someone with 40 small orders on "
+                            "top), 'avg_items' = most pieces per order first ('kto bierze "
+                            "hurtowo', 'kto kupuje po kilka sztuk na raz'), 'recent' = most recent "
+                            "purchase first."
                         ),
-                        "enum": ["value", "orders", "recent"],
+                        "enum": ["value", "orders", "avg_value", "avg_items", "recent"],
                         "default": "value",
                     },
                     "count_only": {

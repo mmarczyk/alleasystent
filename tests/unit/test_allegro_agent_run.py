@@ -428,11 +428,12 @@ class TestFormatInstruction:
         assert len(last_system["content"]) < len(first_system["content"]) / 2
 
 
-class TestMinOrdersReachesTheTool:
-    """The order count the seller stated is put back onto get_buyers in Python
-    — see AllegroAgent._with_min_orders. Dropping it is invisible in exactly
-    the same way an amount is: "lista kupujących … tylko ci, którzy zrobili
-    więcej niż 3 zamówienia" came back as all 884 customers of the period."""
+class TestBuyerScopeReachesTheTool:
+    """What a buyer question narrows and orders by is put back onto get_buyers
+    in Python — see AllegroAgent._with_buyer_scope. Dropping it is invisible in
+    exactly the same way a dropped amount is: "lista kupujących … tylko ci,
+    którzy zrobili więcej niż 3 zamówienia" came back as all 884 customers of
+    the period."""
 
     @pytest.mark.asyncio
     async def test_the_production_question_reaches_the_tool_with_the_count(self):
@@ -476,6 +477,50 @@ class TestMinOrdersReachesTheTool:
         await agent.run("pokaż listę kupujących z ostatnich 3 miesięcy")
 
         agent._execute_tool.assert_awaited_once_with("get_buyers", {})
+
+    @pytest.mark.asyncio
+    async def test_biggest_orders_question_sorts_by_the_average_order(self):
+        """Left to the default, this answers in total-spend order — whoever
+        placed forty small orders, not whoever places big ones."""
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("Którzy klienci robią największe zamówienia?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {"sort_by": "avg_value"})
+
+    @pytest.mark.asyncio
+    async def test_company_and_invoice_questions_keep_their_filters(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("Którzy klienci firmowi zamawiają u mnie z fakturą?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {
+            "buyer_type": "company", "invoice_status": "requested",
+        })
+
+    @pytest.mark.asyncio
+    async def test_the_model_own_arguments_win_argument_by_argument(self):
+        """Only ever adds: the model reading the invoice state for itself is not
+        second-guessed, and the filter it left out is still filled in."""
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {"invoice_status": "issued"})]),
+            _resp(),
+        ])
+
+        await agent.run("Które firmy zamawiają u mnie z fakturą?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {
+            "invoice_status": "issued", "buyer_type": "company",
+        })
 
     @pytest.mark.asyncio
     async def test_other_tools_are_untouched(self):

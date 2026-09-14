@@ -2213,6 +2213,59 @@ class TestBuyersReport:
         assert "|" not in result
 
     @pytest.mark.asyncio
+    async def test_sort_by_avg_value_finds_who_places_the_biggest_orders(self):
+        """"Którzy klienci robią największe zamówienia" — the default (total
+        spend) answers it with whoever ordered most often, which is a different
+        customer and a different question."""
+        orders = [
+            self._order(f"s{i}", "drobnica", 100.0, paid_at=f"2026-0{i}-01T10:00:00Z")
+            for i in range(1, 7)                       # 6 × 100 = 600 total, 100 per order
+        ] + [
+            self._order("h1", "hurt", 2000.0, paid_at="2026-03-05T10:00:00Z"),
+            self._order("h2", "hurt", 1000.0, paid_at="2026-04-05T10:00:00Z"),
+        ]                                              # 3000 total, 1500 per order
+        agent = self._agent_with(orders)
+
+        def first_row(result):
+            return [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1]
+
+        assert first_row(await agent._dispatch("get_buyers", {"sort_by": "avg_value"})).startswith(
+            "| hurt |"
+        )
+        # …and the total-spend default still answers its own question.
+        assert first_row(await agent._dispatch("get_buyers", {})).startswith("| hurt |")
+        assert first_row(await agent._dispatch("get_buyers", {"sort_by": "orders"})).startswith(
+            "| drobnica |"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sort_by_avg_value_beats_a_bigger_total_from_small_orders(self):
+        agent = self._agent_with(
+            [
+                self._order(f"s{i}", "drobnica", 500.0, paid_at=f"2026-0{i}-01T10:00:00Z")
+                for i in range(1, 7)                   # 3000 total, 500 per order
+            ]
+            + [self._order("h1", "hurt", 1200.0, paid_at="2026-03-05T10:00:00Z")]
+        )
+
+        result = await agent._dispatch("get_buyers", {"sort_by": "avg_value"})
+        rows = [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+
+        assert rows[0].startswith("| hurt |"), "the biggest single order, not the biggest total"
+
+    @pytest.mark.asyncio
+    async def test_sort_by_avg_items_finds_the_wholesale_buyers(self):
+        agent = self._agent_with([
+            self._order("h1", "hurt", 300.0, quantity=40, paid_at="2026-03-01T10:00:00Z"),
+            self._order("d1", "detal", 900.0, quantity=2, paid_at="2026-04-01T10:00:00Z"),
+        ])
+
+        result = await agent._dispatch("get_buyers", {"sort_by": "avg_items"})
+        rows = [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+
+        assert rows[0].startswith("| hurt |")   # 40 szt./zam. despite spending less
+
+    @pytest.mark.asyncio
     async def test_failed_invoice_lookup_is_reported_not_counted_as_missing(self):
         agent = self._agent_with(self._mixed_orders())
         agent._allegro.invoices_issued_map = AsyncMock(

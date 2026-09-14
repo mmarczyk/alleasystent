@@ -26,7 +26,7 @@ which is unacceptable. Every matcher below is deliberately conservative:
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import Any, Callable
 
 from agents.allegro.allegro_tools import named_buyer_login, named_phone_number
 
@@ -238,6 +238,81 @@ def extract_min_orders(query: str) -> int | None:
     if _MIN_ORDERS_MORE_THAN_ONCE_RE.search(query):
         return 2
     return None
+
+
+# ── kupujacy: firmy, faktury, "kto robi najwieksze zamowienia" ──────────────
+# The same silent-drop problem as the order count above, on the three other
+# narrowings a buyer question carries. Each one has a parameter on get_buyers,
+# so nothing here invents an answer the tool cannot give — it only stops the
+# narrowing from evaporating between the seller's sentence and the call.
+_BUYER_COMPANY_RE = re.compile(
+    r"firm\w*|b2b|\bnip\b|kontrahent\w*|dzia[łl]alno[śs]\w*|sp\.\s*z\s*o\.?\s*o|companies|business",
+    re.IGNORECASE,
+)
+_BUYER_PERSON_RE = re.compile(
+    r"(?:osob\w*|klient\w*|kupuj[aą]c\w*|nabywc\w*)\s+prywatn\w*|"
+    r"prywatn\w*\s+(?:osob\w*|klient\w*|kupuj[aą]c\w*)|konsument\w*|private\s+(?:person|buyer)",
+    re.IGNORECASE,
+)
+# Which invoice state, in the order that decides ties: a NEGATED invoice beats
+# the word "wystawiłem" it contains ("komu jeszcze NIE wystawiłem faktury"),
+# and an invoice actually issued beats the mere request that preceded it.
+_INVOICE_ANY_RE = re.compile(r"faktur|invoice", re.IGNORECASE)
+_INVOICE_MISSING_RE = re.compile(
+    r"nie\s+\w*\s*wystawi|bez\s+(?:wystawionej\s+)?faktur|czeka\w*\s+na\s+faktur|"
+    r"zaleg\w*\s+faktur|brakuj\w*\s+faktur|winien\w*\s+faktur|still\s+owed",
+    re.IGNORECASE,
+)
+_INVOICE_ISSUED_RE = re.compile(r"wystawi\w*|issued", re.IGNORECASE)
+_INVOICE_REQUESTED_RE = re.compile(
+    r"(?:z|na|o|po)\s+faktur\w*|faktur\w*\s+vat\b|prosi\w*\s+o\s+faktur|"
+    r"chc\w*\s+faktur|zamawiaj\w*\s+z\s+faktur|with\s+an?\s+invoice",
+    re.IGNORECASE,
+)
+# "Którzy klienci robią największe zamówienia" — about the size of ONE order,
+# which total spend answers wrong (see AllegroAgent._buyers_report).
+_SORT_AVG_VALUE_RE = re.compile(
+    r"(?:najwi[eę]ksz\w*|najdro[zż]sz\w*|du[zż]\w*|grub\w*|wysok\w*)\s+"
+    r"(?:pojedyncz\w*\s+)?(?:zam[oó]wie\w*|zamowie\w*|koszyk\w*)|"
+    r"[śs]redni\w*\s+warto[śs][cć]\w*\s+zam[oó]wie\w*|biggest\s+orders?",
+    re.IGNORECASE,
+)
+_SORT_AVG_ITEMS_RE = re.compile(
+    r"hurtow\w*|na\s+hurt\b|najwi[eę]cej\s+sztuk|du[zż]\w*\s+ilo[śs]ci|"
+    r"po\s+kilka\s+sztuk|wholesale",
+    re.IGNORECASE,
+)
+
+
+def extract_buyer_scope(query: str) -> dict[str, Any]:
+    """Everything a buyer question narrows or orders BY that get_buyers has a
+    parameter for — buyer_type, invoice_status, min_orders, sort_by — as its
+    arguments, keyed exactly as the schema names them.
+
+    Only what the sentence states plainly: anything unsaid is left out entirely
+    so the caller's own arguments (and the tool's defaults) stand. See
+    AllegroAgent._with_buyer_scope for why this is read in Python at all.
+    """
+    scope: dict[str, Any] = {}
+    if _BUYER_PERSON_RE.search(query):
+        scope["buyer_type"] = "person"
+    elif _BUYER_COMPANY_RE.search(query):
+        scope["buyer_type"] = "company"
+    if _INVOICE_ANY_RE.search(query):
+        if _INVOICE_MISSING_RE.search(query):
+            scope["invoice_status"] = "missing"
+        elif _INVOICE_ISSUED_RE.search(query):
+            scope["invoice_status"] = "issued"
+        elif _INVOICE_REQUESTED_RE.search(query):
+            scope["invoice_status"] = "requested"
+    minimum = extract_min_orders(query)
+    if minimum is not None:
+        scope["min_orders"] = minimum
+    if _SORT_AVG_ITEMS_RE.search(query):
+        scope["sort_by"] = "avg_items"
+    elif _SORT_AVG_VALUE_RE.search(query):
+        scope["sort_by"] = "avg_value"
+    return scope
 
 
 # ── zamowienia: the order-stage vocabulary ──────────────────────────────────
