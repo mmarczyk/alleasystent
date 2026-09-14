@@ -118,6 +118,27 @@ _KSEF_ASYNC_NOTE = (
     "Wysyłka do KSeF jest asynchroniczna — ostateczny status sprawdź w panelu inFakt."
 )
 
+# The tools whose effect leaves this app: a document the buyer can see, a
+# filing with the tax office, a message in someone's inbox, a price or a stock
+# level live on the marketplace. What they return is the only record the seller
+# gets of something that already happened and mostly cannot be undone, so it
+# reaches them exactly as written — see the action-report guard in run().
+#
+# Deliberately NOT "every tool whose TOOL_OUTPUT_FORMAT is 'action'": that
+# label is about how a reply is presented. It also covers
+# preview_pending_invoices, which sends nothing at all, and the monitoring
+# toggles, which flip a stored flag this app owns and can flip back — neither
+# needs a turn's whole reply pinned to its wording.
+_OUTWARD_EFFECT_TOOLS = frozenset({
+    "issue_invoice_for_order",
+    "attach_invoice_to_allegro_order",
+    "send_invoice_to_ksef",
+    "deliver_invoices",
+    "send_message_to_buyer",
+    "update_offer_price",
+    "update_offer_stock",
+})
+
 # ── "…z konta np1988": one named buyer vs the whole period ──────────────────
 # buyer_login is the only filter in the tool list that narrows an answer to ONE
 # buyer account, and these are the tools that answer for a whole PERIOD with no
@@ -1044,6 +1065,11 @@ class AllegroAgent(BaseAgent):
         # current query look multi-topic and needlessly skip this layer.
         query_labels = matched_labels(query)
         called_tools: list[str] = []
+        # What each of them returned, in call order — the interpret call reads
+        # the same strings out of `messages`, but a turn that CHANGED something
+        # must be able to report itself without asking a model to (see the
+        # action-report guard below).
+        tool_outputs: list[str] = []
         single_tool_raw_result: str | None = None
         # tool call signature → result, so a model that re-asks for data it was
         # already given costs no second Allegro API round-trip.
@@ -1085,6 +1111,7 @@ class AllegroAgent(BaseAgent):
                 logger.exception("[allegro] tool %s failed: %s", det_tool, exc)
                 result = "An internal error occurred. Please try again."
             single_tool_raw_result = result
+            tool_outputs.append(result)
             tool_results[f"{det_tool}:{json.dumps(det_input, sort_keys=True, default=str)}"] = result
             # Same assistant/tool message shape a real LLM tool call would
             # produce (see the loop below) — the interpret call, if it runs,
@@ -1245,6 +1272,7 @@ class AllegroAgent(BaseAgent):
                             result = "An internal error occurred. Please try again."
                         tool_results[signature] = result
                     single_tool_raw_result = result if len(msg.tool_calls) == 1 else None
+                    tool_outputs.append(result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -1275,6 +1303,55 @@ class AllegroAgent(BaseAgent):
                 # was forced to either guess an ID or call the listing tool alone, and
                 # the interpret step then had nothing that matched what was asked and
                 # sometimes replied with nothing at all. MAX_TOOL_ROUNDS still caps it.
+
+        # ── A turn that CHANGED something reports itself, verbatim ────────────
+        # The invoice went to the buyer, the filing went to the tax office, and
+        # the seller was told there was no table data to copy. That is what this
+        # guard is here to make impossible.
+        #
+        # The mechanism: four attach calls plus a KSeF send land in one round,
+        # so the single-tool bypass below (len(called_tools) == 1) does not
+        # apply, and the turn goes to the interpret call carrying
+        # _RENDERED_VIEW_INSTRUCTION — an instruction about handing back tables
+        # and ```chart blocks unchanged. Against five one-line action reports
+        # the model answered that there was nothing to hand back, and every
+        # record of what had just happened was gone. Allegro and inFakt had
+        # already done the work; only the reply was lost, which is the worst
+        # version of this bug: the seller reads "nothing happened" about an
+        # irreversible step and reasonably tries again.
+        #
+        # So an action's own report never passes through a model. Each of these
+        # tools already returns a finished Polish sentence saying exactly what
+        # it did or refused to do, and the turn is rendered by joining them in
+        # call order. A non-Polish query keeps the Polish wording here — the
+        # translation the interpret call would add is not worth the chance of it
+        # dropping the line that says an invoice is now visible to a buyer.
+        if any(tool in _OUTWARD_EFFECT_TOOLS for tool in called_tools):
+            # Identical strings only ever come from the repeat-call cache above
+            # (the same tool, the same arguments, executed once) — never from
+            # two different orders, whose reports name different ids. A blank
+            # result reports nothing, so it does not hold the turn here either:
+            # that one falls through and the interpret call answers as before.
+            reports: list[str] = []
+            for output in tool_outputs:
+                if output and output not in reports:
+                    reports.append(output)
+            if reports:
+                action_format = resolve_output_format(called_tools)
+                perf.log(
+                    source=self.agent_name, output_format=action_format,
+                    tools=",".join(called_tools), action_report=True,
+                )
+                return AgentResponse(
+                    text="\n\n".join(reports),
+                    agent_type=self.agent_name,
+                    metadata={
+                        "output_format": action_format,
+                        "tools": called_tools,
+                        "perf_stages": perf.snapshot(),
+                        "perf_total_ms": perf.elapsed_ms(),
+                    },
+                )
 
         # ── Skip the interpret call entirely when it would be pure passthrough ──
         # See _PASSTHROUGH_TOOLS above: the dispatch output IS the answer, down
@@ -3551,13 +3628,29 @@ class AllegroAgent(BaseAgent):
                 f"Napisz „dołącz fakturę do zamówienia `{order_id}`”, kiedy ją sprawdzisz."
             )
 
+        # Read once, for both the duplicate check and the invoice id: the ledger
+        # knows which invoice belongs to this order and whether it has already
+        # gone up, and asking the model to remember either is how a wrong UUID
+        # gets attached to the wrong order.
+        record = await invoice_ledger.get_record(user_id, order_id) or {}
+
+        if record.get("attached"):
+            # A second upload is refused by Allegro anyway (one invoice per
+            # order) — with a 400 the seller has no way to read. And the reason
+            # they are asking twice is usually that the first time said nothing:
+            # see the action-report guard in run().
+            number = record.get("number") or invoice_uuid or ""
+            return (
+                f"ℹ️ Faktura {number} jest już dołączona do zamówienia `{order_id}` — "
+                "dołączyłem ją wcześniej, a Allegro przyjmuje jedną fakturę na zamówienie, "
+                "więc nie wysyłam jej drugi raz. Kupujący widzi ją na stronie zamówienia; "
+                "jeśli jej tam nie ma, sprawdź zamówienie w panelu Allegro."
+            )
+
         if not invoice_uuid:
             # The seller says "dołącz fakturę do zamówienia X" without an ID —
-            # which is the normal case when the invoice was issued hours ago or
-            # from another conversation thread. The ledger knows which invoice
-            # belongs to this order; asking the model to remember it is how a
-            # wrong UUID gets attached to the wrong order.
-            record = await invoice_ledger.get_record(user_id, order_id) or {}
+            # the normal case when the invoice was issued hours ago or from
+            # another conversation thread.
             invoice_uuid = record.get("invoice_uuid") or ""
             if not invoice_uuid:
                 return (
@@ -3666,6 +3759,14 @@ class AllegroAgent(BaseAgent):
                 "Podaj ID zamówienia (np. „wyślij fakturę do KSeF dla zamówienia `<id>`”)."
             )
 
+        record = await invoice_ledger.get_record(user_id, order_id) or {}
+        if record.get("ksef_sent"):
+            return (
+                f"ℹ️ Fakturę `{invoice_uuid}` wysłałem już do KSeF — do KSeF wysyła się raz i "
+                "drugiego zgłoszenia nie da się wycofać, więc nie wysyłam jej ponownie. "
+                "Ostateczny status zgłoszenia sprawdź w panelu inFakt."
+            )
+
         try:
             address = await self._allegro.get_order_invoice_data(order_id)
         except AllegroAPIError as exc:
@@ -3696,6 +3797,7 @@ class AllegroAgent(BaseAgent):
                 return self._unknown_infakt_invoice(invoice_uuid)
             return f"❌ Nie udało się wysłać faktury `{invoice_uuid}` do KSeF: {exc}"
 
+        await invoice_ledger.mark_ksef_sent(user_id, order_id)
         status = result.get("status", "?")
         return (
             f"📤 Faktura `{invoice_uuid}` wysłana do KSeF (status zgłoszenia: {status}). "

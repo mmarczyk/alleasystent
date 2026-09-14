@@ -2662,6 +2662,22 @@ class TestAttachingWaitsForTheSeller:
         assert "Nie mam zapisanej faktury" in out
 
     @pytest.mark.asyncio
+    async def test_an_invoice_we_already_attached_is_not_sent_a_second_time(self):
+        """Allegro takes one invoice per order and answers a second upload with
+        a 400 nobody can read. The reason a seller asks twice is usually that
+        the first time said nothing — see the action-report guard in run()."""
+        agent = self._agent("dołącz fakturę do zamówienia o1")
+        attach = AsyncMock(return_value="FV/1/2026")
+        with patch("services.invoice_ledger.get_record",
+                   AsyncMock(return_value={"invoice_uuid": "inv-1", "number": "FV/1/2026",
+                                           "attached": True})), \
+             patch("services.infakt_service.attach_invoice_to_order", attach):
+            out = await agent._dispatch(self.ATTACH, {"order_id": "o1"})
+
+        attach.assert_not_awaited()
+        assert "jest już dołączona" in out
+
+    @pytest.mark.asyncio
     async def test_ksef_is_blocked_on_the_issuing_turn_too(self):
         """Filing with the tax office is as final as showing the buyer the
         invoice, and it happens once."""
@@ -3091,6 +3107,54 @@ class TestOrderProductFilter:
         )
 
         assert "`yarn`" in result and "`other`" not in result
+
+
+class TestKsefIsFiledOnce:
+    """KSeF takes an invoice once and a submission cannot be withdrawn. The
+    send is asynchronous, so nothing in the reply proves it landed — and a
+    seller who was never told it went (the reply that got lost, see
+    TestAnActionReportsItself in test_allegro_agent_run.py) will reasonably ask
+    again. So it is written down at the moment it goes."""
+
+    def _agent(self, query: str = "wyślij fakturę do KSeF"):
+        agent = _make_agent()
+        agent._current_query = query
+        agent._last_assistant_text = ""
+        agent._allegro.get_order_invoice_data = AsyncMock(
+            return_value={"company_name": "Dekarstwo sp. z o.o.", "vat_id": "1234563218"}
+        )
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_a_successful_send_is_written_down(self):
+        agent = self._agent()
+        infakt = MagicMock()
+        infakt.send_to_ksef = AsyncMock(return_value={"status": "sent"})
+        mark = AsyncMock()
+        with patch("services.invoice_ledger.get_record", AsyncMock(return_value={})), \
+             patch("services.invoice_ledger.mark_ksef_sent", mark), \
+             patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-1", "order_id": "o1"}
+            )
+
+        assert mark.await_args[0][1] == "o1"
+        assert out.startswith("📤")
+
+    @pytest.mark.asyncio
+    async def test_a_second_send_never_reaches_infakt(self):
+        agent = self._agent()
+        infakt = MagicMock()
+        infakt.send_to_ksef = AsyncMock(return_value={"status": "sent"})
+        with patch("services.invoice_ledger.get_record",
+                   AsyncMock(return_value={"invoice_uuid": "inv-1", "ksef_sent": True})), \
+             patch("services.infakt_service.InfaktService.get_instance", return_value=infakt):
+            out = await agent._dispatch(
+                "send_invoice_to_ksef", {"invoice_uuid": "inv-1", "order_id": "o1"}
+            )
+
+        infakt.send_to_ksef.assert_not_awaited()
+        assert "wysłałem już do KSeF" in out
 
 
 class TestDeliveringAWholeBatchOfInvoices:

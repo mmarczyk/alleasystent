@@ -82,13 +82,21 @@ async def record_issued(
     very probably exists, and the next "wystaw" must finish that one rather than
     create a second.
     """
-    payload = {
+    await _store(user_id, order_id, {
         "invoice_uuid": invoice_uuid,
         "number": number,
         "attached": attached,
         "note": note,
         "at": time.time(),
-    }
+    })
+    logger.info(
+        "Invoice ledger: user=%s order=%s recorded (attached=%s)", user_id, order_id, attached
+    )
+
+
+async def _store(user_id: str, order_id: str, payload: dict) -> None:
+    """Write the record and keep both indexes in step with it."""
+    invoice_uuid = payload.get("invoice_uuid") or ""
 
     async def _do(r):
         await r.set(_KEY.format(user_id=user_id, order_id=order_id), json.dumps(payload), ex=_TTL)
@@ -101,27 +109,48 @@ async def record_issued(
         # it off again. An issuance with no UUID at all is not put on the list:
         # there is no file to attach, and re-issuing is the seller's call.
         pending = _PENDING_KEY.format(user_id=user_id)
-        if attached or not invoice_uuid:
+        if payload.get("attached") or not invoice_uuid:
             await r.zrem(pending, order_id)
         else:
-            await r.zadd(pending, {order_id: payload["at"]})
+            await r.zadd(pending, {order_id: payload.get("at") or time.time()})
             await r.expire(pending, _TTL)
 
     await _with_redis(_do)
-    logger.info(
-        "Invoice ledger: user=%s order=%s recorded (attached=%s)", user_id, order_id, attached
-    )
+
+
+async def _merge(user_id: str, order_id: str, **fields) -> None:
+    """Update named fields of an existing record, leaving the rest as they are.
+
+    A record accumulates what has been DONE with one invoice — issued, attached,
+    filed with KSeF — and each of those is written by a different step, minutes
+    or days apart. Rewriting the whole payload from the one field a step knows
+    about is how the previous step's fact goes missing, and a lost "already
+    filed" is a second KSeF submission that cannot be withdrawn.
+    """
+    existing = await get_record(user_id, order_id) or {}
+    await _store(user_id, order_id, {
+        "invoice_uuid": "", "number": "", "attached": False, "note": "",
+        "at": time.time(), **existing, **fields,
+    })
 
 
 async def mark_attached(user_id: str, order_id: str, *, number: str = "") -> None:
     """Upgrade an existing record to "attached" after a later, successful attach."""
-    existing = await get_record(user_id, order_id) or {}
-    await record_issued(
-        user_id, order_id,
-        invoice_uuid=existing.get("invoice_uuid", ""),
-        number=number or existing.get("number", ""),
-        attached=True,
-    )
+    fields: dict = {"attached": True}
+    if number:
+        fields["number"] = number
+    await _merge(user_id, order_id, **fields)
+
+
+async def mark_ksef_sent(user_id: str, order_id: str) -> None:
+    """Write down that this order's invoice has been filed with KSeF.
+
+    KSeF takes an invoice once. The submission is asynchronous, so nothing in
+    the reply proves it landed, and a seller who was not told it went (see the
+    action-report guard in AllegroAgent.run) will reasonably ask again — which
+    is why this is remembered here rather than left to whoever reads the chat.
+    """
+    await _merge(user_id, order_id, ksef_sent=True, ksef_at=time.time())
 
 
 async def get_record(user_id: str, order_id: str) -> dict | None:
