@@ -170,6 +170,76 @@ def extract_value_bounds(query: str) -> dict[str, float]:
     return bounds
 
 
+# ── kupujacy: "tylko ci, ktorzy zrobili wiecej niz 3 zamowienia" ────────────
+# A buyer list is almost never asked for whole: the seller wants the ones who
+# came back. That narrowing rides on a NOUN ("zamówienia", "zakupy", "razy"),
+# not on a currency, so it is read here rather than left to the model, which
+# drops it and answers with all 884 customers of the period — a longer list
+# that reads exactly like the answer to the question asked.
+#
+# "więcej niż 3" is 4 and up, "co najmniej 3" is 3 and up: the two operators
+# are one word apart in Polish and a silent off-by-one would quietly add a
+# whole row of customers, so each is spelled out instead of shared.
+_ORDER_COUNT_WORDS: dict[str, int] = {
+    "raz": 1, "jeden": 1, "jedno": 1, "jedn": 1,
+    "dwa": 2, "dwie": 2, "trzy": 3, "cztery": 4, "pięć": 5, "piec": 5,
+}
+_COUNT_ALT = r"\d+|" + "|".join(sorted(_ORDER_COUNT_WORDS, key=len, reverse=True))
+# The noun that makes this a count of ORDERS — without it "powyżej 3" could be
+# an amount, a month or a piece count, and half a filter is worse than none.
+_ORDER_NOUN = r"(?:zam[oó]wie\w*|zamowie\w*|zakup\w*|transakcj\w*|razy|orders?|purchases?)"
+_MIN_ORDERS_STRICT_RE = re.compile(
+    rf"(?:wi[eę]cej\s+ni[zż]|powy[zż]ej|ponad|more\s+than|over)\s+"
+    rf"(?P<count>{_COUNT_ALT})\s+{_ORDER_NOUN}",
+    re.IGNORECASE,
+)
+_MIN_ORDERS_INCLUSIVE_RE = re.compile(
+    rf"(?:co\s+najmniej|przynajmniej|minimum|min\.|at\s+least)\s+"
+    rf"(?P<count>{_COUNT_ALT})\s+{_ORDER_NOUN}",
+    re.IGNORECASE,
+)
+# "3 lub więcej zamówień" — the same inclusive meaning with the words the other
+# way round.
+_MIN_ORDERS_OR_MORE_RE = re.compile(
+    rf"(?P<count>{_COUNT_ALT})\s+(?:lub|albo)\s+wi[eę]cej\s+{_ORDER_NOUN}",
+    re.IGNORECASE,
+)
+# "kupili więcej niż raz", "zamówili nie tylko raz" — the count IS the noun.
+_MIN_ORDERS_MORE_THAN_ONCE_RE = re.compile(
+    r"wi[eę]cej\s+ni[zż]\s+(?:jeden\s+)?raz\b|more\s+than\s+once", re.IGNORECASE,
+)
+
+
+def _count_word(raw: str) -> int | None:
+    if raw.isdigit():
+        return int(raw)
+    return _ORDER_COUNT_WORDS.get(raw.lower())
+
+
+def extract_min_orders(query: str) -> int | None:
+    """The smallest order count a buyer must reach to belong in the answer, as
+    get_buyers' `min_orders` argument — or None when the query names no such
+    narrowing.
+
+    Always INCLUSIVE, so the strict wordings ("więcej niż 3", "powyżej 3") are
+    converted here once: they mean 4.
+    """
+    strict = _MIN_ORDERS_STRICT_RE.search(query)
+    if strict:
+        count = _count_word(strict.group("count"))
+        if count is not None:
+            return count + 1
+    for pattern in (_MIN_ORDERS_INCLUSIVE_RE, _MIN_ORDERS_OR_MORE_RE):
+        match = pattern.search(query)
+        if match:
+            count = _count_word(match.group("count"))
+            if count is not None and count > 1:
+                return count
+    if _MIN_ORDERS_MORE_THAN_ONCE_RE.search(query):
+        return 2
+    return None
+
+
 # ── zamowienia: the order-stage vocabulary ──────────────────────────────────
 # An order moves through five stages, and a seller names the stage they mean
 # in almost every order question they ask — but with wildly different wording

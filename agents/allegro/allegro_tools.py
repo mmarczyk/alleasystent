@@ -1088,6 +1088,9 @@ ALLEGRO_TOOLS: list[dict] = [
                 "klienci', 'stali klienci', 'kto kupuje najwięcej', 'jakie firmy u mnie kupowały', "
                 "'lista kupujących, dla których wystawiłem faktury VAT', 'klienci z NIP-em', "
                 "'zestawienie kontrahentów'. "
+                "ONLY THE REPEAT CUSTOMERS: min_orders keeps just the buyers who reached that "
+                "many orders in the period — 'tylko ci, którzy zrobili więcej niż 3 zamówienia', "
+                "'stali klienci', 'kto kupił u mnie więcej niż raz'. "
                 "FIRMA vs OSOBA PRYWATNA: the ONLY place Allegro states this is the VAT-invoice "
                 "address on the order (company name + NIP), so buyer_type='company' means exactly "
                 "'gave company invoice details on at least one order in the period' — a business "
@@ -1124,6 +1127,21 @@ ALLEGRO_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "min_orders": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Keep ONLY buyers with AT LEAST this many orders in the period — the "
+                            "bound is INCLUSIVE, so convert the wording: 'więcej niż 3 "
+                            "zamówienia' / 'powyżej 3' / 'ponad 3' → 4, 'co najmniej 3' / "
+                            "'przynajmniej 3' / '3 lub więcej' → 3, 'stali klienci' / 'kupili "
+                            "więcej niż raz' / 'wracający klienci' → 2. The counts, the totals "
+                            "and the summary sentence then describe only those buyers. Omit it "
+                            "for every buyer of the period — NEVER drop a count the seller "
+                            "stated, the reply would be a much longer list that reads exactly "
+                            "like the answer they asked for."
+                        ),
+                    },
                     "date_from_local": {
                         "type": "string",
                         "description": (

@@ -6,6 +6,7 @@ import pytest
 
 from agents.allegro.allegro_tools import matched_labels
 from agents.allegro.deterministic_dispatch import (
+    extract_min_orders,
     extract_value_bounds,
     resolve_deterministic,
     wants_latest_order_details,
@@ -487,6 +488,67 @@ class TestFollowUpAboutOneKnownOrder:
     ])
     def test_listing_questions_still_resolve(self, query):
         assert _resolve(query) is not None
+
+
+class TestExtractMinOrders:
+    """"Tylko ci, którzy zrobili więcej niż 3 zamówienia" — a narrowing the
+    model drops as readily as an amount, and just as invisibly: the answer comes
+    back as every customer of the period. See extract_min_orders."""
+
+    def test_the_production_question(self):
+        assert extract_min_orders(
+            "Podaj mi listę kupujących z ostatnich 3 miesięcy, uwzględnij tylko tych "
+            "którzy zrobili więcej niż 3 zamówienia"
+        ) == 4
+
+    @pytest.mark.parametrize("query,expected", [
+        # Strict: "more than 3" starts at 4. One word apart from the inclusive
+        # wordings below, and a silent off-by-one adds a whole row of customers.
+        ("kupujący, którzy zrobili więcej niż 3 zamówienia", 4),
+        ("klienci powyżej 3 zamówień", 4),
+        ("klienci ponad 10 zakupów", 11),
+        # Inclusive: the number itself.
+        ("kupujący z co najmniej 3 zamówieniami", 3),
+        ("klienci przynajmniej 2 transakcje", 2),
+        ("klienci z minimum 4 zamówieniami", 4),
+        ("klienci z 5 lub więcej zamówień", 5),
+        # The count IS the noun.
+        ("kto kupił u mnie więcej niż raz", 2),
+        ("klienci, którzy zamówili więcej niż jeden raz", 2),
+        # Spelled-out numerals.
+        ("kupujący z więcej niż dwa zamówienia", 3),
+    ])
+    def test_polish_wordings(self, query, expected):
+        assert extract_min_orders(query) == expected
+
+    @pytest.mark.parametrize("query,expected", [
+        ("buyers with more than 3 orders", 4),
+        ("customers with at least 5 purchases", 5),
+        ("who bought more than once", 2),
+    ])
+    def test_english_wording_too(self, query, expected):
+        assert extract_min_orders(query) == expected
+
+    @pytest.mark.parametrize("query", [
+        # The period is a count too, and it is not this one.
+        "lista kupujących z ostatnich 3 miesięcy",
+        "lista kupujących z tego roku",
+        # An amount, not an order count — the noun is what tells them apart.
+        "zamówienia powyżej 500 zł",
+        "faktury do wysłania powyżej 500 zł",
+        # A piece count, still not an order count.
+        "zamówienia z ponad 5 sztukami",
+        # No number stated: "stali klienci" alone is the model's judgement call,
+        # not a bound this layer may invent.
+        "stali klienci",
+        "moi najlepsi klienci",
+    ])
+    def test_reads_nothing_when_no_order_count_is_stated(self, query):
+        assert extract_min_orders(query) is None
+
+    def test_more_than_one_order_is_two_not_one(self):
+        """"więcej niż 1" must not come back as 1 — that keeps everybody."""
+        assert extract_min_orders("klienci z więcej niż 1 zamówieniem") == 2
 
 
 class TestExtractValueBounds:

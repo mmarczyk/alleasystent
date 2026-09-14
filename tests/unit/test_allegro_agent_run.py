@@ -428,6 +428,70 @@ class TestFormatInstruction:
         assert len(last_system["content"]) < len(first_system["content"]) / 2
 
 
+class TestMinOrdersReachesTheTool:
+    """The order count the seller stated is put back onto get_buyers in Python
+    — see AllegroAgent._with_min_orders. Dropping it is invisible in exactly
+    the same way an amount is: "lista kupujących … tylko ci, którzy zrobili
+    więcej niż 3 zamówienia" came back as all 884 customers of the period."""
+
+    @pytest.mark.asyncio
+    async def test_the_production_question_reaches_the_tool_with_the_count(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {
+                "date_from_local": "2026-06-14", "date_to_local": "2026-09-14",
+            })]),
+            _resp(),
+        ])
+
+        await agent.run(
+            "Podaj mi listę kupujących z ostatnich 3 miesięcy, uwzględnij tylko tych "
+            "którzy zrobili więcej niż 3 zamówienia"
+        )
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {
+            "date_from_local": "2026-06-14", "date_to_local": "2026-09-14", "min_orders": 4,
+        })
+
+    @pytest.mark.asyncio
+    async def test_a_count_the_model_passed_itself_is_left_alone(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {"min_orders": 4})]),
+            _resp(),
+        ])
+
+        await agent.run("lista kupujących co najmniej 2 zamówienia")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {"min_orders": 4})
+
+    @pytest.mark.asyncio
+    async def test_a_buyer_question_with_no_count_changes_nothing(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("pokaż listę kupujących z ostatnich 3 miesięcy")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {})
+
+    @pytest.mark.asyncio
+    async def test_other_tools_are_untouched(self):
+        """An order listing counts ORDERS, not orders per buyer — "więcej niż 3
+        zamówienia" there is about the answer's length, not its rows."""
+        agent = _agent({"get_orders": "**Zamówienie** `x`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {})]),
+            _resp(),
+        ])
+
+        await agent.run("pokaż więcej niż 3 zamówienia")
+
+        agent._execute_tool.assert_awaited_once_with("get_orders", {})
+
+
 class TestValueBoundsReachTheTool:
     """The amount the seller stated is put back onto the listing call in
     Python, whichever layer chose it — see AllegroAgent._with_value_bounds.

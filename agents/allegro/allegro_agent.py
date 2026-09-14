@@ -27,6 +27,7 @@ from agents.allegro.allegro_tools import (
     tools_for_labels,
 )
 from agents.allegro.deterministic_dispatch import (
+    extract_min_orders,
     extract_value_bounds,
     names_a_product,
     names_an_order_stage,
@@ -463,8 +464,12 @@ class AllegroAgent(BaseAgent):
         "buyer with their order count, total spend and invoice count). Pass buyer_type='company' "
         "when the question names firms/NIP/B2B and 'person' for private buyers, invoice_status="
         "'issued' for 'dla których wystawiłem fakturę', 'missing' for buyers still owed one, "
-        "count_only=true for 'ilu/ile'. Resolve the period yourself ('w tym roku' → 1 January of "
-        "the current year through today) and omit both dates only when no period is named — the "
+        "count_only=true for 'ilu/ile'. Pass min_orders whenever the question keeps only "
+        "the repeat customers — 'tylko ci, którzy zrobili więcej niż 3 zamówienia' → "
+        "min_orders=4 (more than 3 means 4 and up), 'co najmniej 3' → min_orders=3, 'stali "
+        "klienci'/'kupili więcej niż raz' → min_orders=2; dropping that count answers with "
+        "every customer of the period, which reads like the answer and is not. "
+        "Resolve the period yourself ('w tym roku' → 1 January of the current year through today) and omit both dates only when no period is named — the "
         "tool then defaults to the current year. NEVER answer a buyer question with get_orders or "
         "get_sales_summary: neither groups anything by buyer, so the seller would be left counting "
         "rows themselves.\n"
@@ -1044,6 +1049,7 @@ class AllegroAgent(BaseAgent):
                     metadata={"output_format": "chat"},
                 )
             det_input = self._with_value_bounds(det_tool, det_input, query)
+            det_input = self._with_min_orders(det_tool, det_input, query)
             called_tools.append(det_tool)
             logger.info("[allegro] deterministic tool match: %s(%s)", det_tool, det_input)
             try:
@@ -1192,6 +1198,7 @@ class AllegroAgent(BaseAgent):
                     except json.JSONDecodeError:
                         tool_input = {}
                     tool_input = self._with_value_bounds(tool_name, tool_input, query)
+                    tool_input = self._with_min_orders(tool_name, tool_input, query)
                     if tool_name == "get_message_threads":
                         # The user's wording overrides whatever the model decided for
                         # count_only (see _wants_message_count_only above).
@@ -1491,6 +1498,28 @@ class AllegroAgent(BaseAgent):
             return tool_input
         logger.info("[allegro] value bounds read from the query: %s (%s)", bounds, tool_name)
         return {**tool_input, **bounds}
+
+    def _with_min_orders(self, tool_name: str, tool_input: dict[str, Any], query: str) -> dict[str, Any]:
+        """Put an order count the seller stated back onto a buyer list the model
+        called without it ("tylko ci, którzy zrobili więcej niż 3 zamówienia").
+
+        Same failure as _with_value_bounds, and the same answer to it: a dropped
+        narrowing comes back as a LONGER list that reads exactly like the answer
+        — every customer of the period where four were asked for — and nothing
+        in the reply says the count was ignored. The wording is unambiguous
+        enough to read in Python (see extract_min_orders, which also resolves
+        "więcej niż 3" to 4), so it is read there rather than left to the
+        model's discretion.
+
+        Only ever ADDS: a min_orders the model passed itself stays untouched.
+        """
+        if tool_name != "get_buyers" or tool_input.get("min_orders") is not None:
+            return tool_input
+        minimum = extract_min_orders(query)
+        if minimum is None:
+            return tool_input
+        logger.info("[allegro] get_buyers: min_orders=%d read from the query", minimum)
+        return {**tool_input, "min_orders": minimum}
 
     async def _execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         try:
@@ -2920,6 +2949,7 @@ class AllegroAgent(BaseAgent):
         invoice_status = tool_input.get("invoice_status") or "any"
         sort_by = tool_input.get("sort_by") or "value"
         limit = max(1, min(int(tool_input.get("limit") or 100), self._BUYERS_TABLE_CAP))
+        min_orders = max(1, int(tool_input.get("min_orders") or 1))
 
         orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
         if buyer_type == "company":
@@ -2941,6 +2971,12 @@ class AllegroAgent(BaseAgent):
             orders = [o for o in orders if flags.get(o.order_id) is False]
 
         buyers = self._aggregate_buyers(orders, flags)
+        # Applied to BUYERS, after grouping — the question is about how many
+        # orders one customer made, which no per-order filter can answer. Before
+        # the totals below, so the summary counts the same people the table
+        # lists instead of the whole period.
+        if min_orders > 1:
+            buyers = [g for g in buyers if g["orders"] >= min_orders]
         if sort_by == "recent":
             buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)
         elif sort_by == "orders":
@@ -2952,10 +2988,18 @@ class AllegroAgent(BaseAgent):
             label for (arg, value), label in self._BUYER_FILTER_LABELS.items()
             if {"buyer_type": buyer_type, "invoice_status": invoice_status}[arg] == value
         ]
+        # Spelled out in the reply, not just applied: a seller who asked for
+        # "więcej niż 3 zamówienia" has to be able to see from the answer that
+        # the bound really took, and which way round it was read.
+        if min_orders > 1:
+            filters.append(
+                f"co najmniej {min_orders} "
+                f"{self._plural_pl(min_orders, 'zamówienie', 'zamówienia', 'zamówień')}"
+            )
         filter_note = f" ({', '.join(filters)})" if filters else ""
         logger.info(
-            "get_buyers: %d orders → %d buyers (%s, typ=%s, faktury=%s)",
-            len(orders), len(buyers), period_label, buyer_type, invoice_status,
+            "get_buyers: %d orders → %d buyers (%s, typ=%s, faktury=%s, min_zamowien=%d)",
+            len(orders), len(buyers), period_label, buyer_type, invoice_status, min_orders,
         )
 
         if tool_input.get("count_only"):

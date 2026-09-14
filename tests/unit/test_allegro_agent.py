@@ -2159,6 +2159,60 @@ class TestBuyersReport:
         assert "| `anna` | 1 | 100,00 PLN | 100,00 PLN | — |" in result
 
     @pytest.mark.asyncio
+    async def test_min_orders_keeps_only_the_repeat_customers(self):
+        """"tylko ci, którzy zrobili więcej niż 3 zamówienia" — the count is per
+        BUYER, so it can only be applied after grouping."""
+        orders = [
+            self._order(f"a{i}", "anna", 100.0, paid_at=f"2026-0{i}-01T10:00:00Z")
+            for i in range(1, 5)                      # anna: 4 orders
+        ] + [
+            self._order("b1", "marek", 900.0, paid_at="2026-03-01T10:00:00Z"),
+            self._order("b2", "marek", 900.0, paid_at="2026-04-01T10:00:00Z"),
+        ]                                             # marek: 2 orders, higher spend
+        agent = self._agent_with(orders)
+
+        result = await agent._dispatch("get_buyers", {"min_orders": 4})
+
+        assert "`anna`" in result
+        assert "`marek`" not in result, "a big spender with too few orders still fails the filter"
+
+    @pytest.mark.asyncio
+    async def test_min_orders_is_inclusive(self):
+        agent = self._agent_with([
+            self._order("a1", "anna", 10.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 10.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("a3", "anna", 10.0, paid_at="2026-03-01T10:00:00Z"),
+        ])
+
+        assert "`anna`" in await agent._dispatch("get_buyers", {"min_orders": 3})
+        assert "`anna`" not in await agent._dispatch("get_buyers", {"min_orders": 4})
+
+    @pytest.mark.asyncio
+    async def test_the_summary_counts_only_the_buyers_that_passed_the_filter(self):
+        """The totals describe the same people the table lists — and the note
+        names the bound, so the seller can see it really took."""
+        orders = [
+            self._order("a1", "anna", 100.0, paid_at="2026-01-01T10:00:00Z"),
+            self._order("a2", "anna", 100.0, paid_at="2026-02-01T10:00:00Z"),
+            self._order("b1", "marek", 900.0, paid_at="2026-03-01T10:00:00Z"),
+        ]
+        agent = self._agent_with(orders)
+
+        summary = (await agent._dispatch("get_buyers", {"min_orders": 2})).splitlines()[-1]
+
+        assert summary.startswith("**1** kupujący (co najmniej 2 zamówienia) w okresie")
+        assert "łącznie **2** zamówienia na **200,00 PLN**." in summary
+
+    @pytest.mark.asyncio
+    async def test_min_orders_that_matches_nobody_says_so_with_the_filter(self):
+        agent = self._agent_with([self._order("a1", "anna", 100.0)])
+
+        result = await agent._dispatch("get_buyers", {"min_orders": 5})
+
+        assert result.startswith("Brak kupujących (co najmniej 5 zamówień) w okresie")
+        assert "|" not in result
+
+    @pytest.mark.asyncio
     async def test_failed_invoice_lookup_is_reported_not_counted_as_missing(self):
         agent = self._agent_with(self._mixed_orders())
         agent._allegro.invoices_issued_map = AsyncMock(
