@@ -1387,25 +1387,34 @@ ALLEGRO_TOOLS: list[dict] = [
                 "for it in the CURRENT message ('dołącz fakturę do zamówienia X') or confirms your own "
                 "question about attaching ('ok', 'wygląda dobrze'). Never on the same turn that issued "
                 "the invoice — the user has not read it yet — and never on your own initiative. "
-                "Requires the Allegro order_id; invoice_uuid is optional — pass the one an earlier "
-                "issue_invoice_for_order returned in this conversation, or leave it out and the invoice "
-                "recorded for that order is used. Never guess a UUID. "
+                "Pass order_id, invoice_uuid, or both — whichever the user actually gave you, and "
+                "never a UUID you are not sure of. With order_id alone the invoice recorded for that "
+                "order is used; with invoice_uuid alone ('ID faktury w inFakt: …') the order it was "
+                "issued for is looked up. "
+                "For SEVERAL invoices at once, or for 'dołącz te faktury' with no id at all, use "
+                "deliver_invoices instead of calling this once per order. "
                 "Allegro allows only ONE PDF invoice per order — calling this twice for the same order "
                 "will fail."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
+                    "order_id": {
+                        "type": "string",
+                        "description": (
+                            "Allegro order (checkout form) UUID. Optional when invoice_uuid is "
+                            "given — omit it rather than guessing."
+                        ),
+                    },
                     "invoice_uuid": {
                         "type": "string",
                         "description": (
-                            "inFakt invoice UUID from issue_invoice_for_order. Optional — omit it "
-                            "rather than guessing; the invoice recorded for this order is used."
+                            "inFakt invoice UUID from issue_invoice_for_order. Optional when "
+                            "order_id is given — omit it rather than guessing; the invoice "
+                            "recorded for this order is used."
                         ),
                     },
                 },
-                "required": ["order_id"],
             },
         },
     },
@@ -1443,6 +1452,67 @@ ALLEGRO_TOOLS: list[dict] = [
                     },
                 },
                 "required": ["invoice_uuid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deliver_invoices",
+            "description": (
+                "Deliver invoices that have ALREADY been issued in inFakt: attach them to their "
+                "Allegro orders (visible to the buyer) and/or send them to KSeF — for SEVERAL "
+                "invoices in one call. "
+                "Use it whenever the user answers a batch of issued invoices with one instruction: "
+                "'dodaj te faktury do Allegro', 'dołącz wszystkie faktury', 'dołącz je i firmową "
+                "wyślij do KSeF', 'wyślij te faktury do KSeF'. With no ids at all it takes every "
+                "invoice this assistant issued that is still not attached in Allegro — which is "
+                "exactly what 'te faktury' means right after an issuance — so do NOT try to recover "
+                "order ids from earlier messages and do NOT call attach_invoice_to_allegro_order "
+                "once per order. "
+                "It NEVER issues anything: every invoice it touches must already exist. "
+                "IRREVERSIBLE, same rules as the single-invoice tools: only when the user asks for "
+                "it in the CURRENT message or confirms your own question about it, and never on the "
+                "turn that issued the invoices. "
+                "KSeF is for COMPANY buyers only — set ksef=true when the user asks for it and the "
+                "per-order check refuses the private-person ones by itself; that is what the user "
+                "means by 'a firmową wyślij też do KSeF'. "
+                "For exactly ONE invoice named by the user, attach_invoice_to_allegro_order / "
+                "send_invoice_to_ksef are equally fine."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Allegro order UUIDs to deliver the invoices for. Omit entirely to "
+                            "take every invoice still waiting — never guess or reconstruct ids."
+                        ),
+                    },
+                    "invoice_uuids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "inFakt invoice UUIDs, when the user named the invoices rather than "
+                            "the orders. Omit rather than guessing."
+                        ),
+                    },
+                    "attach": {
+                        "type": "boolean",
+                        "description": (
+                            "Attach each invoice to its Allegro order (default true). Set false "
+                            "only when the user asks for KSeF alone."
+                        ),
+                    },
+                    "ksef": {
+                        "type": "boolean",
+                        "description": (
+                            "Also submit to KSeF (default false). True only when the user says so."
+                        ),
+                    },
+                },
             },
         },
     },
@@ -1867,6 +1937,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "issue_invoice_for_order": "action",
     "attach_invoice_to_allegro_order": "action",
     "send_invoice_to_ksef": "action",
+    "deliver_invoices": "action",
     # Zwroty i reklamacje
     "get_new_returns": "chat",
     "get_returns_to_process": "chat",
@@ -1997,6 +2068,7 @@ _TOOL_LABELS: dict[str, str] = {
     "issue_invoice_for_order":         "faktury",
     "attach_invoice_to_allegro_order": "faktury",
     "send_invoice_to_ksef":            "faktury",
+    "deliver_invoices":                "faktury",
     # zwroty (incl. reklamacje — Allegro treats them as related but distinct
     # processes, see get_new_returns/get_new_complaints descriptions above,
     # but they share one monitoring toggle and one query-label here)

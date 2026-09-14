@@ -32,6 +32,16 @@ _KEY = "allegro:invoice_issued:{user_id}:{order_id}"
 # company with a NIP — is a question only Allegro can answer, and Allegro is
 # asked per order (see AllegroAgent._send_invoice_to_ksef).
 _ORDER_KEY = "allegro:invoice_order:{user_id}:{invoice_uuid}"
+# The orders whose invoice exists in inFakt but has NOT reached Allegro yet —
+# a sorted set scored by issuance time, so the oldest debt comes first.
+#
+# The per-order keys above answer "does THIS order have an invoice we issued";
+# nothing answered "which invoices are still waiting", and that is the set the
+# seller means by "dodaj te faktury do Allegro" after a batch issuance. Read
+# from a key pattern it would have to be a SCAN over the whole keyspace on a
+# shared Redis; kept as an index it is one ZRANGE, and it is written by the
+# only two functions that can change the answer.
+_PENDING_KEY = "allegro:invoice_pending:{user_id}"
 # Comfortably longer than any invoicing deadline — the point is that an order
 # invoiced months ago never comes back around as "not invoiced yet".
 _TTL = 86400 * 180
@@ -86,6 +96,16 @@ async def record_issued(
             await r.set(
                 _ORDER_KEY.format(user_id=user_id, invoice_uuid=invoice_uuid), order_id, ex=_TTL,
             )
+        # An issuance that did not reach Allegro joins the waiting list; the
+        # later attach (which comes back through here via mark_attached) takes
+        # it off again. An issuance with no UUID at all is not put on the list:
+        # there is no file to attach, and re-issuing is the seller's call.
+        pending = _PENDING_KEY.format(user_id=user_id)
+        if attached or not invoice_uuid:
+            await r.zrem(pending, order_id)
+        else:
+            await r.zadd(pending, {order_id: payload["at"]})
+            await r.expire(pending, _TTL)
 
     await _with_redis(_do)
     logger.info(
@@ -155,10 +175,38 @@ async def get_records(user_id: str, order_ids: list[str]) -> dict[str, dict]:
     return out
 
 
+async def pending_delivery(user_id: str, limit: int = 50) -> list[tuple[str, dict]]:
+    """(order_id, record) for every invoice we issued that never reached
+    Allegro, oldest first.
+
+    This is the list behind "dodaj te faktury do Allegro" — a seller who has
+    just been shown four freshly issued invoices names the SET, not four UUIDs,
+    and the alternative to reading it from here is scraping order ids out of
+    the previous chat message, which is how the wrong invoice ends up on
+    someone else's order.
+
+    Records with no invoice_uuid are dropped rather than returned: they are the
+    issuances that timed out before inFakt confirmed an id, and there is
+    nothing to attach for them.
+    """
+    async def _do(r):
+        return await r.zrange(_PENDING_KEY.format(user_id=user_id), 0, max(limit - 1, 0))
+
+    order_ids = await _with_redis(_do) or []
+    records = await get_records(user_id, list(order_ids))
+    return [
+        (order_id, records[order_id])
+        for order_id in order_ids
+        if records.get(order_id, {}).get("invoice_uuid")
+        and not records[order_id].get("attached")
+    ]
+
+
 async def forget(user_id: str, order_id: str) -> None:
     """Drop the record — for when the invoice turned out not to exist after all
     and the seller really does need to issue one."""
     async def _do(r):
         await r.delete(_KEY.format(user_id=user_id, order_id=order_id))
+        await r.zrem(_PENDING_KEY.format(user_id=user_id), order_id)
 
     await _with_redis(_do)

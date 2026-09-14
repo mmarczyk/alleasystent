@@ -405,6 +405,26 @@ CASES: list[Case] = [
          "Dołącz fakturę 00000000-0000-0000-0000-000000000000 do zamówienia",
          ("❌", "404"),
          note="Nieznane ID faktury — czytelny komunikat błędu zamiast wyjątku."),
+    Case("deliver_invoices", "deliver_invoices",
+         {"order_ids": [ds.ORD_1], "invoice_uuids": [ds.INFAKT_INVOICE_UUID]},
+         "Dodaj te faktury do Allegro",
+         ("✅ Faktura", "dołączona do zamówienia"),
+         note="Jedno polecenie na całą paczkę wystawionych faktur. Bez podanych ID bierze "
+              "wszystkie, które czekają na dołączenie — sprzedawca nie musi przepisywać "
+              "czterech identyfikatorów z poprzedniej wiadomości."),
+    Case("deliver_invoices__ksef", "deliver_invoices",
+         {"order_ids": [ds.ORD_1], "invoice_uuids": [ds.INFAKT_INVOICE_UUID],
+          "attach": False, "ksef": True},
+         "A firmową wyślij również do KSeF",
+         ("📤", "KSeF"),
+         note="KSeF dla tej samej paczki. O tym, która faktura tam pójdzie, decyduje "
+              "sprawdzenie NIP-u nabywcy per zamówienie, nie model."),
+    Case("deliver_invoices__unconfirmed", "deliver_invoices",
+         {"order_ids": [ds.ORD_1], "invoice_uuids": [ds.INFAKT_INVOICE_UUID]},
+         "Pokaż szczegóły tego zamówienia",
+         ("⏸️", "bez Twojego wyraźnego polecenia"), no_api=True,
+         note="Sprzedawca nie prosił o dołączenie — cała paczka czeka, tak samo jak "
+              "pojedyncza faktura."),
     Case("send_invoice_to_ksef", "send_invoice_to_ksef",
          {"invoice_uuid": ds.INFAKT_INVOICE_UUID, "order_id": ds.ORD_1},
          "Wyślij tę fakturę do KSeF",

@@ -684,6 +684,135 @@ def _match_orders_pending_invoice(query: str) -> dict | None:
     return None
 
 
+# ── faktury: deliver_invoices — dołączenie do Allegro / wysyłka do KSeF ────
+# The one place in this module that resolves an ACTION rather than a listing,
+# and it is here for the same reason every matcher above is: the LLM layer got
+# it wrong in a way that reads like an answer. "Ok dodaj te faktury do Allegro
+# a firmową wyślij również do ksef", right after four invoices were issued and
+# linked, came back as a sentence about having no table data to copy; the
+# follow-up "tę fakturę dodaj do Allegro i wyślij do ksef, ID faktury w inFakt:
+# 69bb…" came back as the details of an entirely unrelated order. Nothing was
+# attached and nothing was said about that.
+#
+# The wording is not the hard part — an attach verb next to "faktura" is
+# unambiguous. What the model could not do is carry the SET (four orders named
+# only in its own previous message) and the invoice-id-only address into tool
+# arguments. Both are resolved by deliver_invoices itself, from the ledger, so
+# all this layer has to read is the two intents and whatever ids the message
+# actually spells out.
+#
+# Every guard still lives behind the tool: the seller's explicit word (checked
+# again in AllegroAgent._attach_authorized_by_seller), never on the issuing
+# turn, and the per-order NIP check that keeps a private person's invoice out
+# of KSeF. Matching here changes WHICH tool runs, never whether it may.
+_INVOICE_ATTACH_VERB_RE = re.compile(
+    r"\b(?:do[łl][ąa]cz|za[łl][ąa]cz|podepn|podpi[ne]|wgraj|dodaj|dorzu[ćc]|wrzu[ćc])\w*",
+    re.IGNORECASE,
+)
+# "kser"/"kset" are the typos this keyboard produces for "ksef" — f and r are
+# neighbours — and they arrived in the real thread twice in three messages.
+# The word boundary after the three-letter forms keeps "kserokopia" out.
+_KSEF_RE = re.compile(
+    r"\bk[\s.\-]?s[\s.\-]?e[\s.\-]?f\w*|\bkse[rtd]\b|"
+    r"krajow\w*\s+system\w*\s+e[\s-]?faktur\w*",
+    re.IGNORECASE,
+)
+_SEND_VERB_RE = re.compile(
+    r"\b(?:wy[śs]l|wysy[łl]|prze[śs]l|przesy[łl]|zg[łl]o[śs]|zg[łl]asz|nadaj|raportuj)\w*",
+    re.IGNORECASE,
+)
+# Without an id in the message, only a wording that names the whole SET resolves
+# here ("te faktury", "wszystkie", "obie", "resztę"). A bare "dołącz fakturę"
+# with nothing to point at is left to the LLM: the ledger may hold several
+# waiting invoices and delivering all of them is not what that sentence said.
+_INVOICE_SET_RE = re.compile(
+    r"\b(?:te|tych|tymi|wszystki\w*|obie|oba|obydw\w*|pozosta[łl]\w*|reszt\w*|je)\b",
+    re.IGNORECASE,
+)
+# Anything that makes the sentence something other than "deliver them now".
+# The dangerous shape is not a miss — that costs an LLM turn — but a LISTING
+# question whose words overlap a command: "pokaż wszystkie dołączone faktury"
+# carries an attach stem ("dołączone") and a set word ("wszystkie"), and served
+# as a command it would attach the seller's whole backlog to answer a question.
+# So the listing vocabulary, the participles, the questions, the past tense, the
+# refusals and the issuance verbs are all bails, and only an imperative with
+# nothing else on it reaches the matcher.
+_DELIVERY_BAIL_RE = re.compile(
+    r"\bwystaw\w*|\butw[óo]rz\b|\bwygeneruj\b|\bzr[óo]b\b|podgl[ąa]d|\?|"
+    r"\bczy\b|\bkiedy\b|\bjak\w*|\bdlaczego\b|\bile\b|\bkt[óo]r\w*|\bco\b|"
+    r"poka[żz]\w*|wy[śs]wietl\w*|wypisz\w*|\blist[aęeoy]\b|zestawieni\w*|podsumuj\w*|"
+    r"sprawd[źz]\w*|zobacz\w*|\bstatus\w*|\braport\b|"
+    r"do[łl][ąa]czy[łl]\w*|za[łl][ąa]czy[łl]\w*|do[łl][ąa]czon\w*|za[łl][ąa]czon\w*|"
+    r"wys[łl]a[łl]\w*|wysy[łl]a[łl]\w*|wys[łl]an\w*|"
+    r"\bnie\s+(?:do[łl][ąa]cz|wy[śs]l|wysy[łl])|\banuluj\w*|\bcofnij\w*|\bwycofaj\w*|"
+    r"\bmog[łl]\w*|\bmo[żz]esz\b|\bpotrafisz\b",
+    re.IGNORECASE,
+)
+
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE
+)
+# "zamówień", the genitive plural a seller writes in "dołącz faktury DO
+# ZAMÓWIEŃ", ends in "ń" — a stem looking for "zamówieni" misses exactly that
+# form, which is the same declension trap the label stems in allegro_tools
+# document twice over.
+_ORDER_MARKER_RE = re.compile(r"zam[óo]wie[nń]\w*|\border\w*", re.IGNORECASE)
+_INVOICE_MARKER_RE = re.compile(r"faktur\w*|in[\s-]?fakt\w*|invoice\w*", re.IGNORECASE)
+
+
+def _uuid_roles(query: str) -> list[tuple[str, str]] | None:
+    """Each UUID in `query` labelled "order" or "invoice", or None when any of
+    them cannot be told apart.
+
+    A bare UUID is the same 36 characters either way, and the two are not
+    interchangeable: an invoice id passed as an order id attaches nothing, an
+    order id passed as an invoice id would address someone else's document. The
+    label comes from the nearest preceding noun — "do zamówienia <uuid>" vs
+    "ID faktury w inFakt: <uuid>" — and a UUID with no noun in front of it at
+    all resolves nothing here.
+    """
+    roles: list[tuple[str, str]] = []
+    for match in _UUID_RE.finditer(query):
+        before = query[: match.start()]
+        order_at = max((m.end() for m in _ORDER_MARKER_RE.finditer(before)), default=-1)
+        invoice_at = max((m.end() for m in _INVOICE_MARKER_RE.finditer(before)), default=-1)
+        if order_at < 0 and invoice_at < 0:
+            return None
+        roles.append(("order" if order_at > invoice_at else "invoice", match.group(0)))
+    return roles
+
+
+def _match_deliver_invoices(query: str) -> dict | None:
+    if _DELIVERY_BAIL_RE.search(query):
+        return None
+    attach = bool(_INVOICE_ATTACH_VERB_RE.search(query) and _INVOICE_TOPIC_RE.search(query))
+    ksef = bool(_KSEF_RE.search(query) and _SEND_VERB_RE.search(query))
+    if not (attach or ksef):
+        return None
+
+    roles = _uuid_roles(query)
+    if roles is None:
+        return None  # a UUID this layer cannot label — the LLM reads the context
+    args: dict = {"attach": attach, "ksef": ksef}
+    if not roles:
+        if not _INVOICE_SET_RE.search(query):
+            return None
+        return args  # no ids: deliver_invoices takes everything still waiting
+    orders = [uuid for kind, uuid in roles if kind == "order"]
+    invoices = [uuid for kind, uuid in roles if kind == "invoice"]
+    if orders and invoices:
+        # "dołącz fakturę <inv> do zamówienia <ord>" — one of each is a pair and
+        # needs no lookup at all. More than one of each is an ordering guess,
+        # and guessing pairs puts one buyer's invoice on another's order.
+        if len(orders) != 1 or len(invoices) != 1:
+            return None
+        args["order_ids"] = orders
+        args["invoice_uuids"] = invoices
+        return args
+    args["order_ids" if orders else "invoice_uuids"] = orders or invoices
+    return args
+
+
 def names_an_order_stage(query: str) -> bool:
     """True when `query` narrows the answer to an order STAGE, named either
     positively ("w wysłanych zamówieniach") or under a negation ("nie nowych").
@@ -896,6 +1025,8 @@ def _match_monitoring(query: str) -> tuple[str, dict] | None:
 # multi-outcome monitoring matcher (handled separately below).
 _LABEL_MATCHERS: dict[str, list[tuple[str, Callable[[str], dict | None]]]] = {
     "zamowienia": _ORDERS_MATCHERS,
+    # deliver_invoices is NOT in this table — it is checked in
+    # resolve_deterministic() ahead of the single-label rule, see there.
     "faktury":    [("get_orders_pending_invoice", _match_orders_pending_invoice)],
     "wiadomosci": [("get_message_threads", _match_get_message_threads)],
     "konto":      [("get_account_info", _match_get_account_info)],
@@ -933,6 +1064,21 @@ def resolve_deterministic(query: str, labels: set[str]) -> tuple[str, dict] | No
         return None
     if "monitoring" in labels:
         return _match_monitoring(query)
+    # An invoice DELIVERY command is exempt from the single-topic rule below for
+    # the same reason monitoring is: it names its destination, and every way of
+    # naming one drags in a second label — "dodaj te faktury do Allegro, a
+    # firmową wyślij do ksef" matches {faktury, kupujacy} ("firmową"), "dołącz
+    # fakturę do zamówienia X" matches {faktury, zamowienia}. Requiring one
+    # label would leave the matcher answering only sentences real sellers do not
+    # write. It is safe under a second label in a way a listing matcher is not:
+    # it does not answer a question with narrower data, it runs the command the
+    # sentence spells out — and whether that command MAY run is still decided
+    # behind the tool (AllegroAgent._attach_authorized_by_seller, the issuing-
+    # turn block, and the per-order NIP check for KSeF).
+    if "faktury" in labels:
+        delivery = _match_deliver_invoices(query)
+        if delivery is not None:
+            return "deliver_invoices", delivery
     # An invoice question scoped to an order stage ("jakie mam faktury do
     # wysłania w zamówieniach nie nowych") always matches BOTH labels — the
     # stage words ARE order vocabulary — so the single-topic rule would rule
