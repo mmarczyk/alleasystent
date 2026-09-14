@@ -1965,9 +1965,9 @@ class TestBuyersReport:
         rows = [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
 
         assert rows == [
-            "| Kawa i Spółka | Firma | 7792445588 | `anna.firma`, `anna` | 2 | 1000,00 PLN | 01.05.2026 |",
-            "| Marek Zieliński | Osoba prywatna | — | `marek` | 1 | 899,00 PLN | 01.03.2026 |",
-            "| Katarzyna Wójcik | Osoba prywatna | — | `kasia` | 1 | 137,70 PLN | 01.04.2026 |",
+            "| Kawa i Spółka | Firma | 7792445588 | `anna.firma`, `anna` | 2 | 1000,00 PLN | 500,00 PLN | 1,0 | 01.05.2026 |",
+            "| Marek Zieliński | Osoba prywatna | — | `marek` | 1 | 899,00 PLN | 899,00 PLN | 1,0 | 01.03.2026 |",
+            "| Katarzyna Wójcik | Osoba prywatna | — | `kasia` | 1 | 137,70 PLN | 137,70 PLN | 1,0 | 01.04.2026 |",
         ]
         assert result.splitlines()[0] == "# Kupujący"
         # The summary is LAST — that is the half the chat bubble shows.
@@ -2045,7 +2045,10 @@ class TestBuyersReport:
         # Only the invoiced order counts toward the row — the company's other
         # order in the period has no invoice, so neither its value nor its
         # count may leak into an "invoices I issued" report.
-        assert "| Kawa i Spółka | Firma | 7792445588 | `anna.firma` | 1 | 600,00 PLN | 1 | 01.05.2026 |" in result
+        assert (
+            "| Kawa i Spółka | Firma | 7792445588 | `anna.firma` | 1 | 600,00 PLN | 600,00 PLN | 1,0 | 1 | 01.05.2026 |"
+            in result
+        )
         assert "Faktury VAT" in result
 
     @pytest.mark.asyncio
@@ -2119,43 +2122,41 @@ class TestBuyersReport:
         assert first_row(await agent._dispatch("get_buyers", {})).startswith("| Kawa i Spółka |")
 
     @pytest.mark.asyncio
-    async def test_summary_gives_the_average_order_value_and_quantity(self):
-        """The seller reads the totals as "how big is one order here?", so the
-        summary states it instead of leaving them to divide."""
+    async def test_each_row_averages_that_buyers_own_orders(self):
+        """The averages are per CUSTOMER — what separates a wholesale buyer from
+        someone taking one skein a month — not one figure for the whole period."""
         agent = self._agent_with([
             self._order("a1", "anna", 100.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
+            self._order("a2", "anna", 500.0, quantity=7, paid_at="2026-04-01T10:00:00Z"),
             self._order("b1", "marek", 50.0, quantity=2, paid_at="2026-03-01T10:00:00Z"),
         ])
 
-        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+        result = await agent._dispatch("get_buyers", {})
 
-        assert "łącznie **2** zamówienia na **150,00 PLN**." in summary
-        assert "Średnio **75,00 PLN** i **2,5 szt.** na zamówienie." in summary
-
-    @pytest.mark.asyncio
-    async def test_averages_cover_every_buyer_not_only_the_rows_shown(self):
-        """Same scope as the totals they sit next to: the table's limit cuts
-        rows, never the period the figures describe."""
-        agent = self._agent_with([
-            self._order("a1", "anna", 300.0, quantity=3, paid_at="2026-02-01T10:00:00Z"),
-            self._order("b1", "marek", 100.0, quantity=1, paid_at="2026-03-01T10:00:00Z"),
-        ])
-
-        result = await agent._dispatch("get_buyers", {"limit": 1})
-
-        assert "Średnio **200,00 PLN** i **2,0 szt.** na zamówienie." in result
-        assert "W tabeli pokazano pierwszych 1." in result
+        # anna: 600,00 / 2 orders, 10 pieces / 2 orders
+        assert "| `anna` | 2 | 600,00 PLN | 300,00 PLN | 5,0 |" in result
+        assert "| `marek` | 1 | 50,00 PLN | 50,00 PLN | 2,0 |" in result
+        # Nothing period-wide sneaks into the sentence under the table.
+        assert "na zamówienie" not in result.splitlines()[-1]
 
     @pytest.mark.asyncio
-    async def test_quantity_is_dropped_when_allegro_sent_no_line_items(self):
-        """"0,0 szt." would read as "sprzedałem nic" — a different claim from
-        "nie wiem, ile sztuk"."""
+    async def test_average_columns_are_labelled_and_right_aligned(self):
+        agent = self._agent_with([self._order("a1", "anna", 100.0, quantity=2)])
+
+        header, separator = (await agent._dispatch("get_buyers", {})).splitlines()[2:4]
+
+        assert header.endswith("| Zamówienia | Wartość | Śr. wartość | Śr. szt. | Ostatni zakup |")
+        assert separator.count("---:") == 4  # zamówienia, wartość, obie średnie
+
+    @pytest.mark.asyncio
+    async def test_quantity_is_dashed_when_allegro_sent_no_line_items(self):
+        """"0,0" would read as "kupił zero sztuk" — a different claim from "nie
+        wiem, ile sztuk"."""
         agent = self._agent_with([self._order("a1", "anna", 100.0, line_items=[])])
 
-        summary = (await agent._dispatch("get_buyers", {})).splitlines()[-1]
+        result = await agent._dispatch("get_buyers", {})
 
-        assert "Średnio **100,00 PLN** na zamówienie." in summary
-        assert "szt." not in summary
+        assert "| `anna` | 1 | 100,00 PLN | 100,00 PLN | — |" in result
 
     @pytest.mark.asyncio
     async def test_failed_invoice_lookup_is_reported_not_counted_as_missing(self):

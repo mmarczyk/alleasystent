@@ -2885,6 +2885,16 @@ class AllegroAgent(BaseAgent):
             group["name"] = group["name"] or (group["logins"] or ["—"])[0]
         return list(groups.values())
 
+    @staticmethod
+    def _avg_items(group: dict[str, Any]) -> str:
+        """Average pieces per order for ONE buyer, or "" (the table renders it
+        as "—") when Allegro sent no line items for any of their orders: "0,0"
+        would read as "kupił zero sztuk", a different statement from "nie wiem,
+        ile sztuk"."""
+        if not group["items"]:
+            return ""
+        return f"{group['items'] / group['orders']:.1f}".replace(".", ",")
+
     async def _invoice_flags(self, orders: list[Any]) -> tuple[dict[str, bool | None], int]:
         """(order_id → invoice attached?, how many orders the cap left unchecked).
 
@@ -2962,8 +2972,14 @@ class AllegroAgent(BaseAgent):
         # invoice_status='missing' every row is 0 by construction, and with 'any'
         # no lookup ran at all.
         with_invoices = invoice_status in ("issued", "requested")
-        headers = ["Kupujący", "Typ", "NIP", "Login Allegro", "Zamówienia", "Wartość"]
-        align = "llllrr"
+        # The averages belong to the ROW, not to the period: "ile średnio
+        # wydaje ten klient i ile sztuk bierze" is what separates a wholesale
+        # customer from someone who buys one skein a month, and a single
+        # period-wide figure says nothing about either. Same column name as the
+        # monthly breakdown's ("Śr. wartość") — one meaning per header.
+        headers = ["Kupujący", "Typ", "NIP", "Login Allegro", "Zamówienia", "Wartość",
+                   "Śr. wartość", "Śr. szt."]
+        align = "llllrrrr"
         if with_invoices:
             headers.append("Faktury VAT")
             align += "r"
@@ -2979,6 +2995,8 @@ class AllegroAgent(BaseAgent):
                 ", ".join(f"`{login}`" for login in group["logins"]),
                 group["orders"],
                 self._format_price(group["value"], group["currency"]),
+                self._format_price(group["value"] / group["orders"], group["currency"]),
+                self._avg_items(group),
             ]
             if with_invoices:
                 row.append(group["invoices"])
@@ -2987,7 +3005,6 @@ class AllegroAgent(BaseAgent):
 
         total_orders = sum(g["orders"] for g in buyers)
         total_value = sum(g["value"] for g in buyers)
-        total_items = sum(g["items"] for g in buyers)
         # Kept short on purpose: this sentence IS the chat bubble (the table goes
         # to the document viewer), and the preview cuts off at 220 characters.
         # Phrased as a noun phrase, not "kupowało u Ciebie N…": the Polish verb
@@ -3001,19 +3018,6 @@ class AllegroAgent(BaseAgent):
             f"{self._plural_pl(total_orders, 'zamówienie', 'zamówienia', 'zamówień')} "
             f"na **{self._format_price(total_value)}**."
         )
-        # Averages per ORDER, not per buyer: "ile średnio wychodzi jedno
-        # zamówienie" is the figure a seller compares between periods, while a
-        # per-buyer average moves on its own every time a one-off customer joins
-        # the list. Both are computed over ALL buyers in the period, like the
-        # totals above — not just the rows the table had room for.
-        if total_orders:
-            avg_value = self._format_price(total_value / total_orders)
-            # Pieces only when Allegro actually sent line items: "0,0 szt."
-            # would read as "sprzedałem nic", which is a different claim from
-            # "nie wiem, ile sztuk".
-            avg_qty = f"{total_items / total_orders:.1f}".replace(".", ",")
-            avg_items = f" i **{avg_qty} szt.**" if total_items else ""
-            summary += f" Średnio **{avg_value}**{avg_items} na zamówienie."
         if len(shown) < len(buyers):
             summary += f" W tabeli pokazano pierwszych {len(shown)}."
         unknown = sum(1 for value in flags.values() if value is None)
