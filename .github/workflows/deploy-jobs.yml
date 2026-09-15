@@ -62,17 +62,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Own cache scope, and only the SHA tag — see the matching comment in
+      # deploy-backend.yml for why both matter to Artifact Registry storage.
       - name: Build and push jobs image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.jobs
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/jobs:${{ github.sha }}
+          cache-from: type=gha,scope=jobs
+          cache-to: type=gha,mode=max,scope=jobs
 
       # `gcloud run deploy` creates the service if it doesn't exist yet and
       # updates it otherwise — but deployment/setup_gcp.sh should still be run

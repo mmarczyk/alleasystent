@@ -67,6 +67,19 @@ jobs:
 
       # GHA layer cache: pip packages and the ~400 MB HuggingFace model are
       # cached between runs.  A code-only change skips both expensive layers.
+      #
+      # `scope` is not cosmetic. Without it this workflow and deploy-jobs.yml
+      # share one cache scope and evict each other under GitHub's 10 GB
+      # per-repo cache limit. Every eviction re-runs `pip install`, which
+      # yields a byte-different tarball of the very same packages — a new layer
+      # digest, so Artifact Registry cannot dedup it and stores another full
+      # copy of the image, permanently. Separate scopes keep both images'
+      # expensive layers resident and their digests stable.
+      #
+      # Only the commit-SHA tag is pushed. A moving `:latest` buys nothing here
+      # (the deploy below pins the SHA, as does Cloud Run rollback) and each
+      # push of it orphans the previous image into an untagged version that
+      # still costs full storage.
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -74,11 +87,9 @@ jobs:
           push: true
           build-args: |
             GIT_SHA=${{ github.sha }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID }}/alleasystent/app:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
 
       # Required GitHub repo variable: VAPID_EMAIL — mailto: contact for Web Push
       # (RFC 8292). Required Secret Manager secrets: vapid-private-key,

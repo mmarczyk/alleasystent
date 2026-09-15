@@ -98,11 +98,19 @@ Szczegółowy opis architektury i wymagań funkcjonalnych: [`REQUIREMENTS.md`](.
 
 ### GCP Cloud Run
 
-```bash
-gcloud builds submit --config cloudbuild.yaml
-```
+CI/CD: push do `main` buduje obraz i wdraża go przez GitHub Actions
+(`.github/workflows/deploy-backend.yml` — backend, `deploy-jobs.yml` — zadania
+cykliczne z `jobs/`). Sekrety pobierane z GCP Secret Manager.
 
-CI/CD skonfigurowany w `cloudbuild.yaml`. Sekrety pobierane z GCP Secret Manager.
+Nie ma tu drugiej ścieżki przez Cloud Build. `cloudbuild.yaml` został usunięty,
+bo dublował workflow powyżej: oba budowały ten sam obraz i wypychały te same
+tagi przy każdym pushu do `main`, a Cloud Build robił to na czystym workerze
+bez cache — czyli każda warstwa dostawała nowy digest i Artifact Registry
+składował kolejną pełną kopię obrazu zamiast deduplikować. **Jeśli w projekcie
+nadal istnieje trigger Cloud Build wskazujący na ten plik, wyłącz go**
+(konsola: Cloud Build → Triggers, sprawdź regiony `global` i `europe-central2`).
+
+Pierwsza konfiguracja projektu GCP: `deployment/setup_gcp.sh`.
 
 ### GitHub Pages (frontend-only)
 

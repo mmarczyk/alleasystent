@@ -10,3 +10,12 @@ data/
 *.json
 !requirements.txt
 .allegro_tokens.json
+
+# Nothing below is imported or served at runtime, and shipping it makes every
+# docs- or CI-only commit produce a different `COPY . .` layer digest — a new
+# blob that Artifact Registry stores instead of deduplicating against the
+# previous build.
+tests/
+.github/
+deployment/
+*.md
