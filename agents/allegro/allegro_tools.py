@@ -94,7 +94,9 @@ _ORDER_PARAMS: dict[str, dict] = {
             "it has no login parameter and would answer with every customer of the period "
             "instead. Always the Allegro LOGIN, exactly as the user wrote it — never a company "
             "or person's name (Allegro matches it exactly); if the user gave a NAME instead, "
-            "ask for the login rather than guessing it."
+            "the tool that finds a customer by name is get_buyer_products (their products) or "
+            "find_buyer_by_contact (who they are) — ask for the login only when the question "
+            "really is about the ORDERS of an account nobody named."
         ),
     },
     "min_value": {
@@ -1038,6 +1040,10 @@ ALLEGRO_TOOLS: list[dict] = [
                 "NOT for LISTING the orders a product was in ('pokaż zamówienie z wczoraj z włóczką "
                 "yarnart jeans', 'które zamówienia miały jeans plus') — this tool answers with a "
                 "units total and never names an order; that is get_orders with product_names. "
+                "NOT for ONE NAMED CUSTOMER's products either ('jakie produkty kupował klient X', "
+                "'co bierze ta firma'): this tool counts the WHOLE SHOP and has no buyer "
+                "parameter, so the customer would be dropped without a trace and the store's "
+                "total handed back as if it were theirs — that question is get_buyer_products. "
                 "PRODUCT NAMES — pass every model the user names as a SEPARATE entry in `names`, exactly "
                 "as they wrote it: 'włóczki jeans i jeans plus' is names=['jeans', 'jeans plus'], NOT "
                 "['jeans'] and NOT ['jeans i jeans plus']. They are different models and the tool keeps "
@@ -1125,7 +1131,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'co kupił użytkownik anna.kowalska88' — must go to get_orders with "
                 "buyer_login=<that login>. Calling this tool for such a question drops the login "
                 "silently and answers with every customer of the period, which reads like a real "
-                "answer to a question nobody asked."
+                "answer to a question nobody asked. "
+                "WHAT ONE OF THESE CUSTOMERS BUYS is a third tool again: a row here states their "
+                "order count and total spend and never names a product, so 'dla tego kupującego "
+                "pokaż, jakie produkty kupował' — the natural follow-up to this very table — is "
+                "get_buyer_products with that buyer's name."
             ),
             "parameters": {
                 "type": "object",
@@ -1262,7 +1272,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "every customer of the period, which reads like a real answer) and NOT get_orders "
                 "(its buyer_login filter is the Allegro LOGIN, not a phone, an e-mail or a "
                 "person's name). When the user names an Allegro LOGIN instead of contact details "
-                "('z konta np1988'), that IS get_orders with buyer_login."
+                "('z konta np1988'), that IS get_orders with buyer_login. "
+                "AND NOT for 'what does this customer BUY': the order list here names at most "
+                "two products per order and never adds anything up, so a question about their "
+                "products/assortment ('jakie produkty kupował', 'zestawienie zakupów tego "
+                "klienta') is get_buyer_products — this tool only says WHO they are."
             ),
             "parameters": {
                 "type": "object",
@@ -1306,6 +1320,84 @@ ALLEGRO_TOOLS: list[dict] = [
                         "description": (
                             "End of the period to search, Warsaw-local 'YYYY-MM-DD' (inclusive). "
                             "Defaults to today."
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_buyer_products",
+            "description": (
+                "WHAT ONE CUSTOMER BOUGHT, as a SALES SUMMARY PER PRODUCT — one row per product "
+                "with the pieces that customer took, what they paid for them, in how many of "
+                "their orders it appeared and when they last took it. "
+                "USE THIS for any question about the ASSORTMENT of a named buyer: 'dla tego "
+                "kupującego pokaż zestawienie, jakie produkty kupował', 'co kupuje firma X', "
+                "'jakie towary bierze ten klient', 'zestawienie sprzedaży dla klienta Y', 'co "
+                "zamawia u mnie Jan Kowalski', 'jakie produkty kupował klient z NIP 7792445588'. "
+                "The give-away is a named customer PLUS a product/assortment word ('produkty', "
+                "'towary', 'asortyment', 'co kupował', 'zestawienie zakupów') — the seller wants "
+                "what left the shelf for that customer, added up, not their paperwork. "
+                "IDENTIFY THE BUYER with whatever the user gave — `name` for a person or company "
+                "name (the usual case: the name they just read off a get_buyers table or a "
+                "message), `buyer_login` for an Allegro login, `nip` for a company's tax id — "
+                "passed EXACTLY as they wrote it. At least one is REQUIRED; with none of them "
+                "this tool has no customer to report on, so call ask_clarifying_question instead. "
+                "NOT get_orders and NOT find_buyer_by_contact: both answer with a LIST OF ORDERS "
+                "(one bullet per order, products buried inside), which is precisely what a seller "
+                "asking for a 'zestawienie' does NOT want — they would have to add the same yarn "
+                "up by hand across six orders. Use find_buyer_by_contact only for the different "
+                "question 'WHO is this contact / do I have such a customer', and get_orders when "
+                "the seller really wants the individual orders. "
+                "NOT get_sold_quantities: that counts the WHOLE SHOP's pieces and has no buyer "
+                "parameter at all, so the customer would be silently dropped and the store's "
+                "total served as if it were theirs. NOT get_buyers: one row per customer, it "
+                "never names a product. "
+                "PERIOD: omit both dates unless the user names one — the summary then covers the "
+                "last 24 months, the same window as find_buyer_by_contact, and the reply always "
+                "states which period it covered. Resolve a named period yourself ('w tym roku' → "
+                "1 January of the current year through today)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "The buyer or company name, exactly as the user wrote it ('P.P.H.U. "
+                            "Gadżet z Jajem. Monika Sornat', 'Jan Kowalski') — matched as a "
+                            "fragment of the invoice buyer's name, the company name or the parcel "
+                            "recipient's name, ignoring case and Polish diacritics."
+                        ),
+                    },
+                    "buyer_login": {
+                        "type": "string",
+                        "description": (
+                            "The buyer's Allegro LOGIN ('np1988', 'anna.kowalska88'), when the "
+                            "user identified the customer by their account rather than by name. "
+                            "Matched exactly, so never retype or 'fix' it, and never put a "
+                            "person's or company's name here — that is `name`."
+                        ),
+                    },
+                    "nip": {
+                        "type": "string",
+                        "description": "The company's NIP; dashes and spaces are ignored.",
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": (
+                            "Start of the period, Warsaw-local 'YYYY-MM-DD'. Omit unless the user "
+                            "names a period — the summary then covers the last 24 months."
+                        ),
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": (
+                            "End of the period, Warsaw-local 'YYYY-MM-DD' (inclusive). Defaults "
+                            "to today."
                         ),
                     },
                 },
@@ -1974,6 +2066,11 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     # ONE person, usually with a single match; a one-row table hidden behind
     # the document viewer would bury the answer.
     "find_buyer_by_contact": "chat",
+    # "table" — unlike the lookup above, this one IS a zestawienie: as many rows
+    # as the customer has products, which is exactly what the document viewer
+    # is for. The trailing summary sentence is what the chat bubble shows
+    # (web/js/app.js _tablePreview), the same as for get_buyers.
+    "get_buyer_products": "table",
     # Faktury
     "get_orders_pending_invoice": "chat",
     "get_order_invoice_data": "chat",
@@ -2105,6 +2202,12 @@ _TOOL_LABELS: dict[str, str] = {
     # kupujacy
     "get_buyers":                      "kupujacy",
     "find_buyer_by_contact":           "kupujacy",
+    # "kupujacy", not "finanse" or "oferty": the question names a CUSTOMER and
+    # only then asks what they bought ("jakie produkty kupował ten klient"), and
+    # the product/sales words in it already drag in those two labels on their
+    # own — under either of them a customer question phrased without them
+    # ("co bierze ta firma") would lose the tool entirely.
+    "get_buyer_products":              "kupujacy",
     # faktury
     "get_orders_pending_invoice":      "faktury",
     "get_order_invoice_data":          "faktury",
@@ -2240,6 +2343,17 @@ _LOGIN_FILLER_WORDS = frozenset({
 # Punctuation and quoting that can wrap a login in a real message
 # ("z konta 'np1988'", "z konta np1988?").
 _TOKEN_TRIM = "\"'„”»«`([{)]}.,!?:;"
+# A QUOTED MULTI-WORD NAME is not a login. "dla tego kupującego „P.P.H.U.
+# Gadżet z Jajem. Monika Sornat” pokaż…" is read token by token, so the first
+# token after the buyer word is „P.P.H.U. — and a dotted abbreviation has
+# exactly the shape a login has (a separator, no spaces). The opening quote is
+# what gives it away: a login the seller quoted closes inside the same token
+# ("z konta 'np1988'"), a name runs on into the next ones. So an opening quote
+# with no closing one in the same token ends the scan — what follows is a name,
+# and the tools that take a name (get_buyer_products, find_buyer_by_contact)
+# are the ones that can answer it.
+_OPENING_QUOTES = "\"'„»«"
+_CLOSING_QUOTES = "\"'”«»"
 _LOGIN_TOKEN_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._-]{2,}$")
 # What separates a login from an ordinary Polish word standing right after
 # "konta"/"login" ("moje konto allegro jest zawieszone"): a digit or one of
@@ -2271,6 +2385,11 @@ def named_buyer_login(text: str) -> str | None:
         for j in range(i + 1, min(i + 4, len(norm))):
             if norm[j].strip(_TOKEN_TRIM) in _LOGIN_FILLER_WORDS:
                 continue
+            token = raw[j]
+            if token[:1] in _OPENING_QUOTES and not any(
+                ch in _CLOSING_QUOTES for ch in token[1:]
+            ):
+                break  # a quoted name that runs on — see _OPENING_QUOTES
             login = raw[j].strip(_TOKEN_TRIM).lstrip("@")
             if not (_LOGIN_TOKEN_RE.match(login) and _LOOKS_LIKE_LOGIN_RE.search(login)):
                 break
@@ -2338,6 +2457,42 @@ def named_phone_number(text: str) -> str | None:
     return None
 
 
+# ── A NAMED CUSTOMER whose PURCHASES are being asked about ─────────────────
+# "Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi
+# zestawienie, jakie produkty kupował", "zestawienie sprzedaży dla klienta
+# „Kawa i Spółka”". Two things make this its own detector rather than another
+# stem in the map above:
+#   • "klient" is deliberately NOT a "kupujacy" stem (see the comment there:
+#     a seller says it about an ORDER just as often), so the second example
+#     matches "finanse" alone — get_buyer_products never reaches the model and
+#     the WHOLE SHOP's sales summary comes back in its place, which reads
+#     exactly like the answer to the question that was asked;
+#   • the customer's name is quoted, and in a sentence full of ordinary words
+#     those quotes are the only thing that says where it begins and ends.
+# Narrow on purpose, like the two detectors above: a buyer word AND a
+# buying-intent word AND a quoted name. A miss costs nothing (the stems still
+# apply), and a false positive only adds one more candidate tool to read.
+_BUYER_MENTION_RE = re.compile(r"kupuj[aą]c|klient|firm|kontrahent|nabywc", re.IGNORECASE)
+_BUYER_BUYING_INTENT_RE = re.compile(
+    r"co\s+kupowa|co\s+kupi[łl]|co\s+kupuje|jakie\s+produkt|jakie\s+towar|jakie\s+rzecz|"
+    r"zestawienie\s+(zakup|sprzeda)|asortyment",
+    re.IGNORECASE,
+)
+# The name: whatever sits between a pair of quotes, in any of the spellings a
+# Polish keyboard produces. Bounded at 80 characters — longer than that it is
+# not a name but a sentence with a stray quote in it.
+_QUOTED_NAME_RE = re.compile(r"[„\"'»]\s*([^„”\"'«»]{3,80}?)\s*[”\"'«]")
+
+
+def named_buyer_purchases(text: str) -> str | None:
+    """The quoted customer name when `text` asks what THAT customer bought,
+    else None."""
+    if not (_BUYER_MENTION_RE.search(text) and _BUYER_BUYING_INTENT_RE.search(text)):
+        return None
+    match = _QUOTED_NAME_RE.search(text)
+    return match.group(1).strip() if match else None
+
+
 def matched_labels(text: str) -> set[str]:
     """Labels whose stems appear as a word-prefix anywhere in `text`."""
     words = _normalize(text).split()
@@ -2357,6 +2512,12 @@ def matched_labels(text: str) -> set[str]:
     # 880 197 834" carries no stem at all, and without this it would fall back
     # to the full ~40-schema list with nothing pointing at the lookup tool.
     if named_phone_number(text):
+        found.add("kupujacy")
+    # A named customer's purchases are a BUYER question however the sentence
+    # words it — "zestawienie sprzedaży dla klienta „Kawa i Spółka”" otherwise
+    # matches "finanse" alone, and the only tool it could then be answered
+    # with sums the whole shop.
+    if named_buyer_purchases(text):
         found.add("kupujacy")
     return found
 

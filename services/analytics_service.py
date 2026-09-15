@@ -110,6 +110,7 @@ _TOOL_LABELS = {
     "get_sold_quantities":             "Sprzedane sztuki",
     "get_buyers":                      "Kupujący",
     "find_buyer_by_contact":           "Szukanie klienta",
+    "get_buyer_products":              "Zakupy klienta",
     "get_new_returns":                 "Zwroty",
     "get_returns_to_process":          "Zwroty do obsłużenia",
     "get_new_complaints":              "Reklamacje",

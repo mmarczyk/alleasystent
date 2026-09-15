@@ -196,6 +196,22 @@ class TestNamedBuyerLogin:
         from agents.allegro.allegro_tools import named_buyer_login
         assert named_buyer_login(query) is None
 
+    @pytest.mark.parametrize("query", [
+        "Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż zestawienie",
+        'co kupował kupujący "F.H.U. Kowalski i Syn"',
+    ])
+    def test_a_quoted_multi_word_name_is_not_a_login(self, query):
+        """Read token by token, „P.P.H.U. is exactly the shape a login has — a
+        separator, no spaces. The opening quote with no closing one in the same
+        token is what gives the name away; reading it as a login would send the
+        question to get_orders with an invented account."""
+        from agents.allegro.allegro_tools import named_buyer_login
+        assert named_buyer_login(query) is None
+
+    def test_a_quoted_login_is_still_a_login(self):
+        from agents.allegro.allegro_tools import named_buyer_login
+        assert named_buyer_login("czy z konta „np1988” coś kupiono?") == "np1988"
+
     def test_a_named_account_makes_it_an_order_question(self):
         from agents.allegro.allegro_tools import matched_labels
         labels = matched_labels("Czy w tym roku kupował ode mnie ktoś z konta np1988")
@@ -388,6 +404,12 @@ class TestLabelPhraseCoverage:
         ("ilu miałem kupujących w tym roku", "get_buyers"),
         ("czy mam klienta z takim nr telefonu +48 880 197 834", "find_buyer_by_contact"),
         ("czy kupował ode mnie ktoś z adresu jan@example.com", "find_buyer_by_contact"),
+        ("dla tego kupującego „Kawa i Spółka” pokaż jakie produkty kupował",
+         "get_buyer_products"),
+        # "klient" is not a kupujacy stem and "zestawienie sprzedaży" matches
+        # only "finanse" — named_buyer_purchases is what keeps this reachable.
+        ("zestawienie sprzedaży dla klienta „Kawa i Spółka”", "get_buyer_products"),
+        ("co kupuje firma „Biuro Serwis”", "get_buyer_products"),
         ("jakie zamówienia czekają na fakturę", "get_orders_pending_invoice"),
         # "Faktury do wysłania" is the invoice listing, not the shipping one —
         # and the stage that scopes it keeps the order tools as candidates too,

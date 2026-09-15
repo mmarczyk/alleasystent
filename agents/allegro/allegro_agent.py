@@ -203,6 +203,11 @@ _UNFILTERABLE_FALLBACK: dict[str, str] = {
     "preview_pending_invoices": (
         "Przygotować podgląd danych dla wszystkich zaległych faktur z tego miesiąca?"
     ),
+    # It narrows by BUYER and by nothing else: a product ("ile włóczki jeans
+    # wziął ten klient") or an amount named next to the customer has no
+    # parameter to go into, and the full per-product zestawienie would come
+    # back looking like the answer to the narrower question.
+    "get_buyer_products": "Pokazać całe zestawienie zakupów tego klienta?",
 }
 
 # The calendar-date half of a "YYYY-MM-DD HH:MM" local filter (see
@@ -532,6 +537,18 @@ class AllegroAgent(BaseAgent):
         "this with get_buyers (no phone/e-mail/name filter — it would reply with every customer of "
         "the period) or with get_orders (its buyer_login is the Allegro LOGIN, not a phone or a "
         "name).\n"
+        "• WHAT ONE NAMED CUSTOMER BUYS, product by product — 'dla tego kupującego «P.P.H.U. "
+        "Gadżet z Jajem» pokaż mi zestawienie, jakie produkty kupował', 'co kupuje firma X', "
+        "'jakie towary bierze ten klient', 'zestawienie zakupów klienta Y' → get_buyer_products "
+        "with name=<the name exactly as written> (or buyer_login=<login> / nip=<NIP> when that "
+        "is how the customer was named). It answers with one row per PRODUCT — pieces, value, "
+        "how many of their orders held it — which is what 'zestawienie' means here. Do NOT "
+        "answer it with get_orders or find_buyer_by_contact: both reply with a LIST OF ORDERS, "
+        "leaving the seller to add the same product up across them by hand, and that is exactly "
+        "the answer they said they did not want. Do NOT answer it with get_sold_quantities "
+        "either — it has no buyer parameter, so the customer is silently dropped and the whole "
+        "shop's units come back as if they were that customer's. Omit the dates unless a period "
+        "is named; the summary then covers the last 24 months.\n"
         "• ONE NAMED BUYER ACCOUNT rather than the buyer population — 'czy w tym roku kupował "
         "ode mnie ktoś z konta np1988', 'co kupił użytkownik anna.kowalska88', 'ile zamówień "
         "złożył kasia.w', 'pokaż zamówienia z konta X' → get_orders with buyer_login=<exactly "
@@ -544,9 +561,10 @@ class AllegroAgent(BaseAgent):
         "silently dropped and the seller gets the whole period's customer list instead of an "
         "answer about the one account they asked about (a real bug seen in production). "
         "buyer_login is the Allegro LOGIN — if the user named a PERSON or COMPANY instead "
-        "('czy kupował ode mnie Jan Kowalski'), no tool can filter by that: call "
-        "ask_clarifying_question for the login, or use get_buyers only if they really wanted "
-        "the whole list.\n"
+        "('czy kupował ode mnie Jan Kowalski'), get_orders cannot filter by that, but two "
+        "other tools can: find_buyer_by_contact(name=...) for 'do I have such a customer / who "
+        "is this', get_buyer_products(name=...) for what that customer bought. Ask for the "
+        "login only when neither question is the one being asked.\n"
         "• Status / any detail of ONE SPECIFIC, already-identified order — 'jaki jest status tego "
         "zamówienia', 'co się dzieje z zamówieniem <id>', 'sprawdź zamówienie <id>', a bare order_id "
         "(UUID) pasted by the user, or a follow-up like 'a teraz?'/'sprawdź jeszcze raz' referring "
@@ -3312,6 +3330,16 @@ class AllegroAgent(BaseAgent):
 
         criteria: dict[str, str] = {}
         labels: list[str] = []
+        # The Allegro login identifies a customer exactly, so it leads the
+        # labels — a reply that has to name what it looked for names the
+        # surest thing first. find_buyer_by_contact never passes it (its schema
+        # has no such parameter, deliberately: a login is not a contact
+        # detail); get_buyer_products does, and both share this matcher so
+        # "who counts as this customer" stays one decision.
+        login = str(tool_input.get("buyer_login") or "").strip()
+        if login:
+            criteria["login"] = login.lower()
+            labels.append(f"login Allegro {login}")
         phone = str(tool_input.get("phone") or "").strip()
         if phone:
             digits = phone_digits(phone)
@@ -3342,6 +3370,9 @@ class AllegroAgent(BaseAgent):
         every criterion to match would answer "nie" about a customer whose
         order is right there.
         """
+        login = criteria.get("login")
+        if login and (order.buyer_login or "").strip().lower() == login:
+            return True
         phone = criteria.get("phone")
         if phone and any(cls._same_phone(phone, raw) for raw in cls._order_phones(order)):
             return True
@@ -3498,6 +3529,182 @@ class AllegroAgent(BaseAgent):
             headline = f"**Tak — {criteria_label} pasuje do {len(buyers)} klientów.**"
         blocks = [self._contact_buyer_block(group) for group in buyers]
         return "\n\n".join([headline, *blocks, scanned])
+
+    # ── Co kupował JEDEN klient: zestawienie sprzedaży, nie lista zamówień ───
+    # "Dla tego kupującego «P.P.H.U. Gadżet z Jajem» pokaż mi zestawienie,
+    # jakie produkty kupował" — the seller has one customer in mind (a call to
+    # return, an offer to prepare, a restock to plan) and wants what left the
+    # shelf FOR THEM, summed per product. Every neighbouring tool answers a
+    # different question while reading like an answer to this one: get_orders
+    # and find_buyer_by_contact hand back a list of ORDERS with the products
+    # buried two-per-bullet inside them, so the seller adds the same yarn up by
+    # hand across six of them; get_sold_quantities sums the whole shop and has
+    # no buyer parameter at all; get_buyers is one row per customer and never
+    # names a product.
+    #
+    # The customer is found exactly as in find_buyer_by_contact — Allegro has
+    # no customer index, so a period of orders is scanned and matched on what
+    # the orders carry (see _order_matches_contact) — and the period defaults
+    # to the same 24 months for the same reason: "co ten klient u mnie kupuje"
+    # is a question about a relationship, not about this calendar year.
+    _BUYER_PRODUCTS_TABLE_CAP = 100
+
+    @classmethod
+    def _aggregate_buyer_products(cls, orders: list[Any]) -> list[dict[str, Any]]:
+        """One entry per product title: pieces, what was paid for them, in how
+        many of these orders it appeared, and when it last did.
+
+        Titles are never merged across offers, for the same reason
+        _render_sold_quantities keeps them apart: two spellings of what the
+        seller considers one model are two different offers, and summing them
+        here would state a number the order data does not support. The value is
+        the LINE's own money (unit price × quantity), so delivery — which the
+        order total includes — is outside every figure this produces.
+        """
+        products: dict[str, dict[str, Any]] = {}
+        for order in orders:
+            bought_at = order.paid_at or order.created_at or ""
+            for li in order.line_items:
+                entry = products.get(li.offer_name)
+                if entry is None:
+                    entry = products[li.offer_name] = {
+                        "name": li.offer_name,
+                        "units": 0,
+                        "value": 0.0,
+                        "currency": li.currency or order.currency,
+                        "order_ids": set(),
+                        "last_bought": "",
+                    }
+                quantity = int(li.quantity or 0)
+                entry["units"] += quantity
+                entry["value"] += float(li.price or 0) * quantity
+                entry["order_ids"].add(order.order_id)
+                entry["last_bought"] = max(entry["last_bought"], bought_at)
+        return sorted(
+            products.values(), key=lambda p: (p["value"], p["units"]), reverse=True,
+        )
+
+    async def _buyer_products_report(self, tool_input: dict[str, Any]) -> str:
+        """The finished get_buyer_products answer: heading, one row per
+        product, then the sentence that says whose purchases these are and over
+        what period."""
+        criteria, labels = self._contact_criteria(tool_input)
+        if not criteria:
+            return (
+                "Podaj nazwę klienta, jego login Allegro albo NIP — bez tego nie wiem, "
+                "czyje zakupy zestawić."
+            )
+        criteria_label = " / ".join(labels)
+        date_from, date_to, period_label = self._period_or_last_months(
+            tool_input, self._CONTACT_SEARCH_MONTHS
+        )
+        orders = await self._allegro.get_all_paid_orders_in_period(date_from, date_to)
+        # Paid-and-then-cancelled orders come back from the period fetch (it
+        # filters the checkout-form status, not the fulfilment one). Counting
+        # them would tell the seller this customer took goods that never
+        # shipped — the same exclusion get_sold_quantities makes.
+        matched = [
+            o for o in orders
+            if str(o.fulfillment_status or "").upper() != "CANCELLED"
+            and self._order_matches_contact(o, criteria)
+        ]
+        logger.info(
+            "get_buyer_products: %d orders in %s → %d for this buyer (%s)",
+            len(orders), period_label, len(matched), sorted(criteria),
+        )
+        scanned = (
+            f"Przeszukałem **{len(orders)}** "
+            f"{self._plural_pl(len(orders), 'zamówienie', 'zamówienia', 'zamówień')} "
+            f"z okresu {period_label}."
+        )
+        if not matched:
+            return (
+                f"**Nie znalazłem zakupów klienta, do którego pasuje {criteria_label}.** "
+                f"{scanned} Sprawdź pisownię — nazwę dopasowuję do nazwy z faktury i do "
+                "odbiorcy przesyłki. Jeśli ten klient kupował wcześniej, podaj okres do "
+                "sprawdzenia (np. „sprawdź od 2022 roku”)."
+            )
+
+        products = self._aggregate_buyer_products(matched)
+        buyers = self._aggregate_buyers(matched, {})
+        buyers.sort(key=lambda g: (g["last_bought"], g["value"]), reverse=True)
+        names = [g["name"] for g in buyers]
+        # Normally one customer. Several mean the criteria fit more than one (a
+        # name fragment matching two firms, a company buying from two accounts
+        # without a NIP) — and then the table sums them all, so nothing here may
+        # put ONE of those names in front of the total as if it were theirs.
+        who = ", ".join(names[:3])
+        if len(names) > 3:
+            who += f" i {len(names) - 3} więcej"
+        total_orders = len(matched)
+        total_spent = sum(o.total_price for o in matched)
+        currency = matched[0].currency
+
+        if not products:
+            # Orders without line items: Allegro can return a checkout form
+            # whose items it did not send. There is no product summary to give,
+            # and inventing "0 szt." would be a different claim from "I don't
+            # know what was in them".
+            return (
+                f"**{who}** ma w okresie {period_label} **{total_orders}** "
+                f"{self._plural_pl(total_orders, 'zamówienie', 'zamówienia', 'zamówień')} "
+                f"na **{self._format_price(total_spent, currency)}**, ale Allegro nie podało "
+                "przy nich pozycji, więc nie mam z czego zestawić produktów."
+            )
+
+        shown = products[: self._BUYER_PRODUCTS_TABLE_CAP]
+        rows = [
+            [
+                product["name"],
+                product["units"],
+                self._format_price(product["value"], product["currency"]),
+                len(product["order_ids"]),
+                self._format_dt_pl(product["last_bought"])[:10],
+            ]
+            for product in shown
+        ]
+        total_units = sum(p["units"] for p in products)
+        total_value = sum(p["value"] for p in products)
+        # Last line on purpose — for a "table" reply this sentence IS the chat
+        # bubble (web/js/app.js _tablePreview takes the text after the last
+        # table row), so it has to carry the answer on its own: whose purchases,
+        # how much of them, over what period, and on what basis.
+        subject = (
+            f"**{who}**" if len(names) == 1
+            else f"**{len(names)} klientów** pasujących do: {criteria_label} ({who})"
+        )
+        summary = (
+            f"{subject} — **{total_orders}** "
+            f"{self._plural_pl(total_orders, 'zamówienie', 'zamówienia', 'zamówień')} "
+            f"na **{self._format_price(total_spent, currency)}** w okresie {period_label}. "
+            f"W zestawieniu **{len(products)}** "
+            f"{self._plural_pl(len(products), 'produkt', 'produkty', 'produktów')}, razem "
+            f"**{total_units} szt.** za **{self._format_price(total_value, currency)}** "
+            "(sama wartość towaru, bez dostawy)."
+        )
+        if len(shown) < len(products):
+            summary += f" W tabeli pokazano pierwszych {len(shown)}."
+        # The seller asked about ONE customer, so a match that covers several
+        # says so and says how to narrow it — the summed table is otherwise
+        # indistinguishable from one customer's.
+        if len(names) > 1:
+            summary += (
+                " Zestawienie obejmuje wszystkich — podaj NIP albo login Allegro, "
+                "jeśli chodziło o jednego z nich."
+            )
+        return "\n".join([
+            f"# Co kupował: {who}" if len(names) == 1 else f"# Co kupowali klienci: {who}",
+            "",
+            *self._md_table(
+                ["Produkt", "Sztuki", "Wartość", "Zamówienia", "Ostatni zakup"],
+                rows,
+                align="lrrrl",
+            ),
+            "",
+            summary,
+            "",
+            "_Opłacone zamówienia, anulowane pominięte, zwroty nieodjęte._",
+        ])
 
     @classmethod
     def _sorted_by_date_desc(cls, items: list[dict], date_of) -> list[dict]:
@@ -5471,6 +5678,9 @@ class AllegroAgent(BaseAgent):
 
         if tool_name == "find_buyer_by_contact":
             return await self._find_buyer_by_contact(tool_input)
+
+        if tool_name == "get_buyer_products":
+            return await self._buyer_products_report(tool_input)
 
         if tool_name == "get_orders_pending_invoice":
             # The stage scope ("faktury do wysłania w zamówieniach nie nowych")

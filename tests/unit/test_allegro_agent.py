@@ -2592,6 +2592,209 @@ class TestFindBuyerByContact:
         assert result.startswith("Podaj numer telefonu")
 
 
+class TestBuyerProductsReport:
+    """get_buyer_products answers "dla tego kupującego pokaż zestawienie, jakie
+    produkty kupował" — one row per PRODUCT for ONE named customer, which is
+    what the seller means by "zestawienie sprzedaży, a nie lista zamówień"
+    (see AllegroAgent._buyer_products_report)."""
+
+    @staticmethod
+    def _order(order_id, login, *, company="", nip="", first="", last="",
+               recipient="", items=(), paid_at="2026-03-04T10:00:00Z",
+               fulfillment="SENT"):
+        from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine
+
+        recipient_first, _, recipient_last = recipient.partition(" ")
+        line_items = [
+            AllegroOrderLine(offer_id=str(i), offer_name=name, quantity=qty, price=price)
+            for i, (name, qty, price) in enumerate(items, start=1)
+        ]
+        return AllegroOrder(
+            order_id=order_id,
+            buyer_login=login,
+            buyer_email=f"{login}@example.com",
+            status="READY_FOR_PROCESSING",
+            fulfillment_status=fulfillment,
+            # The order total is what the buyer PAID — the line items plus
+            # delivery — so it is deliberately more than the products sum.
+            total_price=sum(qty * price for _, qty, price in items) + 15.0,
+            currency="PLN",
+            created_at=paid_at,
+            paid_at=paid_at,
+            delivery={"address": {
+                "firstName": recipient_first, "lastName": recipient_last,
+            }} if recipient else {},
+            line_items=line_items,
+            invoice_required=bool(company or nip or first),
+            invoice_buyer=AllegroInvoiceBuyer(
+                required=bool(company or nip or first),
+                company_name=company,
+                vat_id=nip,
+                first_name=first,
+                last_name=last,
+            ),
+        )
+
+    def _agent_with(self, orders):
+        agent = _make_agent()
+        agent._allegro.get_all_paid_orders_in_period = AsyncMock(return_value=orders)
+        return agent
+
+    def _store(self):
+        return [
+            self._order("g1", "gadzet", company="P.P.H.U. Gadżet z Jajem. Monika Sornat",
+                        nip="7792445588", paid_at="2026-02-01T10:00:00Z",
+                        items=[("Włóczka YarnArt Jeans 50g", 10, 8.0),
+                               ("Kordonek Maxi 75g", 2, 12.0)]),
+            self._order("g2", "gadzet", company="P.P.H.U. Gadżet z Jajem. Monika Sornat",
+                        nip="7792445588", paid_at="2026-05-01T10:00:00Z",
+                        items=[("Włóczka YarnArt Jeans 50g", 5, 8.0)]),
+            # Somebody else's order, same yarn — must not reach this customer's
+            # zestawienie.
+            self._order("x1", "marek", first="Marek", last="Zieliński",
+                        paid_at="2026-04-01T10:00:00Z",
+                        items=[("Włóczka YarnArt Jeans 50g", 100, 8.0)]),
+        ]
+
+    @staticmethod
+    def _rows(result):
+        return [ln for ln in result.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+
+    @pytest.mark.asyncio
+    async def test_one_row_per_product_not_per_order(self):
+        """The whole point: the same yarn bought in two orders is ONE line with
+        the pieces added up, not two bullets for the seller to sum by hand."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("get_buyer_products", {"name": "Gadżet z Jajem"})
+
+        assert result.splitlines()[0] == "# Co kupował: P.P.H.U. Gadżet z Jajem. Monika Sornat"
+        assert self._rows(result) == [
+            "| Włóczka YarnArt Jeans 50g | 15 | 120,00 PLN | 2 | 01.05.2026 |",
+            "| Kordonek Maxi 75g | 2 | 24,00 PLN | 1 | 01.02.2026 |",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_is_last_and_separates_product_value_from_what_was_paid(self):
+        """For a "table" reply the text after the table IS the chat bubble
+        (web/js/app.js _tablePreview), and the two amounts are different
+        numbers: the order total includes delivery, the product sum does not."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("get_buyer_products", {"name": "Gadżet z Jajem"})
+        summary = [ln for ln in result.splitlines() if ln.startswith("**")][-1]
+
+        assert summary.startswith(
+            "**P.P.H.U. Gadżet z Jajem. Monika Sornat** — **2** zamówienia na **174,00 PLN**"
+        )
+        assert "W zestawieniu **2** produkty, razem **17 szt.** za **144,00 PLN**" in summary
+        assert "(sama wartość towaru, bez dostawy)." in summary
+        assert result.splitlines()[-1] == (
+            "_Opłacone zamówienia, anulowane pominięte, zwroty nieodjęte._"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_same_customer_is_found_by_login_and_by_nip(self):
+        agent = self._agent_with(self._store())
+
+        by_login = await agent._dispatch("get_buyer_products", {"buyer_login": "GADZET"})
+        by_nip = await agent._dispatch("get_buyer_products", {"nip": "779-244-55-88"})
+
+        assert self._rows(by_login) == self._rows(by_nip)
+        assert "| Włóczka YarnArt Jeans 50g | 15 |" in by_login
+
+    @pytest.mark.asyncio
+    async def test_cancelled_orders_are_not_goods_this_customer_took(self):
+        agent = self._agent_with([
+            *self._store(),
+            self._order("g3", "gadzet", company="P.P.H.U. Gadżet z Jajem. Monika Sornat",
+                        nip="7792445588", paid_at="2026-06-01T10:00:00Z",
+                        fulfillment="CANCELLED",
+                        items=[("Włóczka YarnArt Jeans 50g", 99, 8.0)]),
+        ])
+
+        result = await agent._dispatch("get_buyer_products", {"nip": "7792445588"})
+
+        assert "| Włóczka YarnArt Jeans 50g | 15 |" in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_customer_is_an_explicit_no_naming_the_period(self):
+        """"Brak produktów" would read as "this customer buys nothing" — the
+        answer has to say what it looked for and how far back."""
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("get_buyer_products", {"name": "Kawa i Spółka"})
+
+        assert result.startswith(
+            "**Nie znalazłem zakupów klienta, do którego pasuje nazwa „Kawa i Spółka”.**"
+        )
+        assert "Przeszukałem **3** zamówienia z okresu" in result
+
+    @pytest.mark.asyncio
+    async def test_searches_two_years_back_by_default(self):
+        import re
+
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("get_buyer_products", {"name": "Gadżet"})
+
+        date_from, date_to = re.search(
+            r"w okresie (\d{4}-\d{2}-\d{2}) – (\d{4}-\d{2}-\d{2})", result
+        ).groups()
+        months = (int(date_to[:4]) - int(date_from[:4])) * 12 + int(date_to[5:7]) - int(date_from[5:7])
+        assert months == 24
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_period_wins(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("get_buyer_products", {
+            "name": "Gadżet", "date_from_local": "2026-01-01", "date_to_local": "2026-06-30",
+        })
+
+        assert "w okresie 2026-01-01 – 2026-06-30" in result
+
+    @pytest.mark.asyncio
+    async def test_no_customer_at_all_asks_instead_of_summing_the_whole_shop(self):
+        agent = self._agent_with(self._store())
+
+        result = await agent._dispatch("get_buyer_products", {})
+
+        assert result.startswith("Podaj nazwę klienta")
+        agent._allegro.get_all_paid_orders_in_period.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_name_matching_two_customers_says_so(self):
+        """The table sums them together, so the sentence has to admit it —
+        the seller asked about one."""
+        agent = self._agent_with([
+            *self._store(),
+            self._order("b1", "biuro", company="Gadżet i Spółka", nip="1112223344",
+                        paid_at="2026-03-01T10:00:00Z", items=[("Kordonek Maxi 75g", 1, 12.0)]),
+        ])
+
+        result = await agent._dispatch("get_buyer_products", {"name": "Gadżet"})
+
+        assert result.splitlines()[0].startswith("# Co kupowali klienci: ")
+        # Neither name may stand in front of the total as if the whole table
+        # were that one customer's.
+        assert "**2 klientów** pasujących do: nazwa „Gadżet”" in result
+        assert "Zestawienie obejmuje wszystkich — podaj NIP albo login Allegro" in result
+
+    @pytest.mark.asyncio
+    async def test_orders_without_line_items_are_not_reported_as_zero(self):
+        """Allegro can return a checkout form without its items. "0 szt." would
+        be a different statement from "I don't know what was in them"."""
+        agent = self._agent_with([
+            self._order("g1", "gadzet", company="Gadżet z Jajem", nip="7792445588", items=[]),
+        ])
+
+        result = await agent._dispatch("get_buyer_products", {"nip": "7792445588"})
+
+        assert "nie podało przy nich pozycji" in result
+        assert "|" not in result
+
+
 class TestSalesSummaryMonthlyBreakdown:
     """A period longer than one calendar month gets a month-by-month section —
     "podsumuj sprzedaż z tego roku z podziałem na miesiące" is one call for the
