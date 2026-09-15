@@ -54,6 +54,17 @@ class TestAllegroTools:
         for name in expected:
             assert name in names, f"Expected tool '{name}' not found"
 
+    def test_order_listings_can_filter_by_order_value(self):
+        """A question naming an amount ("zamówienie na kwotę ponad 2000 zł")
+        has to have a parameter to land in — otherwise the amount is dropped
+        and the seller gets the whole unfiltered list (seen in production)."""
+        by_name = {t["function"]["name"]: t for t in self.tools}
+        for name in ("get_orders", "get_orders_delivery"):
+            props = by_name[name]["function"]["parameters"]["properties"]
+            assert "min_value" in props, f"{name} cannot filter by order value"
+            assert "max_value" in props, f"{name} cannot filter by order value"
+            assert props["min_value"]["type"] == "number"
+
     def test_names_are_unique(self):
         names = [t["function"]["name"] for t in self.tools]
         assert len(names) == len(set(names)), "Duplicate tool names found"
@@ -184,6 +195,22 @@ class TestNamedBuyerLogin:
         put a made-up login into a tool call."""
         from agents.allegro.allegro_tools import named_buyer_login
         assert named_buyer_login(query) is None
+
+    @pytest.mark.parametrize("query", [
+        "Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż zestawienie",
+        'co kupował kupujący "F.H.U. Kowalski i Syn"',
+    ])
+    def test_a_quoted_multi_word_name_is_not_a_login(self, query):
+        """Read token by token, „P.P.H.U. is exactly the shape a login has — a
+        separator, no spaces. The opening quote with no closing one in the same
+        token is what gives the name away; reading it as a login would send the
+        question to get_orders with an invented account."""
+        from agents.allegro.allegro_tools import named_buyer_login
+        assert named_buyer_login(query) is None
+
+    def test_a_quoted_login_is_still_a_login(self):
+        from agents.allegro.allegro_tools import named_buyer_login
+        assert named_buyer_login("czy z konta „np1988” coś kupiono?") == "np1988"
 
     def test_a_named_account_makes_it_an_order_question(self):
         from agents.allegro.allegro_tools import matched_labels
@@ -352,6 +379,12 @@ class TestLabelPhraseCoverage:
         ("pokaż listę zamówień z tego miesiąca", "get_orders"),
         ("jaki jest status tego zamówienia", "get_order_details"),
         ("jakie kurierzy w zamówieniach do wysyłki", "get_orders_delivery"),
+        # Delivery costs: one order is get_order_details (it has the order_id
+        # filter and reports both sides of the cost), many orders are the
+        # courier listing — both have to survive the label filter.
+        ("ile kosztowała dostawa tego zamówienia", "get_order_details"),
+        ("czy dostawa była darmowa", "get_order_details"),
+        ("ile kosztowały dostawy w zamówieniach do wysłania", "get_orders_delivery"),
         ("pokaż moje oferty", "get_active_offers"),
         ("podsumowanie moich ofert", "get_offers_summary"),
         ("oferty z niskim stanem magazynowym", "query_offers_by_stock"),
@@ -371,7 +404,19 @@ class TestLabelPhraseCoverage:
         ("ilu miałem kupujących w tym roku", "get_buyers"),
         ("czy mam klienta z takim nr telefonu +48 880 197 834", "find_buyer_by_contact"),
         ("czy kupował ode mnie ktoś z adresu jan@example.com", "find_buyer_by_contact"),
+        ("dla tego kupującego „Kawa i Spółka” pokaż jakie produkty kupował",
+         "get_buyer_products"),
+        # "klient" is not a kupujacy stem and "zestawienie sprzedaży" matches
+        # only "finanse" — named_buyer_purchases is what keeps this reachable.
+        ("zestawienie sprzedaży dla klienta „Kawa i Spółka”", "get_buyer_products"),
+        ("co kupuje firma „Biuro Serwis”", "get_buyer_products"),
         ("jakie zamówienia czekają na fakturę", "get_orders_pending_invoice"),
+        # "Faktury do wysłania" is the invoice listing, not the shipping one —
+        # and the stage that scopes it keeps the order tools as candidates too,
+        # which is fine: the label filter only has to leave the right tool
+        # reachable.
+        ("jakie mam faktury do wysłania w zamówieniach nie nowych",
+         "get_orders_pending_invoice"),
         ("dane do faktury dla tego zamówienia", "get_order_invoice_data"),
         ("wystaw brakujące faktury za ten miesiąc", "preview_pending_invoices"),
         ("wystaw fakturę dla tego zamówienia", "issue_invoice_for_order"),
@@ -401,3 +446,144 @@ class TestLabelPhraseCoverage:
         assert tools is not None, f"No label matched for: {query!r}"
         names = {t["function"]["name"] for t in tools}
         assert tool_name in names, f"{tool_name!r} missing for query {query!r} (got {sorted(names)})"
+
+
+class TestMatchProductTerm:
+    """Matching a model the seller named against real offer titles. The
+    production failure this exists for: "ile sztuk sprzedanych dla włóczek
+    jeans i jeans plus" — two different yarns whose titles share a word."""
+
+    TITLES = [
+        "Włóczka Jeans 100g kolor 05",
+        "Włóczka Jeans Plus 100g kolor 12",
+        "Włóczka Merino 50g",
+    ]
+
+    def test_more_specific_term_wins(self):
+        """The whole point: a Jeans Plus sale belongs to "jeans plus", not to
+        "jeans" — otherwise the longer model's units get counted twice, or
+        folded into the shorter one."""
+        from agents.allegro.allegro_tools import match_product_term
+        terms = ["jeans", "jeans plus"]
+        assert match_product_term("Włóczka Jeans 100g kolor 05", terms) == "jeans"
+        assert match_product_term("Włóczka Jeans Plus 100g kolor 12", terms) == "jeans plus"
+
+    def test_term_order_does_not_matter(self):
+        from agents.allegro.allegro_tools import match_product_term
+        title = "Włóczka Jeans Plus 100g"
+        assert match_product_term(title, ["jeans", "jeans plus"]) == "jeans plus"
+        assert match_product_term(title, ["jeans plus", "jeans"]) == "jeans plus"
+
+    def test_matches_whole_words_only(self):
+        """"jeans" must not match inside another word — otherwise a yarn query
+        picks up jeans trousers."""
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Spodnie jeansowe męskie", ["jeans"]) is None
+        assert match_product_term("Włóczka Merino 50g", ["jeans"]) is None
+
+    def test_plus_sign_reads_as_the_word(self):
+        """Sellers write the same model both ways."""
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Włóczka Jeans+ 50g", ["jeans", "jeans plus"]) == "jeans plus"
+
+    def test_case_and_diacritics_are_ignored(self):
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("JEANS PLUS włóczka", ["Jeans Plus"]) == "Jeans Plus"
+        assert match_product_term("Włóczka Bawełniana", ["bawelniana"]) == "bawelniana"
+
+    def test_multi_word_term_must_be_consecutive(self):
+        """"jeans plus" is one model name, not two words that happen to both
+        appear somewhere in the title."""
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Włóczka Jeans 100g plus gratis", ["jeans plus"]) is None
+
+    def test_term_matching_nothing_returns_none(self):
+        from agents.allegro.allegro_tools import match_product_term
+        assert match_product_term("Włóczka Merino 50g", ["jeans", "jeans plus"]) is None
+
+
+class TestProductFilterTerms:
+    """Preparing the seller's own wording for matching. The question is asked
+    as "zamówienie z włóczką yarnart jeans", the title may read "YarnArt Jeans
+    50g bawełna" — and match_product_term compares consecutive tokens, so the
+    category word the seller put in front has to go."""
+
+    def test_leading_category_word_is_dropped(self):
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["włóczka yarnart jeans"]) == ["yarnart jeans"]
+        assert product_filter_terms(["włóczkę jeans plus"]) == ["jeans plus"]
+        assert product_filter_terms(["przędza merino"]) == ["merino"]
+
+    def test_a_category_word_that_is_the_whole_term_is_kept(self):
+        """"ile zamówień z włóczką" names no model — an empty term would match
+        every offer in the store instead of nothing."""
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["włóczka"]) == ["wloczka"]
+
+    def test_a_category_word_elsewhere_in_the_term_stays(self):
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["jeans włóczka"]) == ["jeans wloczka"]
+
+    def test_blank_entries_are_dropped(self):
+        from agents.allegro.allegro_tools import product_filter_terms
+        assert product_filter_terms(["", "   ", "jeans"]) == ["jeans"]
+
+
+class TestRenderSoldQuantities:
+    """Grouping rules for the answer — see _render_sold_quantities."""
+
+    @staticmethod
+    def _orders(*per_order):
+        from types import SimpleNamespace as NS
+        return [
+            NS(line_items=[NS(offer_name=n, quantity=q) for n, q in items])
+            for items in per_order
+        ]
+
+    def test_two_models_are_never_summed_together(self):
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3), ("Włóczka Jeans Plus 100g", 2)],
+                         [("Włóczka Jeans 100g", 5)]),
+            ["jeans", "jeans plus"], "2026-06-01 – 2026-09-01",
+        )
+        assert "„jeans” — 8 szt." in out
+        assert "„jeans plus” — 2 szt." in out
+
+    def test_several_titles_under_one_term_are_broken_down(self):
+        """One term matching two different titles is exactly the case the tool
+        cannot resolve — so it shows both instead of merging them."""
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3), ("Włóczka Jeans 50g", 4)]),
+            ["jeans"], "2026-06-01 – 2026-09-01",
+        )
+        assert "„jeans” — 7 szt." in out
+        assert "Włóczka Jeans 100g — 3 szt." in out
+        assert "Włóczka Jeans 50g — 4 szt." in out
+
+    def test_a_term_that_sold_nothing_is_reported_not_dropped(self):
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3)]),
+            ["jeans", "kaszmir"], "2026-06-01 – 2026-09-01",
+        )
+        assert "Brak sprzedaży dla: „kaszmir”." in out
+
+    def test_no_names_ranks_every_product_by_units(self):
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Merino 50g", 7), ("Włóczka Jeans 100g", 3)]),
+            [], "2026-06-01 – 2026-09-01",
+        )
+        assert out.index("Merino") < out.index("Jeans")
+        assert "**Razem: 10 szt.**" in out
+
+    def test_counting_basis_is_always_stated(self):
+        """Both choices change the number, so a seller reconciling it against
+        their own records has to be told which one they are looking at."""
+        from agents.allegro.allegro_agent import AllegroAgent
+        out = AllegroAgent._render_sold_quantities(
+            self._orders([("Włóczka Jeans 100g", 3)]), ["jeans"], "2026-06-01 – 2026-09-01",
+        )
+        assert "anulowane pominięte, zwroty nieodjęte" in out

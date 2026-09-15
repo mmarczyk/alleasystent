@@ -357,6 +357,79 @@ class TestNamedBuyerAccountGuard:
         assert [c.args[0] for c in agent._execute_tool.await_args_list] == ["get_buyers", "get_orders"]
 
 
+class TestBuyerProductSummary:
+    """"Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi
+    zestawienie, jakie produkty kupował" — the customer is named, not
+    logged-in, and the answer wanted is a per-product zestawienie rather than
+    a list of orders."""
+
+    _QUERY = (
+        "Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi "
+        "zestawienie jakie produkty kupował"
+    )
+
+    @pytest.mark.asyncio
+    async def test_resolves_without_an_llm_call_and_hands_the_table_back(self):
+        table = "# Co kupował: P.P.H.U. Gadżet z Jajem. Monika Sornat\n\n| Produkt | ... |"
+        agent = _agent({"get_buyer_products": table})
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match")
+        )
+
+        response = await agent.run(self._QUERY)
+
+        agent._execute_tool.assert_awaited_once_with(
+            "get_buyer_products", {"name": "P.P.H.U. Gadżet z Jajem. Monika Sornat"},
+        )
+        assert response.text == table
+        assert response.metadata["output_format"] == "table"
+
+    @pytest.mark.asyncio
+    async def test_a_dotted_company_name_is_not_taken_for_a_buyer_login(self):
+        """„P.P.H.U. reads token by token exactly like a login — and a login
+        the chosen tool cannot filter by is what makes run() stop and ask
+        instead of answering. The quotes are what tell the two apart."""
+        agent = _agent({"get_buyer_products": "# Co kupował: P.P.H.U. Gadżet z Jajem"})
+
+        response = await agent.run(self._QUERY)
+
+        assert response.text.startswith("# Co kupował:")
+
+    @pytest.mark.asyncio
+    async def test_a_narrowing_it_cannot_apply_asks_instead_of_widening(self):
+        """It narrows by BUYER and by nothing else — an amount (or a product)
+        named next to the customer has nowhere to go, and the full zestawienie
+        would read as the answer to the narrower question."""
+        agent = _agent({"get_buyer_products": "# Co kupował: Kawa i Spółka"})
+
+        response = await agent.run("co kupował klient „Kawa i Spółka” za ponad 500 zł")
+
+        assert "nie mam na to filtra" in response.text
+        assert response.text.endswith("Pokazać całe zestawienie zakupów tego klienta?")
+        assert agent._execute_tool.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_period_hands_the_question_to_the_llm_with_the_tool_on_the_table(self):
+        """This layer has no clock, so "w tym roku" is the LLM's to resolve —
+        but the tool that answers the question has to be among the schemas it
+        is offered."""
+        agent = _agent({"get_buyer_products": "# Co kupował: Kawa i Spółka"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyer_products", {
+                "name": "Kawa i Spółka",
+                "date_from_local": "2026-01-01",
+                "date_to_local": "2026-09-14",
+            })]),
+            _resp(),
+        ])
+
+        response = await agent.run("co kupował w tym roku klient „Kawa i Spółka”")
+
+        sent_tools = agent._client.chat.completions.create.call_args_list[0].kwargs["tools"]
+        assert "get_buyer_products" in {t["function"]["name"] for t in sent_tools}
+        assert response.text == "# Co kupował: Kawa i Spółka"
+
+
 class TestFormatInstruction:
     """Every tool's dispatch renders the finished view (table, document,
     dashboard, bullet list) in Python — see _RENDERED_VIEW_TOOLS. So when the
@@ -426,6 +499,328 @@ class TestFormatInstruction:
         assert "TWO-STEP LOOKUPS" not in last_system["content"]
         assert "BILLING ENTRIES — CRITICAL" in last_system["content"]
         assert len(last_system["content"]) < len(first_system["content"]) / 2
+
+
+class TestBuyerScopeReachesTheTool:
+    """What a buyer question narrows and orders by is put back onto get_buyers
+    in Python — see AllegroAgent._with_buyer_scope. Dropping it is invisible in
+    exactly the same way a dropped amount is: "lista kupujących … tylko ci,
+    którzy zrobili więcej niż 3 zamówienia" came back as all 884 customers of
+    the period."""
+
+    @pytest.mark.asyncio
+    async def test_the_production_question_reaches_the_tool_with_the_count(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {
+                "date_from_local": "2026-06-14", "date_to_local": "2026-09-14",
+            })]),
+            _resp(),
+        ])
+
+        await agent.run(
+            "Podaj mi listę kupujących z ostatnich 3 miesięcy, uwzględnij tylko tych "
+            "którzy zrobili więcej niż 3 zamówienia"
+        )
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {
+            "date_from_local": "2026-06-14", "date_to_local": "2026-09-14", "min_orders": 4,
+        })
+
+    @pytest.mark.asyncio
+    async def test_a_count_the_model_passed_itself_is_left_alone(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {"min_orders": 4})]),
+            _resp(),
+        ])
+
+        await agent.run("lista kupujących co najmniej 2 zamówienia")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {"min_orders": 4})
+
+    @pytest.mark.asyncio
+    async def test_a_buyer_question_with_no_count_changes_nothing(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("pokaż listę kupujących z ostatnich 3 miesięcy")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {})
+
+    @pytest.mark.asyncio
+    async def test_biggest_orders_question_sorts_by_the_average_order(self):
+        """Left to the default, this answers in total-spend order — whoever
+        placed forty small orders, not whoever places big ones."""
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("Którzy klienci robią największe zamówienia?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {"sort_by": "avg_value"})
+
+    @pytest.mark.asyncio
+    async def test_company_and_invoice_questions_keep_their_filters(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("Którzy klienci firmowi zamawiają u mnie z fakturą?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {
+            "buyer_type": "company", "invoice_status": "requested",
+        })
+
+    @pytest.mark.asyncio
+    async def test_the_model_own_arguments_win_argument_by_argument(self):
+        """Only ever adds: the model reading the invoice state for itself is not
+        second-guessed, and the filter it left out is still filled in."""
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {"invoice_status": "issued"})]),
+            _resp(),
+        ])
+
+        await agent.run("Które firmy zamawiają u mnie z fakturą?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {
+            "invoice_status": "issued", "buyer_type": "company",
+        })
+
+    @pytest.mark.asyncio
+    async def test_the_amount_a_customer_spent_reaches_the_tool(self):
+        agent = _agent({"get_buyers": "# Kupujący"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_buyers", {})]),
+            _resp(),
+        ])
+
+        await agent.run("Którzy klienci wydali u mnie w tym roku powyżej 5000 zł?")
+
+        agent._execute_tool.assert_awaited_once_with("get_buyers", {"min_value": 5000.0})
+
+    @pytest.mark.asyncio
+    async def test_other_tools_are_untouched(self):
+        """An order listing counts ORDERS, not orders per buyer — "więcej niż 3
+        zamówienia" there is about the answer's length, not its rows."""
+        agent = _agent({"get_orders": "**Zamówienie** `x`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {})]),
+            _resp(),
+        ])
+
+        await agent.run("pokaż więcej niż 3 zamówienia")
+
+        agent._execute_tool.assert_awaited_once_with("get_orders", {})
+
+
+class TestValueBoundsReachTheTool:
+    """The amount the seller stated is put back onto the listing call in
+    Python, whichever layer chose it — see AllegroAgent._with_value_bounds.
+    A dropped amount is invisible: the listing comes back full and reads like
+    an answer, which is how "dostawa zamówienia na kwotę ponad 2000 zł" turned
+    into 100 unrelated orders grouped by courier."""
+
+    @pytest.mark.asyncio
+    async def test_the_llm_path_gets_the_amount_the_model_omitted(self):
+        agent = _agent({"get_orders": "**Zamówienie** `big`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {"include_delivery": True})]),
+            _resp(),
+        ])
+
+        await agent.run(
+            "Ile kosztowała dostawa zamówienia z ostatnich dni które było na kwotę ponad 2000zl"
+        )
+
+        agent._execute_tool.assert_awaited_once_with(
+            "get_orders", {"include_delivery": True, "min_value": 2000.0}
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_deterministic_path_gets_it_too(self):
+        """The stage matchers resolve "ile mam nowych zamówień" without an LLM
+        at all, so an amount in the same sentence had nothing to catch it."""
+        agent = _agent({"get_new_orders": "Masz **1** nowe zamówienie."})
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match")
+        )
+
+        await agent.run("ile mam nowych zamówień powyżej 500 zł")
+
+        agent._execute_tool.assert_awaited_once_with(
+            "get_new_orders", {"count_only": True, "min_value": 500.0}
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_bound_the_model_passed_itself_is_left_alone(self):
+        """Only ever adds — the model reading "ponad 2 tysiące" as 2000 must
+        not be second-guessed by a regex that read nothing."""
+        agent = _agent({"get_orders": "**Zamówienie** `big`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {"min_value": 2000})]),
+            _resp(),
+        ])
+
+        await agent.run("zamówienia powyżej 500 zł")
+
+        agent._execute_tool.assert_awaited_once_with("get_orders", {"min_value": 2000})
+
+    @pytest.mark.asyncio
+    async def test_a_query_with_no_amount_changes_nothing(self):
+        agent = _agent({"get_orders": "**Zamówienie** `x`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_orders", {})]),
+            _resp(),
+        ])
+
+        await agent.run("pokaż wszystkie zamówienia")
+
+        agent._execute_tool.assert_awaited_once_with("get_orders", {})
+
+    @pytest.mark.asyncio
+    async def test_tools_that_are_not_order_listings_are_untouched(self):
+        """calculate_order_profit's own number is a per-unit purchase cost —
+        an order-value filter has no meaning there and no business appearing
+        in its arguments."""
+        agent = _agent({"calculate_order_profit": "- Zysk: 100,00 PLN"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call(
+                "c1", "calculate_order_profit", {"order_id": "abc", "unit_cost": 8.1}
+            )]),
+            _resp(),
+        ])
+
+        await agent.run("dla tego zamówienia policz zysk przy koszcie 8,10 zł za sztukę")
+
+        agent._execute_tool.assert_awaited_once_with(
+            "calculate_order_profit", {"order_id": "abc", "unit_cost": 8.1}
+        )
+
+
+class TestOrderDetailsLeadIn:
+    """A details block answers a question the seller asked in their own words
+    ("ile kosztowała dostawa?"), but on its own it opens with an order id and
+    leaves them to search twenty lines for the answer. So one generated
+    sentence goes in front of it — generated, because a fixed "poniżej
+    szczegóły zamówienia" says the same thing whatever was asked, which is
+    exactly what makes it read as boilerplate. The block underneath stays the
+    Python-rendered one; see _LEAD_IN_TOOLS.
+    """
+
+    def _details_agent(self, block="- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"):
+        agent = _agent({"get_order_details": block})
+        agent._allegro.get_orders = AsyncMock(return_value=[MagicMock(order_id="abc-123")])
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_sentence_goes_in_front_and_the_block_is_untouched(self):
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_resp("Koszt dostawy masz w sekcji Dostawa poniżej.")
+        )
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text == (
+            "Koszt dostawy masz w sekcji Dostawa poniżej.\n\n"
+            "- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_question_and_the_data_are_both_in_the_prompt(self):
+        """What keeps the sentence from sounding detached: it is written with
+        the actual question and the actual block in front of the model, not
+        from the tool name alone."""
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(return_value=_resp("Poniżej dane."))
+
+        await agent.run(
+            "szczegóły ostatniego nowego zamówienia",
+            conversation_history=[{"role": "user", "content": "a ile kosztowała dostawa?"}],
+        )
+
+        sent = json.dumps(
+            agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False
+        )
+        assert "szczegóły ostatniego nowego zamówienia" in sent
+        assert "137,70 PLN" in sent
+        assert "a ile kosztowała dostawa?" in sent
+
+    @pytest.mark.asyncio
+    async def test_a_sentence_stating_a_number_the_data_does_not_have_is_dropped(self):
+        """The figures are rendered in Python precisely so no model touches
+        them — an opener claiming a different amount would undo that in the
+        first line the seller reads."""
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_resp("Dostawa kosztowała 19,99 PLN — szczegóły poniżej.")
+        )
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text == "- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"
+
+    @pytest.mark.asyncio
+    async def test_a_number_copied_from_the_data_is_kept(self):
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(
+            return_value=_resp("To zamówienie jest na 137,70 PLN — reszta poniżej.")
+        )
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text.startswith("To zamówienie jest na 137,70 PLN — reszta poniżej.\n\n")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_lead_in_call_still_answers(self):
+        agent = self._details_agent()
+        agent._client.chat.completions.create = AsyncMock(side_effect=RuntimeError("model down"))
+
+        response = await agent.run("szczegóły ostatniego nowego zamówienia")
+
+        assert response.text == "- Zamówienie: `abc-123`\n- Wartość: 137,70 PLN"
+
+    @pytest.mark.asyncio
+    async def test_other_passthrough_tools_get_no_lead_in_call(self):
+        """One tool asked for this, and every extra LLM call is latency in
+        front of an answer — the listings already read as answers."""
+        agent = _agent({"get_new_orders": "- Zamówienie: 1"})
+        agent._client.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("no LLM call expected — deterministic match + passthrough")
+        )
+
+        response = await agent.run("jakie mam nowe zamówienia")
+
+        assert response.text == "- Zamówienie: 1"
+        assert agent._client.chat.completions.create.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_english_turn_asks_the_interpret_call_for_the_same_sentence(self):
+        """The interpret path is otherwise told not to add an intro at all
+        (_RENDERED_VIEW_INSTRUCTION), so without the carve-out an English
+        question would get the bare block."""
+        agent = _agent({"get_order_details": "- Zamówienie: `x`"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_order_details", {"order_id": "x"})]),
+            _resp(),
+            _resp("Here are the details.\n\n- Zamówienie: `x`"),
+        ])
+
+        await agent.run("show me the details of order x")
+
+        sent = json.dumps(
+            agent._client.chat.completions.create.call_args.kwargs["messages"], ensure_ascii=False
+        )
+        assert "WYJĄTEK — WSTĘP" in sent
 
 
 class TestToolContextFilter:
@@ -521,7 +916,7 @@ class TestLatestOrderChain:
         agent = _agent({"get_order_details": "- Zamówienie: abc-123"})
         agent._allegro.get_orders = AsyncMock(return_value=[MagicMock(order_id="abc-123")])
         agent._client.chat.completions.create = AsyncMock(
-            side_effect=AssertionError("no LLM call expected — deterministic chain + passthrough")
+            return_value=_resp("Poniżej szczegóły ostatniego zamówienia.")
         )
 
         response = await agent.run("szczegóły ostatniego nowego zamówienia")
@@ -530,13 +925,15 @@ class TestLatestOrderChain:
             status="READY_FOR_PROCESSING", fulfillment_status="NEW", limit=1,
         )
         agent._execute_tool.assert_awaited_once_with("get_order_details", {"order_id": "abc-123"})
-        assert response.text == "- Zamówienie: abc-123"
+        assert response.text == (
+            "Poniżej szczegóły ostatniego zamówienia.\n\n- Zamówienie: abc-123"
+        )
         assert response.metadata["output_format"] == "chat"
-        # Zero LLM calls at all: the chain resolver skips tool-select, and
-        # get_order_details is now in _PASSTHROUGH_TOOLS (its dispatch
-        # already builds the final plain-text reply) so interpret is
-        # skipped too.
-        assert agent._client.chat.completions.create.call_count == 0
+        # The chain resolver skips tool-select and get_order_details is in
+        # _PASSTHROUGH_TOOLS (its dispatch already builds the final plain-text
+        # reply), so interpret is skipped too — the single LLM call left is the
+        # lead-in sentence in front of the block (see _LEAD_IN_TOOLS).
+        assert agent._client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
     async def test_falls_back_to_bare_new_orders_when_none_exist(self):
@@ -584,3 +981,123 @@ class TestLatestOrderChain:
         response = await agent.run("jakie mam nowe zamówienia")
 
         assert response.text == "- Zamówienie: 1"
+
+
+class TestAnActionReportsItself:
+    """The invoices reached the buyers and the company one reached KSeF — and
+    the seller was told there was no table data to copy.
+
+    Four attaches and a KSeF send land in ONE round, so the single-tool bypass
+    does not apply and the turn went to the interpret call carrying an
+    instruction about handing tables and ```chart blocks back unchanged. The
+    model answered that there was nothing to hand back, and every line saying
+    what had just happened was gone. Nothing could be undone by then; only the
+    reply was lost, which is the version of this bug that gets an invoice
+    issued twice."""
+
+    ATTACHED = "✅ Faktura FV/1/2026 dołączona do zamówienia `o1` w Allegro"
+    ATTACHED_2 = "✅ Faktura FV/2/2026 dołączona do zamówienia `o2` w Allegro"
+    FILED = "📤 Faktura `inv-1` wysłana do KSeF (status zgłoszenia: sent)."
+
+    @pytest.mark.asyncio
+    async def test_every_report_from_a_multi_tool_turn_reaches_the_seller(self):
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED,
+                        "send_invoice_to_ksef": self.FILED})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[
+                _tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"}),
+                _tool_call("c2", "send_invoice_to_ksef", {"invoice_uuid": "inv-1"}),
+            ]),
+            _resp(),
+            _resp("Nie ma żadnych danych do przepisania."),
+        ])
+
+        # A confirmation, not a spelled-out command: this is the shape that
+        # reaches the tool-select model and comes back as several calls in one
+        # round (a spelled-out one is resolved before the model — see
+        # deterministic_dispatch._match_deliver_invoices).
+        response = await agent.run("potwierdzam, zrób to")
+
+        assert self.ATTACHED in response.text
+        assert self.FILED in response.text
+        assert "do przepisania" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_the_interpret_call_never_runs_for_such_a_turn(self):
+        """Not "runs and is checked afterwards" — there is nothing to check it
+        against, and a model given these results can only lose them."""
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED})
+        create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"})]),
+            _resp(),
+        ])
+        agent._client.chat.completions.create = create
+
+        response = await agent.run("dołącz fakturę do zamówienia o1")
+
+        assert response.text == self.ATTACHED
+        assert create.await_count == 2  # tool-select rounds only, no interpret
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_is_a_report_too(self):
+        """"I did NOT file this one, the buyer is a private person" is exactly
+        as important to the seller as a confirmation, and just as easy for a
+        model to drop."""
+        refused = "🚫 Faktury `inv-2` nie wyślę do KSeF — nabywcą jest osoba prywatna."
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED,
+                        "send_invoice_to_ksef": refused})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[
+                _tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"}),
+                _tool_call("c2", "send_invoice_to_ksef", {"invoice_uuid": "inv-2"}),
+            ]),
+            _resp(),
+        ])
+
+        response = await agent.run("ok, zrób to")
+
+        assert refused in response.text
+
+    @pytest.mark.asyncio
+    async def test_an_english_turn_keeps_the_polish_report_rather_than_risk_it(self):
+        agent = _agent({"attach_invoice_to_allegro_order": self.ATTACHED})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "attach_invoice_to_allegro_order", {"order_id": "o1"})]),
+            _resp(),
+        ])
+
+        response = await agent.run("attach the invoice to order o1")
+
+        assert response.text == self.ATTACHED
+
+    @pytest.mark.asyncio
+    async def test_a_read_only_turn_is_untouched(self):
+        """The guard is scoped to tools whose effect leaves the app — a listing
+        still goes through the interpret call exactly as before."""
+        agent = _agent({"get_new_orders": "- Zamówienie: o1"})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_new_orders", {})]),
+            _resp(),
+            _resp("Masz jedno nowe zamówienie."),
+        ])
+
+        response = await agent.run("show me my new orders")
+
+        assert response.text == "Masz jedno nowe zamówienie."
+
+    @pytest.mark.asyncio
+    async def test_a_data_lookup_alongside_the_action_is_kept_too(self):
+        """A chain that reads first and acts second reports both — the reading
+        is what the seller needs to judge the action by."""
+        agent = _agent({"get_order_invoice_data": "NIP: 1234563218, Dekarstwo sp. z o.o.",
+                        "attach_invoice_to_allegro_order": self.ATTACHED})
+        agent._client.chat.completions.create = AsyncMock(side_effect=[
+            _resp(tool_calls=[_tool_call("c1", "get_order_invoice_data", {"order_id": "o1"})]),
+            _resp(tool_calls=[_tool_call("c2", "attach_invoice_to_allegro_order", {"order_id": "o1"})]),
+            _resp(),
+        ])
+
+        response = await agent.run("sprawdź dane i dołącz fakturę do zamówienia o1")
+
+        assert "Dekarstwo sp. z o.o." in response.text
+        assert self.ATTACHED in response.text

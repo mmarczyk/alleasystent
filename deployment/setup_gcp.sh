@@ -35,6 +35,49 @@ gcloud artifacts repositories create "$REPO_NAME" \
   --description="AlleAsystent Docker images" \
   --project="$PROJECT_ID" || echo "  (already exists)"
 
+# Cleanup policies. Without them the repository only ever grows: CI pushes a
+# new commit-SHA tag on every merge to main and nothing ever removes the old
+# ones, so storage is billed for every image ever built. Applied here (and not
+# left as a console chore) so a freshly provisioned project is bounded from
+# day one.
+#
+# Keep policies take precedence over Delete policies in Artifact Registry, so
+# keep-recent wins over delete-old and the currently deployed image is never
+# the one that gets collected.
+#
+# NOTE: deleting an image that a Cloud Run revision still references leaves
+# that revision unable to start, which breaks rollback to it. Prune stale
+# Cloud Run revisions before shortening these windows.
+echo "▶ Applying Artifact Registry cleanup policies..."
+CLEANUP_POLICY_FILE="$(mktemp)"
+cat > "$CLEANUP_POLICY_FILE" <<'EOF'
+[
+  {
+    "name": "delete-untagged",
+    "action": { "type": "Delete" },
+    "condition": { "tagState": "UNTAGGED", "olderThan": "7d" }
+  },
+  {
+    "name": "keep-recent-versions",
+    "action": { "type": "Keep" },
+    "mostRecentVersions": { "keepCount": 5 }
+  },
+  {
+    "name": "delete-old-versions",
+    "action": { "type": "Delete" },
+    "condition": { "tagState": "ANY", "olderThan": "30d" }
+  }
+]
+EOF
+# Add --dry-run to have the policies only log what they would delete (visible
+# in Cloud Logging) instead of deleting it — worth doing once on a repository
+# that has already accumulated versions, before letting them run for real.
+gcloud artifacts repositories set-cleanup-policies "$REPO_NAME" \
+  --location="$REGION" \
+  --project="$PROJECT_ID" \
+  --policy="$CLEANUP_POLICY_FILE"
+rm -f "$CLEANUP_POLICY_FILE"
+
 # ── Service Account ───────────────────────────────────────────────────────────
 echo "▶ Creating service account: $SA_NAME"
 gcloud iam service-accounts create "$SA_NAME" \

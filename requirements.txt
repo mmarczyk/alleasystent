@@ -12,12 +12,32 @@ openai>=1.0.0
 httpx>=0.24.0
 
 # ── RAG (local) ───────────────────────────────────────────────────────────────
+# torch pinned to the CPU-only build ON PURPOSE. Left to itself, pip resolves
+# sentence-transformers' `torch` dependency to the default PyPI wheel, which
+# drags in the whole NVIDIA CUDA stack (cudnn, cublas, cusparse, cusolver,
+# nccl, cufft, nvrtc, triton) — ~2.7 GB of libraries that can never run on
+# Cloud Run, since it has no GPU. That bloat is not just wasted bytes in the
+# image: it is what breaks Docker layer dedup in Artifact Registry. The
+# buildx layer cache (cache-to: type=gha in .github/workflows/deploy-*.yml)
+# lives under GitHub's 10 GB per-repo limit, so a >4.5 GB image evicts its own
+# cache; the next build re-runs pip, produces a byte-different tarball of
+# identical packages, and Artifact Registry stores another full copy forever.
+# On CPU-only wheels the image fits the cache, the dependency layer keeps a
+# stable digest, and a commit adds megabytes instead of gigabytes.
+#
+# Keep the version in sync when bumping sentence-transformers.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+
 chromadb==0.5.23
 sentence-transformers==3.3.1
 
 # ── GCP ───────────────────────────────────────────────────────────────────────
 google-cloud-pubsub==2.27.1
 google-cloud-secret-manager==2.21.1
+# Routing-corpus export (/admin/analytics/export?to_gcs=true). Imported lazily
+# so the endpoint's inline JSON still works without a bucket configured.
+google-cloud-storage==2.19.0
 # google-cloud-aiplatform==1.73.0  # Uncomment for Vertex AI RAG
 
 # ── Google Sign-In verification (analytics dashboard auth) ────────────────────

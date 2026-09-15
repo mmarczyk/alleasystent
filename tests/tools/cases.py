@@ -41,11 +41,11 @@ CASES: list[Case] = [
     Case("get_new_orders", "get_new_orders", {},
          "Jakie mam nowe zamówienia?",
          ("**Zamówienie**", "Wysyłka do", "po terminie", "Włącz automatyczne sprawdzanie"),
-         note="Trzy nowe zamówienia + blok statusu monitoringu (wyłączony)."),
+         note="Trzy nowe zamówienia + propozycja monitoringu (wyłączony)."),
     Case("get_new_orders__count", "get_new_orders", {"count_only": True},
          "Ile mam nowych zamówień?",
          ("Masz **3** nowe zamówienia.",), monitors={"order": True},
-         note="count_only — gotowe zdanie z liczbą; monitoring włączony, więc przycisk wyłączania."),
+         note="count_only — gotowe zdanie z liczbą; monitoring włączony, więc bez doklejanego bloku."),
     Case("get_new_orders__last", "get_new_orders", {"limit": 1},
          "Pokaż ostatnie nowe zamówienie",
          ("**Zamówienie**",),
@@ -87,10 +87,77 @@ CASES: list[Case] = [
          ("Brak zamówień od kupującego **np1988**",),
          note="Konto, które nic nie kupiło — jednoznaczne „nie”, a nie „brak zamówień "
               "spełniających kryteria”, które czyta się jak brak zamówień w ogóle."),
+    Case("get_orders__unsent", "get_orders",
+         {"exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"]},
+         "Pokaż zamówienia, które nie zostały wysłane",
+         (f"`{ds.ORD_1}`", f"`{ds.ORD_3}`", f"`{ds.ORD_4}`"),
+         note="Negacja etapu = wykluczenie: wszystko, co jeszcze nie wyszło — "
+              "zarówno spakowane, jak i nietknięte. ORD_6 (wysłane) wypada."),
+    Case("get_orders__unsent_over_400", "get_orders",
+         {"exclude_fulfillment_status": ["SENT", "IN_TRANSIT", "READY_FOR_PICKUP", "PICKED_UP"],
+          "min_value": 400},
+         "Pokaż mi zamówienie jeszcze nie wysłane o wartości powyżej 400 zł",
+         (f"`{ds.ORD_1}`", f"`{ds.ORD_2}`"),
+         note="Negacja + próg kwotowy w jednym pytaniu — dokładnie to zdanie "
+              "odpowiadało wcześniej listą zamówień JUŻ wysłanych, bez filtra kwoty."),
+    Case("get_orders__product", "get_orders",
+         {"product_names": ["jeans plus"], "limit": 50},
+         "Pokaż mi zamówienie, które miało włóczkę jeans plus",
+         (f"`{ds.ORD_YARN_1}`", "Produkty:", "Włóczka Jeans Plus 100g kolor 12 — 2 szt."),
+         note="Produkt jako filtr zamówień. Bez product_names to pytanie wracało całą "
+              "listą zamówień z okresu — włóczka ginęła po drodze, a lista czytała się "
+              "jak odpowiedź. Listing pokazuje teraz zawartość zamówienia, żeby "
+              "sprzedawca mógł ją sprawdzić."),
+    Case("get_orders__product_only", "get_orders",
+         {"product_names": ["jeans plus"], "product_match": "only", "limit": 50},
+         "Pokaż mi zamówienie, które miało tylko włóczkę jeans plus",
+         ("Brak zamówień zawierających wyłącznie **jeans plus**",),
+         note="„Tylko” to inne pytanie niż „z” — ORD_YARN_1 ma jeans plus, ale obok "
+              "zwykłego jeansu, a jedyne czyste zamówienie na jeans plus jest "
+              "anulowane. Puste zdanie powtarza „wyłącznie”, inaczej czyta się jak "
+              "„nie sprzedałeś tej włóczki”."),
+    Case("get_orders__value_range", "get_orders", {"min_value": 100, "max_value": 300},
+         "Pokaż zamówienia od 100 do 300 zł",
+         (f"`{ds.ORD_3}`", f"`{ds.ORD_4}`"),
+         note="Widełki kwotowe; 74,98 i 429,98 zł wypadają."),
     Case("get_order_details", "get_order_details", {"order_id": ds.ORD_1},
          f"Szczegóły zamówienia {ds.ORD_1}",
-         ("- Zamówienie:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),
+         ("**Zamówienie**", "- Ilość:", "- Produkty:", "- Rozliczenie:", "Zysk netto:"),
          note="Zamówienie + wpisy rozliczeniowe + status faktury w jednym."),
+    Case("get_orders__min_value_delivery", "get_orders",
+         {"min_value": 200, "include_delivery": True, "limit": 50},
+         "Ile kosztowała dostawa zamówienia na kwotę ponad 200 zł?",
+         ("**Zamówienie**", "- Koszt dostawy: ", "Koszt dostawy zapłacony przez kupujących:"),
+         note="Kwota zamówienia jako filtr (min_value) + koszty dostawy w jednym wywołaniu. "
+              "Bez min_value pytanie o „zamówienie na kwotę ponad X” wracało pełną, "
+              "nieprzefiltrowaną listą — kwota ginęła po drodze."),
+    Case("get_orders__min_value_none", "get_orders",
+         {"min_value": 100000, "limit": 50},
+         "Czy miałem zamówienie na kwotę ponad 100 000 zł?",
+         ("Brak zamówień o wartości powyżej 100000,00 PLN",),
+         note="Puste zdanie nazywa kwotę, po której filtrowało — inaczej czyta się "
+              "jak „nie masz żadnych zamówień”."),
+    Case("get_sold_quantities__two_models", "get_sold_quantities",
+         {"names": ["jeans", "jeans plus"],
+          "date_from_local": _MONTH_START, "date_to_local": _TODAY_ISO},
+         "W ciągu ostatnich 3 miesięcy podaj mi ilość sztuk sprzedanych dla włóczek jeans i jeans plus",
+         ("„jeans” — 8 szt.", "„jeans plus” — 2 szt.", "zwroty nieodjęte"),
+         note="Produkcyjny błąd: to pytanie wracało listą zamówień. Dwa modele dzielą "
+              "słowo w tytule, więc dopasowanie po podciągu zlewa je w jedno — "
+              "'jeans plus' musi zabrać swoje sztuki 'jeansowi', a nie dołożyć się "
+              "do niego. 10 szt. z zamówienia anulowanego nie liczy się wcale."),
+    Case("get_sold_quantities__no_names", "get_sold_quantities",
+         {"date_from_local": _MONTH_START, "date_to_local": _TODAY_ISO},
+         "Ile sztuk sprzedałem w tym miesiącu?",
+         ("Sprzedane sztuki", "Razem:"),
+         note="Bez nazw — ranking wszystkich produktów po ilości sztuk."),
+    Case("get_order_details__delivery_cost", "get_order_details", {"order_id": ds.ORD_3},
+         "Ile kosztowała dostawa w tym zamówieniu?",
+         ("- Koszt dostawy zapłacony przez kupującego: 12,99 PLN",
+          "- Opłaty Allegro za wysyłkę (Twój koszt): -11,99 PLN",
+          "- Bilans dostawy: +1,00 PLN"),
+         note="Koszty dostawy z obu stron: ile zapłacił kupujący (jest już wliczone "
+              "w wartość zamówienia) i ile Allegro policzyło sprzedawcy za przesyłkę."),
     Case("calculate_order_profit", "calculate_order_profit",
          {"order_id": ds.ORD_1, "unit_cost": 8.1},
          "Dla tego zamówienia policz zysk zakładając koszt 1 szt. na poziomie 8,10 zł",
@@ -244,6 +311,19 @@ CASES: list[Case] = [
          ("Biuro Serwis Paweł B.", "5252445566", "Faktury VAT",
           "(firmy, z wystawioną fakturą VAT)"),
          note="Firmy z realnie wystawioną fakturą — kolumna z liczbą faktur włączona."),
+    Case("get_buyers__requested_invoices", "get_buyers",
+         {"invoice_status": "requested", "sort_by": "avg_value"},
+         "Którzy klienci zamawiają u mnie z fakturą?",
+         ("(z prośbą o fakturę VAT)", "Marek Zieliński", "Faktury VAT"),
+         note="Kupujący, którzy poprosili o fakturę VAT — także osoby prywatne, bo o "
+              "fakturę prosi się niezależnie od firmy. Kolumna z liczbą faktur pokazuje, "
+              "komu już ją wystawiono."),
+    Case("get_buyers__biggest_orders", "get_buyers", {"sort_by": "avg_value"},
+         "Którzy klienci robią największe zamówienia?",
+         ("# Kupujący", "Śr. wartość", "Śr. szt."),
+         note="Pytanie o wielkość JEDNEGO zamówienia, nie o sumę wydatków — sortowanie "
+              "po średniej wartości zamówienia, żeby ktoś z czterdziestoma drobnymi "
+              "zamówieniami nie wypchnął hurtownika z góry listy."),
     Case("get_buyers__count", "get_buyers", {"buyer_type": "company", "count_only": True},
          "Ilu miałem w tym roku klientów-firm?",
          ("Miałeś **2** kupujących (firmy)",),
@@ -276,12 +356,39 @@ CASES: list[Case] = [
          "Czy mam w bazie klienta o NIP 779-244-55-88?",
          ("**Tak —", "Kawa i Spółka", "- NIP: 7792445588"),
          note="Ta sama wyszukiwarka po NIP-ie — myślniki ignorowane."),
+    Case("get_buyer_products", "get_buyer_products", {"name": "Kawa i Spółka"},
+         "Dla tego kupującego „Kawa i Spółka” pokaż mi zestawienie, jakie produkty kupował",
+         ("# Co kupował: Kawa i Spółka sp. z o.o.", "| Produkt | Sztuki | Wartość |",
+          "Ekspres do kawy DeLonghi Magnifica S ECAM", "W zestawieniu",
+          "sama wartość towaru, bez dostawy"),
+         note="Zestawienie sprzedaży dla JEDNEGO klienta — wiersz na produkt, nie na "
+              "zamówienie. Kwota z wiersza to wartość samego towaru; suma z zamówień "
+              "obejmuje jeszcze dostawę, dlatego obie są w podsumowaniu osobno."),
+    Case("get_buyer_products__unknown", "get_buyer_products", {"name": "Hurtownia Bez Zamówień"},
+         "Co kupował klient „Hurtownia Bez Zamówień”?",
+         ("**Nie znalazłem zakupów klienta", "nazwa „Hurtownia Bez Zamówień”",
+          "Przeszukałem"),
+         note="Klient spoza bazy — jednoznaczne „nie” z nazwą szukanej danej i okresem, "
+              "który sprawdzono, zamiast pustej tabeli."),
 
     # ── Faktury ──────────────────────────────────────────────────────────────
     Case("get_orders_pending_invoice", "get_orders_pending_invoice", {},
          "Do których zamówień muszę wystawić fakturę?",
          ("Zamówień bez faktury", "Faktura: niewystawiona", "NIP"),
          note="Zamówienia z prośbą o fakturę + dane nabywcy."),
+    Case("get_orders_pending_invoice__new_orders", "get_orders_pending_invoice",
+         {"fulfillment_status": ["NEW"]},
+         "Jakie mam faktury do wysłania w nowych zamówieniach?",
+         ("Zamówień bez faktury w statusie nowe: 2", "Faktura: niewystawiona"),
+         note="Ta sama lista zawężona do jednego etapu zamówień — nagłówek nazywa "
+              "zawężenie, żeby liczba nie czytała się jako całość miesiąca."),
+    Case("get_orders_pending_invoice__not_new", "get_orders_pending_invoice",
+         {"exclude_fulfillment_status": ["NEW"]},
+         "Jakie mam faktury do wysłania w zamówieniach nie nowych?",
+         ("Brak zamówień wymagających wystawienia faktury w innym statusie niż nowe.",),
+         note="Negacja etapu jako wykluczenie. Pusta odpowiedź powtarza zawężenie — "
+              "bez tego brzmiałaby jak „nie masz żadnych zaległych faktur”, a to co "
+              "innego niż „nie masz ich poza nowymi zamówieniami”."),
     Case("get_order_invoice_data", "get_order_invoice_data", {"order_id": ds.ORD_1},
          f"Jakie są dane do faktury dla zamówienia {ds.ORD_1}?",
          ("Dane do faktury", "NIP", "Kod pocztowy"),
@@ -296,10 +403,10 @@ CASES: list[Case] = [
          note="Payload inFakt bez wysyłki — nic nie trafia do inFakt."),
     Case("issue_invoice_for_order", "issue_invoice_for_order", {"order_id": ds.ORD_1},
          f"Wystaw fakturę dla zamówienia {ds.ORD_1}",
-         ("✅ Faktura", "infakt.pl/share", "firma", "Dołączona do zamówienia w Allegro"),
-         note="Wystawienie faktury w inFakt ORAZ dołączenie jej do zamówienia — "
-              "bez tego drugiego kroku Allegro nadal widzi zamówienie bez faktury "
-              "i przypominajka pyta o nie w kółko."),
+         ("✅ Faktura", "infakt.pl/share", "firma", "NIE dołączyłem jej do zamówienia"),
+         note="Wystawienie faktury kończy się w inFakt: link do sprawdzenia i prośba o "
+              "potwierdzenie. Dołączenie do zamówienia pokazuje fakturę kupującemu i jest "
+              "nieodwracalne, więc czeka na wyraźne „dołącz”."),
     Case("issue_invoice_for_order__exists", "issue_invoice_for_order", {"order_id": ds.ORD_6},
          f"Wystaw fakturę dla zamówienia {ds.ORD_6}",
          ("faktura już istnieje",),
@@ -313,17 +420,50 @@ CASES: list[Case] = [
          {"order_id": ds.ORD_1, "invoice_uuid": ds.INFAKT_INVOICE_UUID},
          "Dołącz tę fakturę do zamówienia w Allegro",
          ("✅ Faktura", "dołączona do zamówienia"),
-         note="Pobranie PDF z inFakt i upload do Allegro (2 kroki API)."),
+         note="Pobranie PDF z inFakt i upload do Allegro (2 kroki API) — wyłącznie na "
+              "wyraźne polecenie sprzedawcy, bo od tej chwili fakturę widzi kupujący."),
+    Case("attach_invoice_to_allegro_order__unconfirmed", "attach_invoice_to_allegro_order",
+         {"order_id": ds.ORD_1, "invoice_uuid": ds.INFAKT_INVOICE_UUID},
+         "Pokaż szczegóły tego zamówienia",
+         ("⏸️", "bez Twojego wyraźnego polecenia"), no_api=True,
+         note="Sprzedawca nie prosił o dołączenie — nic nie leci do Allegro."),
     Case("attach_invoice_to_allegro_order__404", "attach_invoice_to_allegro_order",
          {"order_id": ds.ORD_1, "invoice_uuid": "00000000-0000-0000-0000-000000000000"},
          "Dołącz fakturę 00000000-0000-0000-0000-000000000000 do zamówienia",
          ("❌", "404"),
          note="Nieznane ID faktury — czytelny komunikat błędu zamiast wyjątku."),
+    Case("deliver_invoices", "deliver_invoices",
+         {"order_ids": [ds.ORD_1], "invoice_uuids": [ds.INFAKT_INVOICE_UUID]},
+         "Dodaj te faktury do Allegro",
+         ("✅ Faktura", "dołączona do zamówienia"),
+         note="Jedno polecenie na całą paczkę wystawionych faktur. Bez podanych ID bierze "
+              "wszystkie, które czekają na dołączenie — sprzedawca nie musi przepisywać "
+              "czterech identyfikatorów z poprzedniej wiadomości."),
+    Case("deliver_invoices__ksef", "deliver_invoices",
+         {"order_ids": [ds.ORD_1], "invoice_uuids": [ds.INFAKT_INVOICE_UUID],
+          "attach": False, "ksef": True},
+         "A firmową wyślij również do KSeF",
+         ("📤", "KSeF"),
+         note="KSeF dla tej samej paczki. O tym, która faktura tam pójdzie, decyduje "
+              "sprawdzenie NIP-u nabywcy per zamówienie, nie model."),
+    Case("deliver_invoices__unconfirmed", "deliver_invoices",
+         {"order_ids": [ds.ORD_1], "invoice_uuids": [ds.INFAKT_INVOICE_UUID]},
+         "Pokaż szczegóły tego zamówienia",
+         ("⏸️", "bez Twojego wyraźnego polecenia"), no_api=True,
+         note="Sprzedawca nie prosił o dołączenie — cała paczka czeka, tak samo jak "
+              "pojedyncza faktura."),
     Case("send_invoice_to_ksef", "send_invoice_to_ksef",
-         {"invoice_uuid": ds.INFAKT_INVOICE_UUID},
+         {"invoice_uuid": ds.INFAKT_INVOICE_UUID, "order_id": ds.ORD_1},
          "Wyślij tę fakturę do KSeF",
          ("📤", "KSeF", "sent"),
-         note="Zgłoszenie faktury do KSeF (asynchroniczne po stronie inFakt)."),
+         note="Zgłoszenie faktury do KSeF (asynchroniczne po stronie inFakt) — "
+              "nabywcą na zamówieniu jest firma z NIP-em."),
+    Case("send_invoice_to_ksef__private_person", "send_invoice_to_ksef",
+         {"invoice_uuid": ds.INFAKT_INVOICE_UUID, "order_id": ds.ORD_2},
+         "Wyślij tę fakturę do KSeF",
+         ("🚫", "osoba prywatna", "NIP"),
+         note="Dane do faktury z Allegro mówią: osoba prywatna — do KSeF nie "
+              "pójdzie. KSeF adresuje nabywcę NIP-em, a zgłoszenia nie da się wycofać."),
 
     # ── Zwroty i reklamacje ──────────────────────────────────────────────────
     Case("get_new_returns", "get_new_returns", {},

@@ -11,8 +11,8 @@ Responsibilities:
   5. Return the AgentResponse.
 
 Routing model:
-  DATA SOURCE — what data is needed to answer?
-    allegro_orders | allegro_offers | allegro_messaging | allegro_account | rag | none
+  DATA SOURCE — which agent can answer?
+    allegro | rag | none
 
   OUTPUT FORMAT — chat | table | document | dashboard | action — is NOT classified
   here anymore. It used to be guessed from the user's wording before any tool ran,
@@ -22,11 +22,29 @@ Routing model:
   TOOL it actually called (see agents/allegro/allegro_tools.py TOOL_OUTPUT_FORMAT)
   and reports it back via AgentResponse.metadata["output_format"] — the orchestrator
   just forwards that into the "<source>:<format>" tag the frontend reads.
+
+  The DATA SOURCE label used to carry the same kind of pre-tool guess: it split
+  Allegro four ways (allegro_orders | allegro_offers | allegro_messaging |
+  allegro_account). Nothing routed on that split — all four reached the same
+  AllegroAgent below, which picks its own tool from the full query anyway — so
+  the only thing the four-way guess produced was an analytics label, computed
+  from the user's wording before any tool ran and wrong whenever the wording and
+  the tool disagreed ("ile zapłaciłem prowizji od tego zamówienia" reads as
+  orders, answers from the billing tools). Analytics now labels a turn by the
+  tool that actually ran — see services/analytics_service.py._intent_label,
+  which is the same correction the output format got above — and this classifier
+  only decides what it actually routes on: which agent gets the turn.
+
+  Collapsing the four labels also removed the reason the keyword map below had
+  to order its Allegro entries so carefully: "dostawca" (supplier → offers) vs
+  "dostawa" (delivery → orders) only ever needed telling apart to pick between
+  two labels that now both read "allegro".
 """
 
 import asyncio
 import logging
 import time
+from typing import NamedTuple
 
 from openai import (
     AsyncOpenAI,
@@ -83,12 +101,12 @@ Sklasyfikuj wiadomość użytkownika NA PODSTAWIE PEŁNEJ HISTORII ROZMOWY.
 Odpowiedz TYLKO jedną etykietą — nic więcej.
 
 ŹRÓDŁO DANYCH (co pobrać żeby odpowiedzieć):
-  allegro_orders    — dane zamówień: statusy, wysyłka, śledzenie, zwroty, faktury
-  allegro_offers    — oferty: ceny, stany magazynowe, produkty, dostawcy
-  allegro_messaging — wiadomości od kupujących: czytanie, odpowiadanie
-  allegro_account   — konto sprzedawcy: opłaty, prowizje, statystyki, limity
-  rag               — statyczna baza wiedzy sklepu: polityki, FAQ (nie żywe dane)
-  none              — nie trzeba danych: pozdrowienia, rozmowa, pytania o asystenta
+  allegro — żywe dane ze sklepu Allegro: zamówienia (statusy, wysyłka, śledzenie,
+            zwroty, faktury), oferty (ceny, stany magazynowe, produkty, dostawcy),
+            wiadomości od kupujących, konto sprzedawcy (opłaty, prowizje,
+            statystyki, limity), kupujący i ich dane kontaktowe
+  rag     — statyczna baza wiedzy sklepu: polityki, FAQ (nie żywe dane)
+  none    — nie trzeba danych: pozdrowienia, rozmowa, pytania o asystenta
 
 KLUCZOWE ZASADY:
 - Pytanie o OGÓLNĄ MOŻLIWOŚĆ ("czy jesteś w stanie...", "czy potrafisz...", "czy umiesz...")
@@ -102,7 +120,7 @@ KLUCZOWE ZASADY:
 - Gdy user poprawia lub doprecyzowuje — to nadal ten sam kontekst
 
 Odpowiedź: jedna etykieta źródła danych.
-Przykłady: allegro_offers   allegro_orders   none
+Przykłady: allegro   rag   none
 """.strip()
 
 # ── Keyword map ─────────────────────────────────────────────────────────────────
@@ -118,40 +136,48 @@ _SOURCE_KEYWORDS: list[tuple[list[str], str]] = [
     (["czy jesteś w stanie", "jesteś w stanie", "czy potrafisz", "czy umiesz",
       "are you able to", "do you know how to"],
      "none"),
-    # Store policies / FAQs — check BEFORE orders so "polityka zwrotów" → rag not orders
+    # Store policies / FAQs — check BEFORE allegro so "polityka zwrotów" → rag
+    # not live order data
     (["polityk", "faq", "regulamin", "kiedy wysyłacie", "kiedy wysyłają"],
      "rag"),
-    # Offers / products — checked BEFORE orders so "dostawcy" (supplier) → offers not orders.
-    # "dostawc" covers: dostawca, dostawcy, dostawcę, dostawców (all mean supplier)
-    (["ofert", "offer", "listing", "produkt", "cen", "price", "stock",
-      "stan magaz", "aktywn", "wystawion", "dodaj ofert", "dostawc",
-      "włóczk", "tkanin", "materiał", "przędz", "lista produktów", "lista towarów"],
-     "allegro_offers"),
-    # Orders — "dostaw" covers dostawy/dostawę (delivery) but comes after offers
-    # so "dostawcy" (supplier) is already caught above
-    # "zamówi"/"zamowi" (stem, no case ending) covers zamówienie/zamówienia/zamówień/
-    # zamówić/zamówię — the old "zamówien" keyword missed genitive plural "zamówień"
-    # because that form ends in "ń", a different character than the "n" it looked for.
-    (["zamówi", "zamowi", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
-      "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
-      "niespakow", "wysłan", "niewysłan", "nieopakow", "wartość zam"],
-     "allegro_orders"),
-    # Messaging
-    (["wiadomoś", "wiadomo", "message", "napisz do kupując", "wyślij do kupując",
-      "kupując", "buyer", "odpowiedz na wiadomość"],
-     "allegro_messaging"),
-    # Customer base — "czy mam klienta z takim nr telefonu +48 880 197 834".
-    # Checked after messaging so "co pisał klient w wiadomości" stays messaging;
-    # both labels reach the same AllegroAgent anyway (see handle()), so the
-    # label only decides which fast-path claims the query, not which agent
-    # answers it. Without an entry here a contact lookup names no keyword at
-    # all and pays for an LLM classification call to reach the same agent.
-    (["klient", "nr tel", "numer tel", "telefon", "kontrahent", "nabywc"],
-     "allegro_orders"),
-    # Account / billing
-    (["konto", "opłat", "prowizj", "statystyk", "rozliczen", "account",
-      "fees", "billing", "limit sprzedaży"],
-     "allegro_account"),
+    # Live Allegro data — one bucket for every sub-system, since they all reach
+    # the same AllegroAgent (see _route), which picks its own tool from the full
+    # query. This used to be four ordered buckets, and the ordering was load-
+    # bearing only for telling apart words that pointed at two different LABELS:
+    # "dostawca" (supplier → offers) had to be caught before "dostawa" (delivery
+    # → orders), and a contact lookup ("czy mam klienta z takim nr telefonu")
+    # had to sit after messaging so "co pisał klient" stayed messaging. With one
+    # label the ordering carries no meaning and the near-duplicates collapse:
+    # "dostaw" already covers "dostawca", "wiadomo" covers "odpowiedz na
+    # wiadomość", "produkt" covers "lista produktów".
+    #
+    # "zamówi"/"zamowi" (stem, no case ending) covers zamówienie/zamówienia/
+    # zamówień/zamówić/zamówię — the old "zamówien" keyword missed genitive
+    # plural "zamówień" because that form ends in "ń", a different character
+    # than the "n" it looked for.
+    ([
+        # zamówienia + wysyłka
+        "zamówi", "zamowi", "order", "paczk", "dostaw", "śledzeni", "sledzeni",
+        "zwrot", "reklamacj", "faktur", "invoice", "tracking", "shipment",
+        "niespakow", "wysłan", "nieopakow",
+        # oferty + produkty
+        "ofert", "offer", "listing", "produkt", "towar", "cen", "price", "stock",
+        "stan magaz", "aktywn", "wystawion",
+        # "włócz", not "włóczk": the genitive plural of "włóczka" is "włóczek"
+        # — Polish drops in a fill vowel before the final consonant, so the
+        # longer stem is NOT a substring of the very form a seller uses most
+        # ("ilość sztuk sprzedanych dla włóczek"). That query matched no
+        # keyword at all and went to the LLM classifier. Exactly the same
+        # failure as the "zamówień" one noted above, one declension over.
+        "włócz", "tkanin", "materiał", "przędz",
+        # wiadomości + kupujący
+        "wiadomo", "message", "kupując", "buyer",
+        "klient", "nr tel", "numer tel", "telefon", "kontrahent", "nabywc",
+        # konto + rozliczenia
+        "konto", "opłat", "prowizj", "statystyk", "rozliczen", "account",
+        "fees", "billing", "limit sprzedaży",
+     ],
+     "allegro"),
     # Chitchat / meta — check last so Allegro keywords take priority
     (["cześć", "hej", "witaj", "dzień dobry", "dobry wieczór", "siema",
       "hello", "hi ", "hey ", "funkcj", "możliwości", "co potrafisz", "co umiesz",
@@ -180,6 +206,41 @@ _EMPTY_REPLY_FALLBACK = (
     "Przepraszam, nie udało się wygenerować odpowiedzi na to pytanie. "
     "Spróbuj ponownie lub sformułuj je inaczej."
 )
+
+
+# ── Which branch of _classify decided ───────────────────────────────────────
+# Recorded per turn (AgentResponse.metadata["classify_path"] → the analytics
+# record) because the keyword/LLM split is the number that decides whether
+# replacing the LLM fallback with a local classifier is worth anything: only
+# the LLM branch costs a round-trip, and only its queries are worth learning
+# from. A corpus mixing in the keyword branch would teach a model to reproduce
+# the regex matcher that still runs in front of it — no gain, and it skews the
+# training distribution towards keyword-shaped queries, which are exactly the
+# ones the model would never be asked about.
+PATH_KEYWORD = "keyword"      # a domain noun matched — no LLM call was made
+PATH_LLM = "llm"              # no keyword; the LLM's own answer stands
+PATH_INHERITED = "inherited"  # LLM said "none"; overridden by the last turn's source
+
+
+class Classification(NamedTuple):
+    """What _classify decided, and which branch decided it."""
+    source: str
+    path: str
+
+
+def _normalize_source(source: str | None) -> str | None:
+    """Map a stored pre-collapse label onto the current three.
+
+    Sessions live for 30 days (services/gcp_service.py), so for a month after
+    this deploys, session.metadata["last_data_source"] can still hold one of
+    the four old Allegro labels written by the previous version — and that
+    value is fed straight back into routing by the follow-up inheritance in
+    _classify(). Without this it would reach _route() as an unknown source and
+    silently answer a "sprawdź jeszcze raz" follow-up with chitchat.
+    """
+    if source and source.startswith("allegro"):
+        return "allegro"
+    return source
 
 
 def _last_assistant_text(session) -> str | None:
@@ -297,10 +358,10 @@ class Orchestrator:
         # Classify the data source
         try:
             with perf.stage("classify"):
-                data_source = await self._classify(
+                data_source, classify_path = await self._classify(
                     message.text,
                     session.to_anthropic_messages(limit=_HISTORY_TURNS, max_age_hours=_HISTORY_MAX_AGE_HOURS),
-                    last_source=session.metadata.get("last_data_source"),
+                    last_source=_normalize_source(session.metadata.get("last_data_source")),
                 )
         except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError, NotFoundError) as exc:
             logger.error("LLM API error during classification: %s", exc)
@@ -342,6 +403,14 @@ class Orchestrator:
                 text="Przepraszam, nie udało się przetworzyć tej wiadomości. Spróbuj sformułować pytanie inaczej.",
                 agent_type=data_source,
             )
+
+        # Which classifier branch decided this turn, carried out to the caller
+        # so the analytics record can store it (see PATH_* above and
+        # services/analytics_service.py.log_query). Set on every routing
+        # outcome including the two error responses above — a turn whose route
+        # failed was still classified, and dropping it would quietly bias the
+        # split towards whichever branch fails less often.
+        response.metadata["classify_path"] = classify_path
 
         # An agent can return an empty string (reply truncated by max_tokens, a
         # safety filter, or a tool round that produced no text). Never show that
@@ -392,10 +461,7 @@ class Orchestrator:
 
     # ── Classification ─────────────────────────────────────────────────────────
 
-    _KNOWN_SOURCES = frozenset([
-        "allegro_orders", "allegro_offers", "allegro_messaging",
-        "allegro_account", "rag", "none",
-    ])
+    _KNOWN_SOURCES = frozenset(["allegro", "rag", "none"])
 
     def _keyword_source(self, query: str) -> str | None:
         q = query.lower()
@@ -461,8 +527,11 @@ class Orchestrator:
         query: str,
         history: list[dict[str, str]],
         last_source: str | None = None,
-    ) -> str:
+    ) -> Classification:
         """Classify query into a data_source using full conversation context.
+
+        Returns the label AND which branch produced it (see Classification) —
+        the caller records the branch so the keyword/LLM split is measurable.
 
         Strategy:
           1. Always compute a keyword-based source guess. Domain nouns like
@@ -490,9 +559,10 @@ class Orchestrator:
 
         if kw_source is not None:
             logger.info("Keyword fast-path: src=%s | %.60s", kw_source, query)
-            return kw_source
+            return Classification(kw_source, PATH_KEYWORD)
 
         source = await self._classify_with_llm(query, history, known_sources)
+        path = PATH_LLM
 
         # kw_source is always None here (the fast-path above already returned
         # otherwise), so the LLM's own answer stands unless overridden below.
@@ -507,9 +577,10 @@ class Orchestrator:
                 last_source, query,
             )
             source = last_source
+            path = PATH_INHERITED
 
         logger.info("LLM routing: src=%s | %.60s", source, query)
-        return source
+        return Classification(source, path)
 
     # ── Routing ────────────────────────────────────────────────────────────────
 
@@ -531,8 +602,8 @@ class Orchestrator:
                 response.agent_type = f"{data_source}:{response.metadata.get('output_format', 'chat')}"
                 return response
 
-        # Allegro sub-systems → AllegroAgent
-        if data_source.startswith("allegro_"):
+        # Live store data → AllegroAgent, which picks its own tool
+        if data_source == "allegro":
             response = await self._get_allegro_agent(user_id).run(message.text, history)
             response.agent_type = f"{data_source}:{response.metadata.get('output_format', 'chat')}"
             return response

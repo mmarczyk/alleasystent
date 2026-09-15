@@ -50,6 +50,7 @@ SELLER_LOGIN = "elektrodom_pl"
 # ORD_1..ORD_3  new, unprocessed  (get_new_orders)
 # ORD_4, ORD_5  packed, ready for the courier (get_orders_delivery)
 # ORD_6         already sent, invoice requested and already issued
+# ORD_7         unpaid basket (FILLED_IN) — must never appear in ANY answer
 
 ORD_1 = "0c4854a0-9646-11f1-8028-338c43adc37a"
 ORD_2 = "1d5965b1-a757-22e2-9139-449d54bed48b"
@@ -57,6 +58,14 @@ ORD_3 = "2e6a76c2-b868-33f3-a24a-55ae65cfe59c"
 ORD_4 = "3f7b87d3-c979-44f4-b35b-66bf76d0f6ad"
 ORD_5 = "4a8c98e4-da8a-55a5-c46c-77c087e1a7be"
 ORD_6 = "5b9da9f5-eb9b-66b6-d57d-88d198f2b8cf"
+ORD_7 = "6cae0a06-fcac-77c7-e68e-99e2a903c9d0"
+# Yarn orders — the assortment this seller actually sells, and the case that
+# broke in production: "jeans" and "jeans plus" are two different models whose
+# titles share a word, so any naive substring match folds one into the other.
+# ORD_YARN_3 is paid AND cancelled: it must never be counted as sold.
+ORD_YARN_1 = "6cae1a06-fcac-77c7-e68e-99e2a9030c01"
+ORD_YARN_2 = "7dbf2b17-0dbd-88d8-f79f-a0f3ba141d12"
+ORD_YARN_3 = "8ec03c28-1ece-99e9-08a0-b104cb252e23"
 
 
 def _price(amount: float, currency: str = "PLN") -> dict:
@@ -255,6 +264,80 @@ CHECKOUT_FORMS: list[dict] = [
             },
         },
     },
+    # ── Włóczki: dwa modele o wspólnym słowie w tytule ───────────────────────
+    # Razem (bez anulowanego): jeans 3+5 = 8 szt., jeans plus 2 szt.
+    {
+        "id": ORD_YARN_1,
+        "status": "READY_FOR_PROCESSING",
+        "buyer": {"login": "monika.w", "email": "monika.w@allegromail.pl",
+                  "firstName": "Monika", "lastName": "Wrona", "phoneNumber": "+48 600 100 200"},
+        "fulfillment": {"status": "PICKED_UP"},
+        "payment": {"type": "ONLINE", "finishedAt": in_month(6.0)},
+        "boughtAt": in_month(6.1),
+        "summary": {"totalToPay": _price(139.50)},
+        "delivery": _delivery("INPOST_LOCKER", "Allegro Paczkomaty InPost", 9.99,
+                              hours_ahead(-40), recipient="Monika Wrona"),
+        "lineItems": [
+            _line_item("14587500101", "Włóczka Jeans 100g kolor 05", 3, 15.90),
+            _line_item("14587500202", "Włóczka Jeans Plus 100g kolor 12", 2, 19.90),
+        ],
+    },
+    {
+        "id": ORD_YARN_2,
+        "status": "READY_FOR_PROCESSING",
+        "buyer": {"login": "krystyna.b", "email": "krystyna.b@allegromail.pl",
+                  "firstName": "Krystyna", "lastName": "Bąk", "phoneNumber": "+48 600 300 400"},
+        "fulfillment": {"status": "PICKED_UP"},
+        "payment": {"type": "ONLINE", "finishedAt": in_month(4.0)},
+        "boughtAt": in_month(4.1),
+        "summary": {"totalToPay": _price(89.49)},
+        "delivery": _delivery("DPD", "Kurier DPD", 12.99,
+                              hours_ahead(-30), recipient="Krystyna Bąk"),
+        "lineItems": [
+            _line_item("14587500101", "Włóczka Jeans 100g kolor 05", 5, 15.90),
+        ],
+    },
+    {
+        # Opłacone, potem anulowane — 10 szt., które nigdy nie wyjechały.
+        "id": ORD_YARN_3,
+        "status": "READY_FOR_PROCESSING",
+        "buyer": {"login": "test.anulowane", "email": "test.anulowane@allegromail.pl",
+                  "firstName": "Jan", "lastName": "Nowak", "phoneNumber": "+48 600 500 600"},
+        "fulfillment": {"status": "CANCELLED"},
+        "payment": {"type": "ONLINE", "finishedAt": in_month(5.0)},
+        "boughtAt": in_month(5.1),
+        "summary": {"totalToPay": _price(199.00)},
+        "delivery": _delivery("DPD", "Kurier DPD", 12.99,
+                              hours_ahead(-35), recipient="Jan Nowak"),
+        "lineItems": [
+            _line_item("14587500202", "Włóczka Jeans Plus 100g kolor 12", 10, 19.90),
+        ],
+    },
+    # An unpaid basket: the buyer clicked "kupuję" and filled the form in, but
+    # never paid, so for Allegro this is not an order yet — there is nothing to
+    # pack, send, count or invoice. It sits here to prove no answer ever picks
+    # it up: it is the most expensive form in the set and its fulfillment stage
+    # is NEW, so every "nowe", "niewysłane" and "powyżej 400 zł" listing would
+    # show it first if the exclusion ever broke.
+    #
+    # Its nulls are deliberate too, and they are what Allegro really sends for
+    # a form like this: a basket has no payment date, and the buyer's e-mail is
+    # only released once the purchase completes. `null` is not a missing key —
+    # parsing has to survive it (see models.allegro._AllegroPayloadModel).
+    {
+        "id": ORD_7,
+        "status": "FILLED_IN",
+        "buyer": {"login": "krzysztof.w", "email": None, "phoneNumber": None},
+        "fulfillment": {"status": "NEW"},
+        "payment": {"type": "ONLINE", "finishedAt": None},
+        "boughtAt": in_month(0.5),
+        "summary": {"totalToPay": _price(3199.00)},
+        "delivery": _delivery("DPD", "Kurier DPD", 0.0, hours_ahead(40)),
+        "lineItems": [
+            _line_item("14587412233", "Pralka Bosch Serie 6 WGG244Z0PL", 1, 3199.00),
+        ],
+        "invoice": {"required": False, "dontWant": False},
+    },
 ]
 
 # order_id → invoices already uploaded to Allegro
@@ -334,8 +417,12 @@ THREAD_MESSAGES: dict[str, list[dict]] = {
          "text": "Świetnie, proszę o wysyłkę na paczkomat POZ01A. Czy zdąży dziś wyjść?"},
     ],
     THREAD_2: [
+        # Written from the order page, so Allegro tags it with the checkout
+        # form — this is what lets "do tej transakcji" resolve to an order id
+        # without asking the seller which one (see message_related_order_id).
         {"id": "msg-4", "createdAt": hours_ago(5),
          "author": {"login": "marek_zielinski", "isInterlocutor": True},
+         "relatedObject": {"type": "ORDER", "id": ORD_2},
          "text": "Kiedy planowana jest wysyłka odkurzacza? Zależy mi na czasie."},
     ],
     THREAD_3: [
@@ -369,7 +456,9 @@ def _entry(entry_id: str, type_id: str, desc: str, amount: float, occurred: str,
     e: dict = {
         "id": entry_id,
         "occurredAt": occurred,
-        "type": {"id": type_id, "description": desc},
+        # Allegro's billing schema calls this field `name` (translated per
+        # Accept-Language) — there is no `description` in it.
+        "type": {"id": type_id, "name": desc},
         "value": _price(amount),
         "balance": _price(1500.00),
     }
@@ -391,6 +480,10 @@ BILLING_ENTRIES: list[dict] = [
     _entry("be-6", "REF", "Zwrot prowizji", 12.40, in_month(3.0), ORD_4),
     _entry("be-7", "SUC", "Prowizja od sprzedaży", -8.24, in_month(3.9), ORD_5),
     _entry("be-8", "SUC", "Prowizja od sprzedaży", -137.39, in_month(5.9), ORD_6),
+    # The shipping label Allegro sold the seller for ORD_3 — the delivery side
+    # of an order's costs, which get_order_details reports next to what the
+    # buyer paid for the same parcel (delivery.cost, 12.99 on ORD_3).
+    _entry("be-11", "SHP", "Opłata za przesyłkę Allegro Delivery", -11.99, hours_ago(2.8), ORD_3),
     # No order.id — an account-level cost (subscription).
     _entry("be-9", "SUB", "Abonament Allegro Firma", -49.00, in_month(7.0)),
     # PAD — internal transfer, must be shown but excluded from the totals.
@@ -452,5 +545,10 @@ INFAKT_INVOICE = {
     "currency": "PLN",
     "status": "paid",
     "ksef_number": None,
+    # Whether KSeF is allowed is NOT decided here — it comes from the buyer's
+    # own declaration on the Allegro order (ORD_1 is a company with a NIP,
+    # ORD_2 a private person). These fields are only the copy inFakt holds.
+    "client_company_name": "Kawa i Spółka sp. z o.o.",
+    "client_tax_code": "7792445588",
 }
 INFAKT_SHARE_LINK = f"https://app.infakt.pl/share/{INFAKT_INVOICE_UUID}"

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -14,7 +15,13 @@ from typing import Any
 import httpx
 
 from config.settings import get_settings
-from models.allegro import AllegroInvoiceBuyer, AllegroOrder, AllegroOrderLine, AllegroTokens
+from models.allegro import (
+    AllegroInvoiceBuyer,
+    AllegroOrder,
+    AllegroOrderLine,
+    AllegroTokens,
+    ThreadOrderMatch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +60,21 @@ INVOICE_FILE_MAX_BYTES = 3 * 1024 * 1024
 # (Allegro cancels an unpaid order well within it), short enough to keep the
 # fetch small.
 _PAID_WINDOW_BACKDATE_DAYS = 30
+
+# The checkout-form status of an order that actually exists for the seller.
+#
+# Allegro keeps a checkout form from the moment a buyer clicks "kupuję", long
+# before there is anything for the seller to do with it: BOUGHT (the buyer has
+# not filled the form in) and FILLED_IN (filled in, not paid) are baskets in
+# progress, not orders. Only READY_FOR_PROCESSING is Allegro saying the order
+# is the seller's to handle — which includes cash-on-delivery, paid on receipt
+# and therefore carrying no payment date of its own.
+#
+# So a fetch that names no status gets this one rather than "every form Allegro
+# holds": an unpaid basket must not be counted, listed, invoiced, or matched to
+# a buyer's message anywhere. A caller that wants a different status (the
+# cancelled listing) still passes it and gets exactly that.
+ORDER_STATUS_READY = "READY_FOR_PROCESSING"
 
 
 def decode_token_scopes(access_token: str | None) -> list[str] | None:
@@ -279,6 +301,60 @@ def is_thread_unread(thread: dict[str, Any]) -> bool:
 def thread_last_message_at(thread: dict[str, Any]) -> str:
     """Timestamp of a thread's most recent message (Allegro: lastMessageDateTime)."""
     return thread.get("lastMessageDateTime") or ""
+
+
+# What a message can be "about" in Allegro's `relatedObject` tag. Only an order
+# tag carries a checkout-form id; OFFER and DISPUTE tags point at something else
+# entirely and must never be read as an order number.
+_RELATED_ORDER_TYPES = frozenset({"ORDER", "CHECKOUT_FORM"})
+
+
+def message_related_order_id(message: dict[str, Any]) -> str:
+    """The order a buyer message was written from, or "" when there is none.
+
+    A buyer who writes from an order page ("Napisz do sprzedającego" on a
+    bought item) sends a message Allegro tags with
+    `relatedObject: {"type": "ORDER", "id": "<checkoutFormId>"}`. That tag is
+    the only reliable order number attached to a message — the text itself
+    almost never has one ("czy jest możliwość wystawienia faktury do tej
+    transakcji" names no transaction at all; the tag does).
+
+    Messages written outside an order context carry no tag, or one pointing at
+    an offer or a dispute. Those return "" so the caller falls back to the
+    buyer's order history instead of quoting an offer id as an order number.
+    """
+    related = message.get("relatedObject") or {}
+    if isinstance(related, dict) and str(related.get("type") or "").upper() in _RELATED_ORDER_TYPES:
+        return str(related.get("id") or "")
+    # Some payloads nest the order directly instead of tagging it (this is the
+    # shape /messaging/threads accepts when WE start a thread — see
+    # create_thread), so it is worth reading here too.
+    order = message.get("order") or {}
+    if isinstance(order, dict) and order.get("id"):
+        return str(order["id"])
+    return ""
+
+
+def thread_related_order_id(messages: list[dict[str, Any]]) -> str:
+    """The order the most recent tagged message in a thread was written from.
+
+    Newest-first, because a long-running thread can start on one order and be
+    reused for the next one — the question being asked now is about the latest.
+    """
+    for message in sorted(messages, key=lambda m: str(m.get("createdAt") or ""), reverse=True):
+        order_id = message_related_order_id(message)
+        if order_id:
+            return order_id
+    return ""
+
+
+def thread_buyer_login(messages: list[dict[str, Any]]) -> str:
+    """The buyer's login, taken from the first message they wrote in the thread."""
+    for message in messages:
+        author = message.get("author") or {}
+        if author.get("isInterlocutor") and author.get("login"):
+            return str(author["login"])
+    return ""
 
 
 class AllegroService:
@@ -575,6 +651,12 @@ class AllegroService:
             "Authorization": f"Bearer {self._tokens.access_token}",
             "Accept": "application/vnd.allegro.public.v1+json",
             "Content-Type": "application/vnd.allegro.public.v1+json",
+            # Allegro translates the human-readable labels it sends back
+            # (billing type names above all) according to this header and
+            # falls back to ENGLISH when it is absent — so without it a
+            # shipping charge arrives as "Delivery fee" while the seller,
+            # this app, and every rule that reads those labels speak Polish.
+            "Accept-Language": "pl-PL",
         }
 
     async def _get(self, path: str, params: dict | list | None = None, accept: str | None = None) -> dict[str, Any]:
@@ -633,10 +715,12 @@ class AllegroService:
         #
         # Every OTHER filter the caller passed is forwarded to that fetch. It
         # used to be dropped (buyer_login, fulfillment_status, line_items_sent
-        # and the boughtAt bounds all vanished, and the status was forced to
-        # READY_FOR_PROCESSING), so "czy w tym roku kupował ode mnie ktoś z
-        # konta np1988" — a buyer_login + payment-period call — came back as
-        # the whole store's last week, the login silently ignored.
+        # and the boughtAt bounds all vanished), so "czy w tym roku kupował ode
+        # mnie ktoś z konta np1988" — a buyer_login + payment-period call —
+        # came back as the whole store's last week, the login silently ignored.
+        # The status is the one argument this call fills in for a caller that
+        # left it out, and it fills in the same one either way (see
+        # ORDER_STATUS_READY) — never a filter of its own invention.
         #
         # The window start is derived from paid_at_gte instead of a fixed
         # "last 7 days", which made any period longer than a week unanswerable.
@@ -657,7 +741,7 @@ class AllegroService:
                 window_from - timedelta(days=_PAID_WINDOW_BACKDATE_DAYS)
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
             raw = await self.get_orders(
-                status=status or "READY_FOR_PROCESSING",
+                status=status or ORDER_STATUS_READY,
                 buyer_login=buyer_login,
                 fulfillment_status=fulfillment_status,
                 line_items_sent=line_items_sent,
@@ -672,9 +756,11 @@ class AllegroService:
                 result = [o for o in result if (o.paid_at or "") <= paid_at_lte]
             return result[:limit]
 
-        base_params: dict[str, Any] = {}
-        if status:
-            base_params["status"] = status
+        # An unpaid basket is not an order (see ORDER_STATUS_READY): the fetch
+        # asks Allegro for real ones, so nothing downstream — a listing, a
+        # count, an invoice run, a thread→order match — has to know that
+        # BOUGHT and FILLED_IN forms exist.
+        base_params: dict[str, Any] = {"status": status or ORDER_STATUS_READY}
         if buyer_login:
             base_params["buyer.login"] = buyer_login
         if fulfillment_status:
@@ -738,7 +824,7 @@ class AllegroService:
         offset = 0
         while True:
             params: dict[str, Any] = {
-                "status": "READY_FOR_PROCESSING",
+                "status": ORDER_STATUS_READY,
                 "lineItems.boughtAt.gte": date_from,
                 "lineItems.boughtAt.lte": date_to,
                 "limit": page_size,
@@ -926,6 +1012,8 @@ class AllegroService:
         month: int | None = None,
         year: int | None = None,
         shipped_only: bool = False,
+        fulfillment_status: Sequence[str] | None = None,
+        exclude_fulfillment_status: Sequence[str] | None = None,
     ) -> list[AllegroOrder]:
         """
         Return orders for the given month (default: current month) where:
@@ -935,6 +1023,14 @@ class AllegroService:
             (fulfillment.status SENT or PICKED_UP) — used by the invoice
             reminder (services/invoice_reminder.py), which only nags about
             orders that already shipped, not ones still being packed.
+          - if fulfillment_status / exclude_fulfillment_status: the order is
+            (not) at one of those fulfillment stages — the seller scoping the
+            question to part of their orders ("faktury do wysłania w
+            zamówieniach nie nowych"). Both are LISTS because a stage a seller
+            names is often a family: "wysłane" covers SENT, IN_TRANSIT,
+            READY_FOR_PICKUP and PICKED_UP alike, and answering it with SENT
+            alone would drop the parcels already at the buyer's — orders whose
+            invoice is the most overdue of all.
         Paginates through all orders for the month, then checks invoice status.
         """
         import calendar
@@ -952,7 +1048,7 @@ class AllegroService:
         offset = 0
         while True:
             page = await self.get_orders(
-                status="READY_FOR_PROCESSING",
+                status=ORDER_STATUS_READY,
                 bought_at_gte=first_day,
                 bought_at_lte=last_day,
                 limit=page_size,
@@ -967,6 +1063,21 @@ class AllegroService:
         candidates = [o for o in all_orders if o.invoice_required]
         if shipped_only:
             candidates = [o for o in candidates if o.fulfillment_status in ("SENT", "PICKED_UP")]
+        # The stage filters run HERE, before the per-order invoice lookups
+        # below: those are one Allegro request each, and an order the seller
+        # scoped out is one we must not pay for.
+        keep = {str(st).upper() for st in (fulfillment_status or ())}
+        drop = {str(st).upper() for st in (exclude_fulfillment_status or ())}
+        # A cancelled order is never invoiced — there is nothing to document —
+        # so it stays out of this listing the same way it stays out of every
+        # order listing (see AllegroAgent._orders_listing). It matters most for
+        # a NEGATED scope ("w zamówieniach nie nowych"), whose whole meaning is
+        # "everything except X" and which would otherwise sweep them in.
+        if "CANCELLED" not in keep:
+            drop = drop | {"CANCELLED"}
+        if keep:
+            candidates = [o for o in candidates if (o.fulfillment_status or "") in keep]
+        candidates = [o for o in candidates if (o.fulfillment_status or "") not in drop]
 
         # Keep only those without any uploaded invoice. Asked of Allegro live,
         # never from a cache (see get_order_invoices), at bounded concurrency so
@@ -1075,6 +1186,66 @@ class AllegroService:
         data = await self._get(f"/messaging/threads/{thread_id}/messages", params={"limit": min(limit, 20)})
         return data.get("messages", [])
 
+    async def resolve_thread_order(
+        self,
+        thread_id: str,
+        messages: list[dict[str, Any]] | None = None,
+        buyer_login: str = "",
+        history_limit: int = 10,
+    ) -> ThreadOrderMatch:
+        """Work out which order a message thread is about.
+
+        The buyer's own wording is no help here — "faktura do tej transakcji"
+        points at an order the seller then has to find by hand. Two sources
+        answer it instead, in order of certainty:
+
+        1. Allegro's `relatedObject` tag on the messages (see
+           message_related_order_id) — the checkout-form id the buyer wrote
+           from, exact and free: it is already in the payload this thread was
+           read with, so pass `messages` in and this costs no extra call.
+        2. The buyer's order history, when nothing is tagged. One order means
+           one possible transaction; several stay unresolved with the list
+           attached, because attaching an invoice to the wrong checkout form is
+           worse than asking which one it was.
+
+        Never raises for an unreachable order or history — a thread that can't
+        be matched comes back unresolved, so reading a message never fails on
+        account of the lookup bolted onto it.
+        """
+        if messages is None:
+            messages = await self.get_thread_messages(thread_id)
+
+        login = buyer_login or thread_buyer_login(messages)
+
+        order_id = thread_related_order_id(messages)
+        if order_id:
+            match = ThreadOrderMatch(buyer_login=login, order_id=order_id, source="message")
+            try:
+                match.candidates = [await self.get_order(order_id)]
+            except AllegroAPIError as exc:
+                # The tag is the answer even when the order itself can't be
+                # read right now — losing the details must not lose the number.
+                logger.warning("resolve_thread_order: order %s unreadable: %s", order_id, exc)
+            return match
+
+        if not login:
+            return ThreadOrderMatch()
+
+        try:
+            orders = await self.get_orders(buyer_login=login, limit=history_limit)
+        except AllegroAPIError as exc:
+            logger.warning("resolve_thread_order: history for %s unreadable: %s", login, exc)
+            return ThreadOrderMatch(buyer_login=login)
+
+        if len(orders) == 1:
+            return ThreadOrderMatch(
+                buyer_login=login,
+                order_id=orders[0].order_id,
+                source="buyer_history",
+                candidates=orders,
+            )
+        return ThreadOrderMatch(buyer_login=login, candidates=orders)
+
     async def send_message(self, thread_id: str, text: str) -> dict[str, Any]:
         body = {"text": text, "type": "ANSWER"}
         return await self._post(f"/messaging/threads/{thread_id}/messages", body)
@@ -1115,7 +1286,8 @@ class AllegroService:
                     "  billing[%d]: occurredAt=%s type=%s offer=%s amount=%s",
                     idx,
                     e.get("occurredAt", "")[:10],
-                    (e.get("type") or {}).get("description", "?"),
+                    (e.get("type") or {}).get("name")
+                    or (e.get("type") or {}).get("description", "?"),
                     (e.get("offer") or {}).get("name", "—"),
                     (e.get("value") or {}).get("amount", "?"),
                 )

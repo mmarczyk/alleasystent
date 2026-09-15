@@ -134,7 +134,14 @@ def _agent(token_scopes: list[str] | None = None):
 
 
 def _attach(agent, pdf: bytes = b"%PDF-1.4 short"):
-    """Wire inFakt so only the Allegro half of the attach can fail."""
+    """Wire inFakt so only the Allegro half of the attach can fail.
+
+    Also puts the seller's own "dołącz fakturę…" into the turn: without it the
+    attachment is refused before any API call (see
+    AllegroAgent._attach_authorized_by_seller), and these tests are about what
+    Allegro says once the seller HAS asked for it.
+    """
+    agent._current_query = "dołącz fakturę do zamówienia o1"
     infakt = MagicMock()
     infakt.get_invoice = AsyncMock(return_value={"number": "FV/1/2026"})
     infakt.get_invoice_pdf = AsyncMock(return_value=pdf)

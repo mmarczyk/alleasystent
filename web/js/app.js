@@ -1301,7 +1301,7 @@ const Backend = (() => {
       throw new Error(err.detail || `HTTP ${res.status}`);
     }
     const data = await res.json();
-    // "agent" is "<data_source>:<output_format>", e.g. "allegro_orders:table" —
+    // "agent" is "<data_source>:<output_format>", e.g. "allegro:table" —
     // the format half drives how the full-view doc viewer presents the reply.
     const format = (data.agent || '').split(':')[1] || 'chat';
     return { text: data.response, format };

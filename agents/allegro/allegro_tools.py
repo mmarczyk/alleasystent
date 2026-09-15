@@ -14,20 +14,74 @@ import re
 # chat text while "zamówienia do wysłania" came back as a markdown table the
 # frontend then rendered as a document artifact — the same question answered
 # in two different shapes depending on which preset the model happened to pick.
+# Every fulfillment stage an Allegro order can be at, in the order it moves
+# through them. One list, because three different tools now let the seller
+# scope a question to a stage (get_orders, get_orders_delivery and — for
+# "faktury do wysłania w zamówieniach nie nowych" — get_orders_pending_invoice)
+# and a stage missing from one of their enums is a stage the model cannot name
+# there, whatever the seller asked.
+_FULFILLMENT_STATUSES: tuple[str, ...] = (
+    "NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "IN_TRANSIT",
+    "READY_FOR_PICKUP", "PICKED_UP", "CANCELLED", "SUSPENDED",
+)
+
 _ORDER_PARAMS: dict[str, dict] = {
     "status": {
         "type": "string",
-        "description": "Filter by order status.",
-        "enum": ["BOUGHT", "FILLED_IN", "READY_FOR_PROCESSING", "CANCELLED"],
+        "description": (
+            "Checkout-form status. LEAVE IT OUT for every normal question: the listing then "
+            "covers exactly the orders that exist for the seller, cash-on-delivery included. "
+            "Pass CANCELLED only for a question that explicitly asks about cancelled orders "
+            "('pokaż anulowane zamówienia'). Baskets a buyer started but never paid for are "
+            "not orders and are never listed, whatever else the question asks for."
+        ),
+        "enum": ["READY_FOR_PROCESSING", "CANCELLED"],
     },
     "fulfillment_status": {
         "type": "string",
         "description": (
-            "Filter by fulfillment status: NEW = not packed yet ('niespakowane', "
-            "'do spakowania'), READY_FOR_SHIPMENT = packed, awaiting carrier handoff "
-            "('do wysłania', 'niewysłane'), SENT = already handed over."
+            "Filter by fulfillment status — ONE positive stage: NEW = not packed yet "
+            "('do spakowania'), READY_FOR_SHIPMENT = packed, awaiting carrier handoff "
+            "('do wysłania', 'gotowe do wysyłki', 'zapakowane'), SENT = already handed over. "
+            "NEVER use it for a NEGATED question ('niewysłane', 'jeszcze nie wysłane', 'nie "
+            "odebrane'): 'not sent' covers every stage before the handoff, not just the packed "
+            "one, so it is exclude_fulfillment_status that answers it."
         ),
         "enum": ["NEW", "PROCESSING", "READY_FOR_SHIPMENT", "SENT", "PICKED_UP", "CANCELLED", "SUSPENDED"],
+    },
+    "exclude_fulfillment_status": {
+        "type": "array",
+        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
+        "description": (
+            "NEGATED stage filter — return every order whose fulfillment status is NOT one of "
+            "these. A negated question is never one status, it is everything except one: "
+            "'niewysłane' / 'jeszcze nie wysłane' / 'które nie zostały wysłane' means every "
+            "order that has not left yet (NEW, PROCESSING, READY_FOR_SHIPMENT alike), NOT only "
+            "the packed ones — so pass exclude_fulfillment_status=['SENT', 'IN_TRANSIT', "
+            "'READY_FOR_PICKUP', 'PICKED_UP'] rather than fulfillment_status=READY_FOR_SHIPMENT, "
+            "which silently drops everything nobody has packed yet. Same for any other negation: "
+            "'nieodebrane' → exclude ['PICKED_UP'], 'niespakowane' → exclude "
+            "['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. "
+            "Combine with fulfillment_status only when the question really names both sides."
+        ),
+    },
+    "min_value": {
+        "type": "number",
+        "description": (
+            "Only orders worth AT LEAST this much (the order total the buyer paid, delivery "
+            "included, in the order's own currency). Pass it whenever the question names a "
+            "floor: 'zamówienia powyżej 400 zł', 'ponad 1000 zł', 'od 250 zł w górę', "
+            "'droższe niż 99,99'. Without it the amount the user just said is silently "
+            "ignored and the listing comes back unfiltered, which reads like an answer."
+        ),
+    },
+    "max_value": {
+        "type": "number",
+        "description": (
+            "Only orders worth AT MOST this much (same figure as min_value). For a ceiling: "
+            "'zamówienia poniżej 50 zł', 'do 100 zł', 'tańsze niż 20 zł'. Pass both bounds "
+            "for a range ('od 100 do 300 zł')."
+        ),
     },
     "buyer_login": {
         "type": "string",
@@ -40,8 +94,57 @@ _ORDER_PARAMS: dict[str, dict] = {
             "it has no login parameter and would answer with every customer of the period "
             "instead. Always the Allegro LOGIN, exactly as the user wrote it — never a company "
             "or person's name (Allegro matches it exactly); if the user gave a NAME instead, "
-            "ask for the login rather than guessing it."
+            "the tool that finds a customer by name is get_buyer_products (their products) or "
+            "find_buyer_by_contact (who they are) — ask for the login only when the question "
+            "really is about the ORDERS of an account nobody named."
         ),
+    },
+    "min_value": {
+        "type": "number",
+        "description": (
+            "Return only orders whose VALUE (the total the buyer paid, delivery included) is "
+            "AT LEAST this many PLN. This is the ONLY way to answer a question that names an "
+            "order amount — 'zamówienie na kwotę ponad 2000 zł', 'zamówienia powyżej 500 zł', "
+            "'najdroższe zamówienie z tego tygodnia', 'czy było coś za więcej niż 1000 zł'. "
+            "Without it the amount is silently dropped and the reply is the whole unfiltered "
+            "list, which reads like an answer to a question nobody asked."
+        ),
+    },
+    "max_value": {
+        "type": "number",
+        "description": (
+            "Return only orders whose VALUE (the total the buyer paid, delivery included) is "
+            "AT MOST this many PLN — 'zamówienia poniżej 100 zł', 'drobne zamówienia do 50 zł'. "
+            "Combine with min_value for a range ('między 500 a 1000 zł')."
+        ),
+    },
+    "product_names": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Only orders CONTAINING one of these products — the ONLY way to answer a question "
+            "that names what was inside the order: 'zamówienie z wczoraj z włóczką yarnart "
+            "jeans', 'pokaż zamówienia z jeans plus', 'kto kupił kordonek'. One entry per model "
+            "the user named, written as they wrote it but WITHOUT the generic category word: "
+            "'włóczkę yarnart jeans' → ['yarnart jeans'], 'jeans i jeans plus' → ['jeans', "
+            "'jeans plus'] (two models, never one merged entry). A name matches an offer title "
+            "on whole words and the most specific name wins, so 'jeans' never swallows 'jeans "
+            "plus'. Without it the product is silently dropped and the whole period's listing "
+            "comes back, which reads like an answer to a question nobody asked."
+        ),
+    },
+    "product_match": {
+        "type": "string",
+        "enum": ["any", "only"],
+        "description": (
+            "How product_names has to match the order's contents. 'any' (default) — the order "
+            "contains at least one of the named products, next to anything else. 'only' — the "
+            "order contains NOTHING BUT the named products: this is what 'tylko' / 'wyłącznie' / "
+            "'same' / 'jedynie' mean ('zamówienie, które miało tylko włóczkę yarnart jeans'), "
+            "and answering such a question with 'any' returns every mixed order too, which is a "
+            "different question. Ignored when product_names is empty."
+        ),
+        "default": "any",
     },
     "line_items_sent": {
         "type": "array",
@@ -160,7 +263,8 @@ ALLEGRO_TOOLS: list[dict] = [
                 "('Wysyłka do' — when the parcel must be handed to the carrier), and totals."
             ),
             "parameters": _order_params(
-                "buyer_login", "dispatch_before_local", "count_only", "limit",
+                "buyer_login", "dispatch_before_local", "min_value", "max_value",
+                "product_names", "product_match", "count_only", "limit",
                 limit={
                     "description": (
                         "Max orders to return (1–100). Set to 1 when the user asks about "
@@ -198,6 +302,35 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'zakończone' / 'co już dotarło' / 'co klient odebrał' → fulfillment_status=PICKED_UP. "
                 "For the NOWE stage use get_new_orders and for DO WYSŁANIA / WYSŁANE use "
                 "get_orders_delivery (it adds the courier and tracking details those questions want). "
+                "NEGATED STAGE — only this tool can serve it, via exclude_fulfillment_status: "
+                "'niewysłane' / 'jeszcze nie wysłane' / 'które nie zostały wysłane' → exclude "
+                "['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'] (every order still on your "
+                "side, packed or not); 'nieodebrane' → exclude ['PICKED_UP']; 'niespakowane' → "
+                "exclude ['READY_FOR_SHIPMENT', 'SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', "
+                "'PICKED_UP']. A negation is never one positive status: answering 'niewysłane' with "
+                "fulfillment_status=READY_FOR_SHIPMENT hides every order nobody has packed yet. "
+                "CANCELLED ORDERS are never listed by any of these tools — there is nothing to "
+                "pack, send or invoice — so they need no filtering on your side; ask for them only "
+                "when the user explicitly wants them ('pokaż anulowane zamówienia' → "
+                "fulfillment_status=CANCELLED), which is the one case they are shown. "
+                "UNPAID BASKETS — a buyer who clicked buy but never paid — are not orders "
+                "either and never reach a listing or a count, again with nothing to filter on "
+                "your side; a cash-on-delivery order, paid on receipt and therefore carrying no "
+                "payment date, IS an ordinary order and is always listed. "
+                "PRODUCT FILTERS: product_names is the ONLY way to answer a question naming what "
+                "was INSIDE the order — 'pokaż zamówienie z wczoraj, które miało włóczkę yarnart "
+                "jeans', 'zamówienia z kordonkiem z tego tygodnia', 'kto kupił jeans plus'. Pass "
+                "the model name without the category word ('włóczkę yarnart jeans' → "
+                "product_names=['yarnart jeans']) together with the period the question names, and "
+                "add product_match='only' when the question says the order held NOTHING ELSE "
+                "('tylko', 'wyłącznie', 'same', 'jedynie'). Never drop the product and return the "
+                "whole period's listing — it is handed to the seller as the answer. This is also "
+                "NOT get_sold_quantities: that one counts PIECES over a period and never shows "
+                "which orders they came from. "
+                "VALUE FILTERS: min_value/max_value are the ONLY way to answer a question that names "
+                "an amount — 'zamówienia powyżej 400 zł' → min_value=400, 'poniżej 50 zł' → "
+                "max_value=50, 'od 100 do 300 zł' → both. Never answer such a question without them: "
+                "the listing would come back unfiltered and read as if it were the answer. "
                 "TIME FILTERS: bought_after/before_local = order PLACEMENT time; "
                 "paid_after/before_local = PAYMENT time ('opłacone po X', 'zapłacone po X'); "
                 "dispatch_after/before_local = DISPATCH DEADLINE ('do kiedy trzeba wysłać'). "
@@ -207,13 +340,22 @@ ALLEGRO_TOOLS: list[dict] = [
                 "return an unrelated list of unrelated orders. Use get_order_details instead for any "
                 "question (status, contents, invoice, cost) about one already-identified order. "
                 "Every order returned carries its current status and its dispatch deadline "
-                "('Wysyłka do' — when the parcel must be handed to the carrier)."
+                "('Wysyłka do' — when the parcel must be handed to the carrier). "
+                "ORDER VALUE: min_value/max_value filter by the amount the buyer paid, and are "
+                "the ONLY way to answer a question that names one — 'zamówienie na kwotę ponad "
+                "2000 zł', 'zamówienia powyżej 500 zł z tego tygodnia', 'najdroższe zamówienie z "
+                "ostatnich dni', 'coś poniżej 100 zł'. Pass them together with the period filters "
+                "the question names, and add include_delivery=true when the question is about "
+                "that order's DELIVERY (courier, tracking, koszt dostawy) — then this one call "
+                "answers it. Never drop the amount and return an unfiltered list."
             ),
             "parameters": _order_params(
-                "status", "fulfillment_status", "buyer_login", "line_items_sent",
+                "status", "fulfillment_status", "exclude_fulfillment_status",
+                "buyer_login", "line_items_sent", "product_names", "product_match",
                 "bought_after_local", "bought_before_local",
                 "paid_after_local", "paid_before_local",
                 "dispatch_after_local", "dispatch_before_local",
+                "min_value", "max_value",
                 "include_delivery", "count_only", "limit",
             ),
         },
@@ -227,6 +369,13 @@ ALLEGRO_TOOLS: list[dict] = [
                 "('Wysyłka do' — when the parcel must be handed to the carrier), items, buyer address, "
                 "delivery info, payment status, AND all Allegro billing entries for that order "
                 "(individual commission per item, delivery fees, any credits). "
+                "DELIVERY COSTS for one order come from THIS tool and nowhere else: it reports both "
+                "sides — what the buyer paid for delivery (already included in the order value) and "
+                "what Allegro charged you for the shipment, plus the balance between them. So "
+                "'ile kosztowała dostawa', 'jaki był koszt dostawy tego zamówienia', 'ile zapłacił "
+                "kupujący za wysyłkę', 'czy dostawa była darmowa', 'ile mnie kosztowała wysyłka tej "
+                "paczki' → get_order_details with that order_id, NEVER get_orders_delivery (that one "
+                "lists many orders and cannot filter by order_id). "
                 "USE THIS for ANY question about ONE already-identified order — not just costs: "
                 "'jaki jest status tego zamówienia', 'co się dzieje z zamówieniem X', 'sprawdź "
                 "zamówienie <id>', 'jakie koszty miałem przy tym zamówieniu', 'podaj wpisy billing "
@@ -570,7 +719,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "date — use this tool instead whenever the user wants to read a message. "
                 "If thread_id isn't already known from earlier in the conversation, provide "
                 "buyer_login and/or date to find the matching thread automatically — no need to call "
-                "get_message_threads first."
+                "get_message_threads first. "
+                "The result also names the ORDER the message is about (the checkout-form id Allegro "
+                "attached to it, or the buyer's single order) — a buyer writing 'faktura do tej transakcji' "
+                "never names the order themselves, so take the id from here and pass it straight to "
+                "get_order_details / get_order_invoice_data / issue_invoice_for_order."
             ),
             "parameters": {
                 "type": "object",
@@ -651,16 +804,31 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Show which courier / delivery method the buyer chose for each order — the "
                 "get_orders listing with fulfillment_status=READY_FOR_SHIPMENT and courier "
                 "details switched on, so the reply is the same plain-text order list as the "
-                "other order tools, plus a per-courier count summary. "
+                "other order tools, plus a per-courier count summary and the total delivery "
+                "cost the buyers paid. "
                 "Use whenever the user asks: which couriers are in pending orders, "
-                "which delivery methods were selected, tracking numbers, or any question "
+                "which delivery methods were selected, tracking numbers, delivery costs across "
+                "SEVERAL orders ('ile kosztowały dostawy w tych zamówieniach'), or any question "
                 "combining orders with shipping/courier/delivery. "
+                "For the delivery cost of ONE already-identified order use get_order_details "
+                "instead — this tool has no order_id filter. "
+                "For the delivery cost of ONE order the user describes by its AMOUNT or by WHEN "
+                "it was placed ('dostawa zamówienia z ostatnich dni na kwotę ponad 2000 zł') use "
+                "get_orders with min_value/bought_after_local + include_delivery=true instead: "
+                "this tool defaults to the packed-and-waiting stage, so an order already sent — "
+                "or not yet packed — would be silently excluded and the seller would get the "
+                "whole courier list instead of their order (a real bug seen in production). "
                 "Default (no filters): orders with fulfillment_status=READY_FOR_SHIPMENT "
                 "(packed and awaiting carrier handoff). "
                 "STAGE 'DO WYSŁANIA' — leave fulfillment_status EMPTY for any wording meaning the "
-                "parcel still has to go out: 'do wysłania', 'gotowe do wysyłki', 'czekają/oczekujące "
-                "na wysyłkę', 'niewysłane', 'do nadania', 'przygotowane do nadania', 'zapakowane' "
-                "(already packed), 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania'. "
+                "parcel is PACKED and still has to go out: 'do wysłania', 'gotowe do wysyłki', "
+                "'czekają/oczekujące na wysyłkę', 'do nadania', 'przygotowane do nadania', "
+                "'zapakowane', 'co czeka na kuriera', 'gotowe do wywózki', 'ile paczek do nadania'. "
+                "NEGATION 'NIEWYSŁANE' IS NOT THIS STAGE — 'niewysłane', 'jeszcze nie wysłane', "
+                "'które nie zostały wysłane' mean every order that has not left yet, including the "
+                "ones nobody has packed: that is get_orders with "
+                "exclude_fulfillment_status=['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP']. "
+                "Answering it with this preset silently hides every unpacked order. "
                 "STAGE 'WYSŁANE' — set fulfillment_status=SENT for wording meaning it already left: "
                 "'wysłane', 'nadane', 'w transporcie', 'przekazane przewoźnikowi', 'co już poszło', "
                 "'co odebrał kurier', 'ile dziś wysłałem', 'ile już wyjechało'. "
@@ -669,7 +837,10 @@ ALLEGRO_TOOLS: list[dict] = [
             ),
             "parameters": _order_params(
                 "status", "fulfillment_status", "buyer_login",
-                "dispatch_after_local", "dispatch_before_local", "count_only", "limit",
+                "bought_after_local", "bought_before_local",
+                "dispatch_after_local", "dispatch_before_local",
+                "min_value", "max_value", "product_names", "product_match",
+                "count_only", "limit",
                 status={"description": "Order status filter. Default: READY_FOR_PROCESSING."},
                 fulfillment_status={
                     "description": (
@@ -730,7 +901,20 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Find all paid orders for a given month where the buyer requested a VAT invoice "
                 "but the seller has not yet uploaded one. Defaults to the current month. "
-                "Use when asked about missing invoices or invoice obligations."
+                "Use when asked about missing invoices or invoice obligations — 'jakie mam "
+                "faktury do wystawienia', 'jakie faktury mam do wysłania', 'brakujące faktury', "
+                "'zaległe faktury', 'do których zamówień muszę wystawić fakturę', 'komu jeszcze "
+                "nie wysłałem faktury'. "
+                "'FAKTURY DO WYSŁANIA' IS THIS TOOL, NOT A SHIPPING QUESTION: 'do wysłania' names "
+                "the DOCUMENT the seller still owes the buyer, so it is the invoice listing — "
+                "never get_orders_delivery, whose 'do wysłania' is about PARCELS waiting for the "
+                "courier and which knows nothing about invoices. "
+                "SCOPED TO AN ORDER STAGE — fulfillment_status / exclude_fulfillment_status: a "
+                "seller very often asks only about part of their orders ('faktury do wysłania w "
+                "zamówieniach nie nowych', 'jakie faktury muszę wystawić do wysłanych zamówień', "
+                "'brakujące faktury w zamówieniach, których jeszcze nie wysłałem'). That stage is "
+                "a FILTER and must be passed on — dropped, the reply lists every pending invoice "
+                "of the month, which reads like a real answer to a question nobody asked."
             ),
             "parameters": {
                 "type": "object",
@@ -742,6 +926,36 @@ ALLEGRO_TOOLS: list[dict] = [
                     "year": {
                         "type": "integer",
                         "description": "4-digit year. Defaults to current year.",
+                    },
+                    "fulfillment_status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
+                        "description": (
+                            "Keep only orders at one of these fulfillment stages — the POSITIVE "
+                            "stage scope ('faktury w nowych zamówieniach' → ['NEW'], 'w "
+                            "zamówieniach do wysłania / spakowanych' → ['READY_FOR_SHIPMENT'], "
+                            "'w zamówieniach w realizacji' → ['PROCESSING']). "
+                            "A LIST, not one status, because a stage the seller names is often a "
+                            "family: 'w wysłanych zamówieniach' means every parcel that has left "
+                            "— ['SENT', 'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'] — and "
+                            "answering it with SENT alone silently drops the orders already "
+                            "delivered, whose invoice is the most overdue of all. "
+                            "For a NEGATED scope use exclude_fulfillment_status instead."
+                        ),
+                    },
+                    "exclude_fulfillment_status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_FULFILLMENT_STATUSES)},
+                        "description": (
+                            "Drop orders at these fulfillment stages — the NEGATED stage scope. "
+                            "A negation is never one status, it is everything except one: "
+                            "'w zamówieniach nie nowych' / 'poza nowymi' → exclude ['NEW'], "
+                            "'w zamówieniach, których nie wysłałem' → exclude ['SENT', "
+                            "'IN_TRANSIT', 'READY_FOR_PICKUP', 'PICKED_UP'], 'w nieodebranych' → "
+                            "exclude ['PICKED_UP']. Never answer a negated scope with "
+                            "fulfillment_status: naming one stage where the seller excluded one "
+                            "hides every other stage they did ask about."
+                        ),
                     },
                 },
             },
@@ -810,16 +1024,82 @@ ALLEGRO_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_sold_quantities",
+            "description": (
+                "HOW MANY UNITS of a product were SOLD in a period — the quantity question, not the "
+                "money one. USE THIS for: 'ile sztuk sprzedałem', 'ile sztuk sprzedanych dla <produkt>', "
+                "'ile poszło <produkt>', 'ile sztuk <produkt> zeszło w tym miesiącu', 'co się najlepiej "
+                "sprzedawało', 'ile zeszło włóczki jeans'. "
+                "Counts units from PAID orders in the period, cancelled ones excluded. Returns are NOT "
+                "subtracted — a returned item still counts as sold here, so say so if the number matters "
+                "to the seller. "
+                "NOT get_sales_summary: that one answers how much money came in and ranks products by "
+                "REVENUE; this one counts PIECES and can be narrowed to named products. "
+                "NOT get_active_offers/query_offers_by_stock: those report what is IN STOCK right now, "
+                "which is a different number from what was sold. "
+                "NOT for LISTING the orders a product was in ('pokaż zamówienie z wczoraj z włóczką "
+                "yarnart jeans', 'które zamówienia miały jeans plus') — this tool answers with a "
+                "units total and never names an order; that is get_orders with product_names. "
+                "NOT for ONE NAMED CUSTOMER's products either ('jakie produkty kupował klient X', "
+                "'co bierze ta firma'): this tool counts the WHOLE SHOP and has no buyer "
+                "parameter, so the customer would be dropped without a trace and the store's "
+                "total handed back as if it were theirs — that question is get_buyer_products. "
+                "PRODUCT NAMES — pass every model the user names as a SEPARATE entry in `names`, exactly "
+                "as they wrote it: 'włóczki jeans i jeans plus' is names=['jeans', 'jeans plus'], NOT "
+                "['jeans'] and NOT ['jeans i jeans plus']. They are different models and the tool keeps "
+                "them apart; merging them into one term is what makes the answer wrong. "
+                "Omit `names` entirely only when the user named no product at all ('ile sztuk sprzedałem "
+                "w maju') — then every product sold in the period is listed, most units first. "
+                "Same period rules as get_sales_summary: resolve 'ostatnie 3 miesiące', 'w tym roku' etc. "
+                "yourself into date_from_local/date_to_local and call this ONCE for the whole period."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Product/model names to count, one entry per model the user named. A name "
+                            "matches an offer title on whole words, and the most specific name wins, so "
+                            "'jeans' and 'jeans plus' never absorb each other's sales."
+                        ),
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": "Start of period as a Warsaw-local calendar date, 'YYYY-MM-DD'.",
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": "End of period as a Warsaw-local calendar date, 'YYYY-MM-DD' (inclusive).",
+                    },
+                },
+                "required": ["date_from_local", "date_to_local"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_buyers",
             "description": (
                 "The BUYER view of a period: one row per CUSTOMER instead of one row per order — "
                 "who bought, how many orders, for how much in total, when they last bought, and "
-                "how many of their orders already have a VAT invoice. "
+                "how many of their orders already have a VAT invoice. Every row also carries "
+                "THAT BUYER's average order value and average number of pieces per order, so "
+                "'ile średnio wydaje jeden klient', 'kto kupuje hurtowo' and 'średnia wartość "
+                "zamówienia u moich klientów' need no second tool. "
                 "USE THIS for any question about the buyers themselves: 'lista kupujących', "
                 "'lista klientów', 'kto u mnie kupował', 'ilu miałem klientów', 'moi najlepsi "
                 "klienci', 'stali klienci', 'kto kupuje najwięcej', 'jakie firmy u mnie kupowały', "
                 "'lista kupujących, dla których wystawiłem faktury VAT', 'klienci z NIP-em', "
                 "'zestawienie kontrahentów'. "
+                "ONLY THE REPEAT CUSTOMERS: min_orders keeps just the buyers who reached that "
+                "many orders in the period — 'tylko ci, którzy zrobili więcej niż 3 zamówienia', "
+                "'stali klienci', 'kto kupił u mnie więcej niż raz'. "
+                "ONLY THE BIG SPENDERS: min_value/max_value bound what the buyer spent IN TOTAL "
+                "over the period — 'klienci, którzy wydali u mnie powyżej 5000 zł', 'kto zostawił "
+                "ponad 1000 zł'. "
                 "FIRMA vs OSOBA PRYWATNA: the ONLY place Allegro states this is the VAT-invoice "
                 "address on the order (company name + NIP), so buyer_type='company' means exactly "
                 "'gave company invoice details on at least one order in the period' — a business "
@@ -851,11 +1131,48 @@ ALLEGRO_TOOLS: list[dict] = [
                 "'co kupił użytkownik anna.kowalska88' — must go to get_orders with "
                 "buyer_login=<that login>. Calling this tool for such a question drops the login "
                 "silently and answers with every customer of the period, which reads like a real "
-                "answer to a question nobody asked."
+                "answer to a question nobody asked. "
+                "WHAT ONE OF THESE CUSTOMERS BUYS is a third tool again: a row here states their "
+                "order count and total spend and never names a product, so 'dla tego kupującego "
+                "pokaż, jakie produkty kupował' — the natural follow-up to this very table — is "
+                "get_buyer_products with that buyer's name."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "min_value": {
+                        "type": "number",
+                        "description": (
+                            "Keep only buyers whose TOTAL spend over the period is at least this "
+                            "much (inclusive), in PLN: 'klienci, którzy wydali powyżej 5000 zł', "
+                            "'kto zostawił u mnie ponad 1000 zł'. It bounds the buyer's SUM, not "
+                            "one order — a question about the size of a single order ('kto robi "
+                            "największe zamówienia') is sort_by='avg_value' instead."
+                        ),
+                    },
+                    "max_value": {
+                        "type": "number",
+                        "description": (
+                            "Keep only buyers whose TOTAL spend over the period is at most this "
+                            "much (inclusive), in PLN: 'klienci, którzy wydali mniej niż 200 zł'. "
+                            "Combine with min_value for 'między 500 a 1000 zł'."
+                        ),
+                    },
+                    "min_orders": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Keep ONLY buyers with AT LEAST this many orders in the period — the "
+                            "bound is INCLUSIVE, so convert the wording: 'więcej niż 3 "
+                            "zamówienia' / 'powyżej 3' / 'ponad 3' → 4, 'co najmniej 3' / "
+                            "'przynajmniej 3' / '3 lub więcej' → 3, 'stali klienci' / 'kupili "
+                            "więcej niż raz' / 'wracający klienci' → 2. The counts, the totals "
+                            "and the summary sentence then describe only those buyers. Omit it "
+                            "for every buyer of the period — NEVER drop a count the seller "
+                            "stated, the reply would be a much longer list that reads exactly "
+                            "like the answer they asked for."
+                        ),
+                    },
                     "date_from_local": {
                         "type": "string",
                         "description": (
@@ -897,11 +1214,16 @@ ALLEGRO_TOOLS: list[dict] = [
                     "sort_by": {
                         "type": "string",
                         "description": (
-                            "Row order: 'value' = highest total spend first (default, the 'najlepsi "
+                            "Row order: 'value' = highest TOTAL spend first (default, the 'najlepsi "
                             "klienci' order), 'orders' = most orders first ('stali klienci', 'kto "
-                            "kupuje najczęściej'), 'recent' = most recent purchase first."
+                            "kupuje najczęściej'), 'avg_value' = biggest AVERAGE ORDER first "
+                            "('którzy klienci robią największe zamówienia', 'kto składa duże "
+                            "zamówienia' — NOT 'value', which puts someone with 40 small orders on "
+                            "top), 'avg_items' = most pieces per order first ('kto bierze "
+                            "hurtowo', 'kto kupuje po kilka sztuk na raz'), 'recent' = most recent "
+                            "purchase first."
                         ),
-                        "enum": ["value", "orders", "recent"],
+                        "enum": ["value", "orders", "avg_value", "avg_items", "recent"],
                         "default": "value",
                     },
                     "count_only": {
@@ -950,7 +1272,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "every customer of the period, which reads like a real answer) and NOT get_orders "
                 "(its buyer_login filter is the Allegro LOGIN, not a phone, an e-mail or a "
                 "person's name). When the user names an Allegro LOGIN instead of contact details "
-                "('z konta np1988'), that IS get_orders with buyer_login."
+                "('z konta np1988'), that IS get_orders with buyer_login. "
+                "AND NOT for 'what does this customer BUY': the order list here names at most "
+                "two products per order and never adds anything up, so a question about their "
+                "products/assortment ('jakie produkty kupował', 'zestawienie zakupów tego "
+                "klienta') is get_buyer_products — this tool only says WHO they are."
             ),
             "parameters": {
                 "type": "object",
@@ -994,6 +1320,84 @@ ALLEGRO_TOOLS: list[dict] = [
                         "description": (
                             "End of the period to search, Warsaw-local 'YYYY-MM-DD' (inclusive). "
                             "Defaults to today."
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_buyer_products",
+            "description": (
+                "WHAT ONE CUSTOMER BOUGHT, as a SALES SUMMARY PER PRODUCT — one row per product "
+                "with the pieces that customer took, what they paid for them, in how many of "
+                "their orders it appeared and when they last took it. "
+                "USE THIS for any question about the ASSORTMENT of a named buyer: 'dla tego "
+                "kupującego pokaż zestawienie, jakie produkty kupował', 'co kupuje firma X', "
+                "'jakie towary bierze ten klient', 'zestawienie sprzedaży dla klienta Y', 'co "
+                "zamawia u mnie Jan Kowalski', 'jakie produkty kupował klient z NIP 7792445588'. "
+                "The give-away is a named customer PLUS a product/assortment word ('produkty', "
+                "'towary', 'asortyment', 'co kupował', 'zestawienie zakupów') — the seller wants "
+                "what left the shelf for that customer, added up, not their paperwork. "
+                "IDENTIFY THE BUYER with whatever the user gave — `name` for a person or company "
+                "name (the usual case: the name they just read off a get_buyers table or a "
+                "message), `buyer_login` for an Allegro login, `nip` for a company's tax id — "
+                "passed EXACTLY as they wrote it. At least one is REQUIRED; with none of them "
+                "this tool has no customer to report on, so call ask_clarifying_question instead. "
+                "NOT get_orders and NOT find_buyer_by_contact: both answer with a LIST OF ORDERS "
+                "(one bullet per order, products buried inside), which is precisely what a seller "
+                "asking for a 'zestawienie' does NOT want — they would have to add the same yarn "
+                "up by hand across six orders. Use find_buyer_by_contact only for the different "
+                "question 'WHO is this contact / do I have such a customer', and get_orders when "
+                "the seller really wants the individual orders. "
+                "NOT get_sold_quantities: that counts the WHOLE SHOP's pieces and has no buyer "
+                "parameter at all, so the customer would be silently dropped and the store's "
+                "total served as if it were theirs. NOT get_buyers: one row per customer, it "
+                "never names a product. "
+                "PERIOD: omit both dates unless the user names one — the summary then covers the "
+                "last 24 months, the same window as find_buyer_by_contact, and the reply always "
+                "states which period it covered. Resolve a named period yourself ('w tym roku' → "
+                "1 January of the current year through today)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "The buyer or company name, exactly as the user wrote it ('P.P.H.U. "
+                            "Gadżet z Jajem. Monika Sornat', 'Jan Kowalski') — matched as a "
+                            "fragment of the invoice buyer's name, the company name or the parcel "
+                            "recipient's name, ignoring case and Polish diacritics."
+                        ),
+                    },
+                    "buyer_login": {
+                        "type": "string",
+                        "description": (
+                            "The buyer's Allegro LOGIN ('np1988', 'anna.kowalska88'), when the "
+                            "user identified the customer by their account rather than by name. "
+                            "Matched exactly, so never retype or 'fix' it, and never put a "
+                            "person's or company's name here — that is `name`."
+                        ),
+                    },
+                    "nip": {
+                        "type": "string",
+                        "description": "The company's NIP; dashes and spaces are ignored.",
+                    },
+                    "date_from_local": {
+                        "type": "string",
+                        "description": (
+                            "Start of the period, Warsaw-local 'YYYY-MM-DD'. Omit unless the user "
+                            "names a period — the summary then covers the last 24 months."
+                        ),
+                    },
+                    "date_to_local": {
+                        "type": "string",
+                        "description": (
+                            "End of the period, Warsaw-local 'YYYY-MM-DD' (inclusive). Defaults "
+                            "to today."
                         ),
                     },
                 },
@@ -1093,8 +1497,11 @@ ALLEGRO_TOOLS: list[dict] = [
                 "or given directly by the user). If you don't have a concrete order_id in context, ask "
                 "the user for it or look it up first — never guess or invent one. "
                 "This creates a real, numbered invoice in inFakt — it is not easily reversible. "
-                "Returns a share link for manual review PLUS the invoice_uuid needed for the follow-up "
-                "delivery tools (attach_invoice_to_allegro_order, send_invoice_to_ksef)."
+                "It STOPS at inFakt: it does NOT attach the invoice to the Allegro order and does NOT "
+                "send it to KSeF, so the seller can check it first. Returns a share link for that "
+                "review PLUS the invoice_uuid needed for the follow-up delivery tools "
+                "(attach_invoice_to_allegro_order, send_invoice_to_ksef) — never call either of them "
+                "in the same turn as this one, even if the user asked for both at once."
             ),
             "parameters": {
                 "type": "object",
@@ -1112,18 +1519,38 @@ ALLEGRO_TOOLS: list[dict] = [
             "description": (
                 "Download the invoice PDF from inFakt and attach it to the corresponding Allegro order, "
                 "so the buyer can see/download it directly from their Allegro order page. "
-                "Requires BOTH the Allegro order_id and the inFakt invoice_uuid returned by an earlier "
-                "issue_invoice_for_order call in this conversation — never guess either ID; ask or look "
-                "it up if missing. Allegro allows only ONE PDF invoice per order — calling this twice "
-                "for the same order will fail."
+                "IRREVERSIBLE and visible to the buyer immediately, so call it ONLY when the user asks "
+                "for it in the CURRENT message ('dołącz fakturę do zamówienia X') or confirms your own "
+                "question about attaching ('ok', 'wygląda dobrze'). Never on the same turn that issued "
+                "the invoice — the user has not read it yet — and never on your own initiative. "
+                "Pass order_id, invoice_uuid, or both — whichever the user actually gave you, and "
+                "never a UUID you are not sure of. With order_id alone the invoice recorded for that "
+                "order is used; with invoice_uuid alone ('ID faktury w inFakt: …') the order it was "
+                "issued for is looked up. "
+                "For SEVERAL invoices at once, or for 'dołącz te faktury' with no id at all, use "
+                "deliver_invoices instead of calling this once per order. "
+                "Allegro allows only ONE PDF invoice per order — calling this twice for the same order "
+                "will fail."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "order_id": {"type": "string", "description": "Allegro order (checkout form) UUID."},
-                    "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                    "order_id": {
+                        "type": "string",
+                        "description": (
+                            "Allegro order (checkout form) UUID. Optional when invoice_uuid is "
+                            "given — omit it rather than guessing."
+                        ),
+                    },
+                    "invoice_uuid": {
+                        "type": "string",
+                        "description": (
+                            "inFakt invoice UUID from issue_invoice_for_order. Optional when "
+                            "order_id is given — omit it rather than guessing; the invoice "
+                            "recorded for this order is used."
+                        ),
+                    },
                 },
-                "required": ["order_id", "invoice_uuid"],
             },
         },
     },
@@ -1137,15 +1564,91 @@ ALLEGRO_TOOLS: list[dict] = [
                 "earlier issue_invoice_for_order call in this conversation — never guess it. "
                 "Submission is asynchronous — this only confirms the request was accepted, final "
                 "processing must be checked in the inFakt panel. "
-                "Typically relevant for company (B2B) buyers; don't call it for a private-person buyer "
-                "unless the user explicitly asks for it."
+                "ONLY for a COMPANY (B2B) buyer, identified by a NIP. An invoice for a PRIVATE "
+                "PERSON must NEVER be sent to KSeF — KSeF addresses the buyer by NIP and a private "
+                "person has none, so the filing would be wrong and cannot be withdrawn. This is not a "
+                "default the user can override: if they ask for it anyway, say why it is impossible "
+                "instead of calling this tool. Whether the buyer is a company is decided from "
+                "ALLEGRO's invoice data for the ORDER (get_order_invoice_data: company_name + "
+                "vat_id), never from what is in inFakt — so pass order_id whenever you know it; "
+                "without it the order is looked up from the invoice we issued, and if that fails "
+                "the call is refused rather than sent unchecked."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "invoice_uuid": {"type": "string", "description": "inFakt invoice UUID from issue_invoice_for_order."},
+                    "order_id": {
+                        "type": "string",
+                        "description": (
+                            "Allegro order (checkout form) UUID this invoice was issued for. Pass it "
+                            "whenever it is in context — it is what Allegro is asked about to confirm "
+                            "the buyer is a company with a NIP. Omit rather than guessing."
+                        ),
+                    },
                 },
                 "required": ["invoice_uuid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deliver_invoices",
+            "description": (
+                "Deliver invoices that have ALREADY been issued in inFakt: attach them to their "
+                "Allegro orders (visible to the buyer) and/or send them to KSeF — for SEVERAL "
+                "invoices in one call. "
+                "Use it whenever the user answers a batch of issued invoices with one instruction: "
+                "'dodaj te faktury do Allegro', 'dołącz wszystkie faktury', 'dołącz je i firmową "
+                "wyślij do KSeF', 'wyślij te faktury do KSeF'. With no ids at all it takes every "
+                "invoice this assistant issued that is still not attached in Allegro — which is "
+                "exactly what 'te faktury' means right after an issuance — so do NOT try to recover "
+                "order ids from earlier messages and do NOT call attach_invoice_to_allegro_order "
+                "once per order. "
+                "It NEVER issues anything: every invoice it touches must already exist. "
+                "IRREVERSIBLE, same rules as the single-invoice tools: only when the user asks for "
+                "it in the CURRENT message or confirms your own question about it, and never on the "
+                "turn that issued the invoices. "
+                "KSeF is for COMPANY buyers only — set ksef=true when the user asks for it and the "
+                "per-order check refuses the private-person ones by itself; that is what the user "
+                "means by 'a firmową wyślij też do KSeF'. "
+                "For exactly ONE invoice named by the user, attach_invoice_to_allegro_order / "
+                "send_invoice_to_ksef are equally fine."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Allegro order UUIDs to deliver the invoices for. Omit entirely to "
+                            "take every invoice still waiting — never guess or reconstruct ids."
+                        ),
+                    },
+                    "invoice_uuids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "inFakt invoice UUIDs, when the user named the invoices rather than "
+                            "the orders. Omit rather than guessing."
+                        ),
+                    },
+                    "attach": {
+                        "type": "boolean",
+                        "description": (
+                            "Attach each invoice to its Allegro order (default true). Set false "
+                            "only when the user asks for KSeF alone."
+                        ),
+                    },
+                    "ksef": {
+                        "type": "boolean",
+                        "description": (
+                            "Also submit to KSeF (default false). True only when the user says so."
+                        ),
+                    },
+                },
             },
         },
     },
@@ -1471,7 +1974,23 @@ ALLEGRO_TOOLS: list[dict] = [
                 "Ask ONE short, specific question, in the same language as the user's message, "
                 "naming exactly what you need (e.g. which order — ID or buyer login; which date "
                 "or period; which product). Do NOT call any other tool in the same turn — this is "
-                "a stop-and-ask, not a guess-and-verify."
+                "a stop-and-ask, not a guess-and-verify. "
+                "ALSO call this when NO tool here can answer the question AT ALL — not a missing "
+                "parameter, but a missing capability: a figure none of these tools computes, a "
+                "breakdown none of them produces. In that case do not ask a question — state "
+                "plainly, in one sentence and in the user's language, that you cannot answer this "
+                "one and what would be needed. Reaching for the nearest listing instead is the "
+                "worst available answer: the user reads it as the figure they asked for, and "
+                "nothing in the reply tells them it is not. "
+                "AND call this for the case in between the two — a tool that answers a WIDER "
+                "question than the one asked, because the user named a filter it has no parameter "
+                "for (an amount, a product, a buyer account, an order stage… — check the chosen "
+                "tool's parameters before you call it). Do NOT call that tool and do NOT quietly "
+                "drop the filter: say in one sentence what you cannot narrow by, then ask whether "
+                "to show the wider answer instead (e.g. 'Nie umiem zawęzić tej listy po kwocie "
+                "zamówienia — pokazać wszystkie zaległe faktury z tego miesiąca?'). The wider "
+                "listing is not a partial answer, it is a different one, and the user cannot tell "
+                "from reading it."
             ),
             "parameters": {
                 "type": "object",
@@ -1539,11 +2058,19 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "get_account_info": "chat",
     "get_billing_summary": "table",
     "get_sales_summary": "dashboard",
+    # "chat": a handful of product rows answering the question just asked,
+    # not a document — same reasoning as get_order_details above.
+    "get_sold_quantities": "chat",
     "get_buyers": "table",
     # "chat" (not "table") — a contact lookup answers a yes/no question about
     # ONE person, usually with a single match; a one-row table hidden behind
     # the document viewer would bury the answer.
     "find_buyer_by_contact": "chat",
+    # "table" — unlike the lookup above, this one IS a zestawienie: as many rows
+    # as the customer has products, which is exactly what the document viewer
+    # is for. The trailing summary sentence is what the chat bubble shows
+    # (web/js/app.js _tablePreview), the same as for get_buyers.
+    "get_buyer_products": "table",
     # Faktury
     "get_orders_pending_invoice": "chat",
     "get_order_invoice_data": "chat",
@@ -1551,6 +2078,7 @@ TOOL_OUTPUT_FORMAT: dict[str, str] = {
     "issue_invoice_for_order": "action",
     "attach_invoice_to_allegro_order": "action",
     "send_invoice_to_ksef": "action",
+    "deliver_invoices": "action",
     # Zwroty i reklamacje
     "get_new_returns": "chat",
     "get_returns_to_process": "chat",
@@ -1585,6 +2113,43 @@ def resolve_output_format(tool_names: list[str]) -> str:
         if fmt in formats:
             return fmt
     return "chat"
+
+
+# ── What a tool can actually NARROW an answer by ────────────────────────────
+# A seller's question usually carries a narrowing — an amount, a product, a
+# buyer account, an order stage — and the tool that answers it either has a
+# parameter for that narrowing or it does not. When it does not, the filter is
+# dropped and the seller is handed a WIDER answer than they asked for, with
+# nothing in the reply saying so; that is the failure shape this whole module
+# is written against, and the one thing worse than not answering.
+#
+# So the capability is declared here, once, and read off the schemas
+# themselves (the same trick as _BUYER_LOGIN_TOOLS in allegro_agent.py): a
+# parameter added to a tool automatically widens what that tool is considered
+# able to answer, and nothing has to be kept in sync by hand. The guard that
+# uses it — AllegroAgent._unsupported_filter_question — turns a question it
+# cannot narrow into a stop-and-ask instead of a wider listing.
+#
+# CAUTION for anything that goes through AllegroAgent._orders_listing: those
+# tools filter by amount and product even where their own schema does not say
+# so (_with_value_bounds injects the bounds in Python), so their entry here
+# understates them. It costs nothing today — the guard is opt-in per tool, see
+# _UNFILTERABLE_FALLBACK — but a listing preset added to it needs its extra
+# filters declared first.
+_FILTER_PARAMS: dict[str, tuple[str, ...]] = {
+    "value":   ("min_value", "max_value"),
+    "product": ("product_names", "names"),
+    "buyer":   ("buyer_login",),
+    "stage":   ("fulfillment_status", "exclude_fulfillment_status"),
+}
+
+TOOL_FILTERS: dict[str, frozenset[str]] = {
+    t["function"]["name"]: frozenset(
+        dimension for dimension, params in _FILTER_PARAMS.items()
+        if set(params) & set(t["function"]["parameters"].get("properties", {}))
+    )
+    for t in ALLEGRO_TOOLS
+}
 
 
 # ── Tool-select context filter ──────────────────────────────────────────────
@@ -1624,6 +2189,10 @@ _TOOL_LABELS: dict[str, str] = {
     # finanse
     "get_billing_summary":             "finanse",
     "get_sales_summary":               "finanse",
+    # A quantity-sold question names the PRODUCT, so it usually matches
+    # "oferty" too — but what it asks for is a sales figure, and the
+    # selling verbs ("sprzeda", "zarob") are what reliably fire here.
+    "get_sold_quantities":             "finanse",
     # "finanse", not "zamowienia", even though it takes an order_id: what makes
     # a query reach for it is the MONEY vocabulary ("zysk", "koszt", "marża"),
     # and a follow-up often names no order at all ("a jaki zysk przy 8 zł za
@@ -1633,6 +2202,12 @@ _TOOL_LABELS: dict[str, str] = {
     # kupujacy
     "get_buyers":                      "kupujacy",
     "find_buyer_by_contact":           "kupujacy",
+    # "kupujacy", not "finanse" or "oferty": the question names a CUSTOMER and
+    # only then asks what they bought ("jakie produkty kupował ten klient"), and
+    # the product/sales words in it already drag in those two labels on their
+    # own — under either of them a customer question phrased without them
+    # ("co bierze ta firma") would lose the tool entirely.
+    "get_buyer_products":              "kupujacy",
     # faktury
     "get_orders_pending_invoice":      "faktury",
     "get_order_invoice_data":          "faktury",
@@ -1640,6 +2215,7 @@ _TOOL_LABELS: dict[str, str] = {
     "issue_invoice_for_order":         "faktury",
     "attach_invoice_to_allegro_order": "faktury",
     "send_invoice_to_ksef":            "faktury",
+    "deliver_invoices":                "faktury",
     # zwroty (incl. reklamacje — Allegro treats them as related but distinct
     # processes, see get_new_returns/get_new_complaints descriptions above,
     # but they share one monitoring toggle and one query-label here)
@@ -1687,7 +2263,14 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
                    "robocie", "nieskoncz", "nieukoncz", "dokoncz", "wywoz", "transporcie",
                    "przewozn", "poszl", "wyjecha", "dotar", "odebr", "odbior", "dostarcz",
                    "zakonczon", "zamkni", "odhaczy", "termin", "paczek", "nadac", "nadaj"),
-    "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj"),
+    # The assortment words are what a seller actually names instead of the
+    # generic "produkt"/"oferta" — "ile zostało włóczek", "jakie tkaniny mam".
+    # Without them such a query matched no label at all and fell back to the
+    # full ~37-tool list. Diacritics folded (see _normalize), and stems cut
+    # short of the fill vowel Polish inserts in the genitive plural:
+    # "włóczka" → "włóczek" ("wloczek"), so the stem has to be "wlocz".
+    "oferty":     ("ofert", "produkt", "cen", "stan", "magazyn", "zapas", "sklad", "dostawc", "uzupelni", "brakuj",
+                   "wlocz", "tkanin", "przedz", "motk"),
     "wiadomosci": ("wiadomo", "watk", "napisa", "napisz", "pisz", "przeczyt", "tresc", "message", "odpisz", "odpowiedz"),
     "konto":      ("konto", "kont", "profil", "subskryp", "ocen", "rating", "account"),
     # "marz" is the margin vocabulary calculate_order_profit answers to
@@ -1695,7 +2278,11 @@ _LABEL_STEMS: dict[str, tuple[str, ...]] = {
     # prefixes the month "marzec" — a cheap miss: such a query keeps every
     # label it already had, it only loses the deterministic layer, which is
     # exactly the recall-over-precision trade this map is built on.
-    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzedaz",
+    # "sprzeda", not "sprzedaz": the noun is "sprzedaż" but the seller asks with
+    # the PARTICIPLE — "ile sztuk sprzedanych", "co się sprzedało", "ile
+    # sprzedałem" — and none of those contain the "ż". The longer stem matched
+    # only the noun, which is the form that shows up least.
+    "finanse":    ("prowizj", "oplat", "zarob", "przychod", "zysk", "koszt", "rozliczen", "sprzeda",
                    "bilans", "marz", "rentown", "narzut"),
     "faktury":    ("faktur", "nip", "ksef", "vat"),
     # A buyer question names the person, not the order: "lista kupujących",
@@ -1756,6 +2343,17 @@ _LOGIN_FILLER_WORDS = frozenset({
 # Punctuation and quoting that can wrap a login in a real message
 # ("z konta 'np1988'", "z konta np1988?").
 _TOKEN_TRIM = "\"'„”»«`([{)]}.,!?:;"
+# A QUOTED MULTI-WORD NAME is not a login. "dla tego kupującego „P.P.H.U.
+# Gadżet z Jajem. Monika Sornat” pokaż…" is read token by token, so the first
+# token after the buyer word is „P.P.H.U. — and a dotted abbreviation has
+# exactly the shape a login has (a separator, no spaces). The opening quote is
+# what gives it away: a login the seller quoted closes inside the same token
+# ("z konta 'np1988'"), a name runs on into the next ones. So an opening quote
+# with no closing one in the same token ends the scan — what follows is a name,
+# and the tools that take a name (get_buyer_products, find_buyer_by_contact)
+# are the ones that can answer it.
+_OPENING_QUOTES = "\"'„»«"
+_CLOSING_QUOTES = "\"'”«»"
 _LOGIN_TOKEN_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._-]{2,}$")
 # What separates a login from an ordinary Polish word standing right after
 # "konta"/"login" ("moje konto allegro jest zawieszone"): a digit or one of
@@ -1787,6 +2385,11 @@ def named_buyer_login(text: str) -> str | None:
         for j in range(i + 1, min(i + 4, len(norm))):
             if norm[j].strip(_TOKEN_TRIM) in _LOGIN_FILLER_WORDS:
                 continue
+            token = raw[j]
+            if token[:1] in _OPENING_QUOTES and not any(
+                ch in _CLOSING_QUOTES for ch in token[1:]
+            ):
+                break  # a quoted name that runs on — see _OPENING_QUOTES
             login = raw[j].strip(_TOKEN_TRIM).lstrip("@")
             if not (_LOGIN_TOKEN_RE.match(login) and _LOOKS_LIKE_LOGIN_RE.search(login)):
                 break
@@ -1854,6 +2457,42 @@ def named_phone_number(text: str) -> str | None:
     return None
 
 
+# ── A NAMED CUSTOMER whose PURCHASES are being asked about ─────────────────
+# "Dla tego kupującego „P.P.H.U. Gadżet z Jajem. Monika Sornat” pokaż mi
+# zestawienie, jakie produkty kupował", "zestawienie sprzedaży dla klienta
+# „Kawa i Spółka”". Two things make this its own detector rather than another
+# stem in the map above:
+#   • "klient" is deliberately NOT a "kupujacy" stem (see the comment there:
+#     a seller says it about an ORDER just as often), so the second example
+#     matches "finanse" alone — get_buyer_products never reaches the model and
+#     the WHOLE SHOP's sales summary comes back in its place, which reads
+#     exactly like the answer to the question that was asked;
+#   • the customer's name is quoted, and in a sentence full of ordinary words
+#     those quotes are the only thing that says where it begins and ends.
+# Narrow on purpose, like the two detectors above: a buyer word AND a
+# buying-intent word AND a quoted name. A miss costs nothing (the stems still
+# apply), and a false positive only adds one more candidate tool to read.
+_BUYER_MENTION_RE = re.compile(r"kupuj[aą]c|klient|firm|kontrahent|nabywc", re.IGNORECASE)
+_BUYER_BUYING_INTENT_RE = re.compile(
+    r"co\s+kupowa|co\s+kupi[łl]|co\s+kupuje|jakie\s+produkt|jakie\s+towar|jakie\s+rzecz|"
+    r"zestawienie\s+(zakup|sprzeda)|asortyment",
+    re.IGNORECASE,
+)
+# The name: whatever sits between a pair of quotes, in any of the spellings a
+# Polish keyboard produces. Bounded at 80 characters — longer than that it is
+# not a name but a sentence with a stray quote in it.
+_QUOTED_NAME_RE = re.compile(r"[„\"'»]\s*([^„”\"'«»]{3,80}?)\s*[”\"'«]")
+
+
+def named_buyer_purchases(text: str) -> str | None:
+    """The quoted customer name when `text` asks what THAT customer bought,
+    else None."""
+    if not (_BUYER_MENTION_RE.search(text) and _BUYER_BUYING_INTENT_RE.search(text)):
+        return None
+    match = _QUOTED_NAME_RE.search(text)
+    return match.group(1).strip() if match else None
+
+
 def matched_labels(text: str) -> set[str]:
     """Labels whose stems appear as a word-prefix anywhere in `text`."""
     words = _normalize(text).split()
@@ -1873,6 +2512,12 @@ def matched_labels(text: str) -> set[str]:
     # 880 197 834" carries no stem at all, and without this it would fall back
     # to the full ~40-schema list with nothing pointing at the lookup tool.
     if named_phone_number(text):
+        found.add("kupujacy")
+    # A named customer's purchases are a BUYER question however the sentence
+    # words it — "zestawienie sprzedaży dla klienta „Kawa i Spółka”" otherwise
+    # matches "finanse" alone, and the only tool it could then be answered
+    # with sums the whole shop.
+    if named_buyer_purchases(text):
         found.add("kupujacy")
     return found
 
@@ -1898,3 +2543,84 @@ def select_tools_for_context(text: str) -> list[dict] | None:
     if not labels:
         return None
     return tools_for_labels(labels)
+
+
+# ── Matching a product the seller named against real offer titles ───────────
+# "jeans" and "jeans plus" are two different yarns, and an Allegro title
+# carries far more than the model name ("Włóczka Jeans Plus 100g kolor 05").
+# A naive `term in title` therefore fails in BOTH directions: it counts every
+# Jeans Plus sale towards "jeans", and it matches "jeans" inside an unrelated
+# word. Two rules fix that:
+#
+#   1. Compare TOKENS, not characters. "jeans" matches the title token "Jeans",
+#      never the middle of "jeanswear", and a multi-word term has to appear as
+#      consecutive tokens.
+#   2. Most specific term wins. A title matching both "jeans" and "jeans plus"
+#      belongs to "jeans plus" — the longer term is the more precise claim
+#      about which model it is.
+#
+# Rule 2 only separates models the seller actually named. When one term alone
+# matches several different titles, nothing here decides that they are the
+# same model — the caller reports each title on its own line instead of
+# silently summing them, since the distinction it cannot make is exactly the
+# one the seller can read off the names.
+#
+# "+" becomes the token "plus" so "Jeans+" and "Jeans Plus" are one model,
+# which is how the seller writes them interchangeably.
+_TOKEN_SPLIT_RE = re.compile(r"[^0-9a-z]+")
+
+
+def product_tokens(text: str) -> list[str]:
+    """Offer title or search term as comparable tokens (diacritics folded)."""
+    return [t for t in _TOKEN_SPLIT_RE.split(_normalize(text).replace("+", " plus ")) if t]
+
+
+def _contains_run(haystack: list[str], needle: list[str]) -> bool:
+    """True when `needle` appears as consecutive items of `haystack`."""
+    if not needle or len(needle) > len(haystack):
+        return False
+    return any(
+        haystack[i:i + len(needle)] == needle
+        for i in range(len(haystack) - len(needle) + 1)
+    )
+
+
+# A seller names the model, but says the category out loud first — "włóczkę
+# yarnart jeans", "przędza jeans plus". Allegro titles carry that word too,
+# yet not always in front ("YarnArt Jeans 50g włóczka bawełniana"), and
+# match_product_term compares CONSECUTIVE tokens — so the category word the
+# seller prepended would break a match against a title that puts it elsewhere.
+# It is dropped from the front of a search term, never from the title, and
+# never when it is the whole term: "ile zeszło włóczki" names no model, and an
+# empty term would match every offer in the store.
+_PRODUCT_CATEGORY_PREFIXES = ("wloczk", "przedz", "tkanin", "motek", "motk")
+
+
+def product_filter_terms(names: list[str]) -> list[str]:
+    """Search terms as they should be matched against offer titles: normalized,
+    blank entries dropped, and a leading category word ("włóczka") removed when
+    the term names a model beyond it."""
+    terms: list[str] = []
+    for name in names:
+        toks = product_tokens(name)
+        while len(toks) > 1 and any(toks[0].startswith(p) for p in _PRODUCT_CATEGORY_PREFIXES):
+            toks = toks[1:]
+        if toks:
+            terms.append(" ".join(toks))
+    return terms
+
+
+def match_product_term(offer_name: str, terms: list[str]) -> str | None:
+    """Which of `terms` this offer title belongs to — the most specific one.
+
+    Returns the matching term as the caller passed it (so it can be echoed back
+    in the seller's own words), or None when the title matches none of them.
+    """
+    name_toks = product_tokens(offer_name)
+    best: str | None = None
+    best_len = 0
+    for term in terms:
+        term_toks = product_tokens(term)
+        if len(term_toks) > best_len and _contains_run(name_toks, term_toks):
+            best, best_len = term, len(term_toks)
+    return best

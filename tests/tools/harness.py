@@ -61,8 +61,17 @@ class ToolHarness:
         self.allegro_api = allegro_api
         self.infakt_api = infakt_api
 
-    async def run(self, tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Run one tool exactly the way the agent's tool loop does."""
+    async def run(
+        self, tool_name: str, tool_input: dict[str, Any], query: str = "",
+    ) -> str:
+        """Run one tool exactly the way the agent's tool loop does.
+
+        `query` is the seller's message this call belongs to. run() normally
+        sets it (see AllegroAgent.run) and one tool reads it: attaching an
+        invoice to an Allegro order refuses to run unless the seller asked for
+        it in this very message.
+        """
+        self.agent._current_query = query
         return await self.agent._execute_tool(tool_name, tool_input)
 
 
