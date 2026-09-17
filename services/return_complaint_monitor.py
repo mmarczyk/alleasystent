@@ -10,6 +10,11 @@ Scheduler cadence (see jobs/order_monitor_service.py) rather than a separate
 deployment — no event-stream API exists for returns/issues like the order
 one, so each pass fetches the current list and diffs it against the IDs seen
 on the previous pass, instead of following an event cursor.
+
+Three things are watched, not two: returns as they are REPORTED by the buyer,
+disputes/claims, and — separately — returns that are WAITING FOR A SELLER
+DECISION (see _poll_returns_to_process, which is the one the seller actually
+has to act on).
 """
 
 import logging
@@ -18,6 +23,16 @@ logger = logging.getLogger(__name__)
 
 _SEEN_RETURNS_KEY = "allegro:monitor:returns:seen:{user_id}"
 _SEEN_ISSUES_KEY = "allegro:monitor:issues:seen:{user_id}"
+_SEEN_TO_PROCESS_KEY = "allegro:monitor:returns:to_process:seen:{user_id}"
+_TO_PROCESS_REMINDED_KEY = "allegro:monitor:returns:to_process:reminded:{user_id}"
+# How often a return that is STILL unhandled is re-announced. One pass runs
+# every couple of minutes; without this, a return the seller missed the first
+# notification for would never be mentioned again.
+_REMIND_EVERY = 86400  # 24h
+# Allegro's status for a return whose parcel is back with the seller and which
+# now waits for an accept/reject decision — the same filter the chat's "zwroty
+# do obsłużenia" listing uses (AllegroAgent's get_returns_to_process).
+_TO_PROCESS_STATUS = "DELIVERED"
 _SEEN_TTL = 86400 * 30  # 30 days
 # Kept in each seen-set purely so the key exists from the very first pass,
 # including passes that find nothing. A NUL byte can't occur in an Allegro ID.
@@ -91,6 +106,10 @@ async def _poll_user(r, user_id: str) -> None:
     if new_issue_ids:
         await _notify(user_id, kind="issues", count=len(new_issue_ids))
 
+    # Notifies on its own cadence (see its docstring), so it is not folded into
+    # the two one-shot announcements above.
+    await _poll_returns_to_process(r, allegro, user_id)
+
 
 async def _poll_returns(r, allegro, user_id: str) -> list[str]:
     from services.allegro_service import AllegroAuthError, AllegroAPIError
@@ -118,7 +137,61 @@ async def _poll_issues(r, allegro, user_id: str) -> list[str]:
     return await _diff_and_record(r, _SEEN_ISSUES_KEY.format(user_id=user_id), ids)
 
 
-async def _diff_and_record(r, seen_key: str, current_ids: list[str]) -> list[str]:
+async def _poll_returns_to_process(r, allegro, user_id: str) -> None:
+    """Notify about returns WAITING FOR THE SELLER — the parcel is back and the
+    return needs an accept/reject decision.
+
+    Separate from _poll_returns above, which fires when a buyer REPORTS a
+    return. That moment is days before anything is actionable, and it fires
+    exactly once, so a return that only became actionable later — or that
+    already existed when monitoring was switched on and therefore went into
+    the baseline — produced no notification at all. That is what "mam zwrot
+    nieobsłużony, a nie pokazało mi się powiadomienie" came down to: nothing
+    here ever watched the state the seller actually has to act on.
+
+    Hence the two deliberate differences from every other pass in this module:
+
+    * The first pass REPORTS instead of baselining. A return already waiting
+      for a decision is actionable right now, not history, and the
+      notification is a single aggregated count however many there are — so
+      there is nothing to flood.
+    * As long as anything stays unhandled it is re-announced once every
+      _REMIND_EVERY, instead of once ever. A missed one-shot notification is
+      the failure being fixed here; repeating it is the point.
+    """
+    from services.allegro_service import AllegroAuthError, AllegroAPIError
+
+    try:
+        returns = await allegro.get_customer_returns(limit=_FETCH_LIMIT, status=_TO_PROCESS_STATUS)
+    except (AllegroAuthError, AllegroAPIError) as exc:
+        logger.warning("Returns-to-process monitor: Allegro API error user=%s: %s", user_id, exc)
+        return
+
+    ids = [item["id"] for item in returns if item.get("id")]
+    new_ids = await _diff_and_record(
+        r, _SEEN_TO_PROCESS_KEY.format(user_id=user_id), ids, baseline_first_pass=False
+    )
+    remind_key = _TO_PROCESS_REMINDED_KEY.format(user_id=user_id)
+
+    if not ids:
+        # Everything handled — drop the cadence so the next return that turns
+        # up is announced immediately rather than waiting out an old window.
+        await r.delete(remind_key)
+        return
+
+    if new_ids:
+        await _notify(user_id, kind="returns_to_process", count=len(new_ids))
+        await r.set(remind_key, "1", ex=_REMIND_EVERY)
+    elif await r.set(remind_key, "1", ex=_REMIND_EVERY, nx=True):
+        # Nothing new, but something is still sitting unhandled and the last
+        # reminder's window has expired. SET NX *is* the whole cadence: it
+        # succeeds once per window no matter how many passes run inside it.
+        await _notify(user_id, kind="returns_to_process", count=len(ids), repeat=True)
+
+
+async def _diff_and_record(
+    r, seen_key: str, current_ids: list[str], *, baseline_first_pass: bool = True
+) -> list[str]:
     """Compare the current fetch against last pass's seen-ID set and return
     which IDs are new.
 
@@ -135,10 +208,16 @@ async def _diff_and_record(r, seen_key: str, current_ids: list[str]) -> list[str
     growing forever — the trade-off is that a return/issue which scrolls out of
     the API's recent-N window and later reappears would be reported again, an
     acceptable edge case for a low-volume category like this.
+
+    `baseline_first_pass=False` turns that first-pass silence off for callers
+    whose list is a TODO rather than a feed of events — see
+    _poll_returns_to_process, where what is already there is exactly what the
+    seller needs to hear about.
     """
     known = await r.exists(seen_key)
     seen_ids = set(await r.smembers(seen_key)) if known else set()
-    new_ids = [cid for cid in current_ids if cid not in seen_ids] if known else []
+    report = bool(known) or not baseline_first_pass
+    new_ids = [cid for cid in current_ids if cid not in seen_ids] if report else []
 
     pipe = r.pipeline()
     if current_ids:
@@ -152,20 +231,60 @@ async def _diff_and_record(r, seen_key: str, current_ids: list[str]) -> list[str
     return new_ids
 
 
-async def _notify(user_id: str, kind: str, count: int) -> None:
+def _plural_pl(n: int, one: str, few: str, many: str) -> str:
+    """Polish count form: 1 zwrot / 2-4 zwroty / 5+ zwrotów, with the usual
+    11-14 exception (11 zwrotów, not 11 zwroty). A copy of
+    AllegroAgent._plural_pl rather than an import: this module runs in the
+    slim jobs image (Dockerfile.jobs), which has none of the agent's deps."""
+    if n == 1:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+async def _notify(user_id: str, kind: str, count: int, repeat: bool = False) -> None:
+    """Write the in-app inbox entry and push it. `repeat` marks the daily
+    re-announcement of returns that are still waiting, so its wording says
+    "wciąż" instead of pretending something just happened."""
     from services.push_service import send_push, add_notification
 
     if kind == "returns":
-        title = "Nowy zwrot na Allegro" if count == 1 else f"{count} nowych zwrotów na Allegro"
-        body = "Kupujący zgłosił zwrot produktu." if count == 1 else f"{count} zwrotów czeka na obsługę."
+        zwrot = _plural_pl(count, "zwrot", "zwroty", "zwrotów")
+        title = "Nowy zwrot na Allegro" if count == 1 else f"Nowe zwroty na Allegro: {count}"
+        body = (
+            "Kupujący zgłosił zwrot produktu." if count == 1
+            else f"Kupujący zgłosili {count} {zwrot}."
+        )
         prompt = (
             "Podaj mi szczegóły ostatniego zwrotu."
             if count == 1 else
             f"Podaj mi szczegóły {count} ostatnich zwrotów."
         )
+    elif kind == "returns_to_process":
+        zwrot = _plural_pl(count, "zwrot", "zwroty", "zwrotów")
+        czeka = _plural_pl(count, "czeka", "czekają", "czeka")
+        still = "wciąż " if repeat else ""
+        title = (
+            f"Zwrot {still}czeka na obsługę" if count == 1
+            else f"{count} {zwrot} {still}{czeka} na obsługę"
+        )
+        body = (
+            "Zwrócony towar dotarł do Ciebie — zaakceptuj zwrot albo go odrzuć." if count == 1
+            else f"{count} {_plural_pl(count, 'paczka', 'paczki', 'paczek')} "
+                 f"{_plural_pl(count, 'wróciła', 'wróciły', 'wróciło')} i {czeka} na Twoją decyzję."
+        )
+        prompt = "Pokaż mi zwroty do obsłużenia."
     else:
-        title = "Nowa reklamacja na Allegro" if count == 1 else f"{count} nowych reklamacji na Allegro"
-        body = "Kupujący zgłosił reklamację lub spór." if count == 1 else f"{count} reklamacji/sporów czeka na obsługę."
+        reklamacja = _plural_pl(count, "reklamacja", "reklamacje", "reklamacji")
+        title = (
+            "Nowa reklamacja na Allegro" if count == 1
+            else f"Nowe reklamacje na Allegro: {count}"
+        )
+        body = (
+            "Kupujący zgłosił reklamację lub spór." if count == 1
+            else f"{count} {reklamacja} lub {_plural_pl(count, 'spór', 'spory', 'sporów')} czeka na obsługę."
+        )
         prompt = (
             "Podaj mi szczegóły ostatniej reklamacji."
             if count == 1 else

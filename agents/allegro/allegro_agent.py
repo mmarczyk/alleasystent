@@ -2699,15 +2699,17 @@ class AllegroAgent(BaseAgent):
             if offer_only:
                 return ""
             return (
-                "↩️ Automatyczne sprawdzanie nowych zwrotów i reklamacji jest włączone — dam Ci "
-                "znać, gdy pojawi się coś nowego.\n\n"
+                "↩️ Automatyczne sprawdzanie zwrotów i reklamacji jest włączone — dam Ci znać, "
+                "gdy pojawi się coś nowego, i przypomnę o zwrotach, które czekają na Twoją "
+                "decyzję, dopóki ich nie obsłużysz.\n\n"
                 '<button class="btn-returns-monitoring" style="filter:grayscale(1)" '
                 'onclick="ReturnsMonitor.disable();this.outerHTML=\'<span>✓ Monitoring zwrotów i reklamacji wyłączony</span>\'">'
                 '🔕 Wyłącz monitoring zwrotów i reklamacji</button>'
             )
         return (
-            "💡 Mogę automatycznie sprawdzać nowe zwroty i reklamacje i wysyłać Ci powiadomienia, "
-            "nawet gdy ta karta jest w tle.\n\n"
+            "💡 Mogę automatycznie sprawdzać nowe zwroty i reklamacje, przypominać o zwrotach "
+            "czekających na Twoją decyzję i wysyłać Ci powiadomienia, nawet gdy ta karta jest "
+            "w tle.\n\n"
             '<button class="btn-returns-monitoring" onclick="ReturnsMonitor.enable()">'
             '↩️ Włącz monitoring zwrotów i reklamacji</button>'
         )
