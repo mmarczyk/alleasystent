@@ -1822,6 +1822,16 @@ const ReturnsMonitor = (() => {
     if (!localStorage.getItem('ae_push_subscribed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       WebPush.subscribe().catch(() => {});
     }
+    // Re-assert the server-side flag on every start, exactly as MessageMonitor
+    // does and for the same reason: enable()'s POST is fire-and-forget with a
+    // silent .catch(), so one lost to a flaky network (or fired before login
+    // completed) left this tab showing "monitoring aktywny" while the server
+    // never enabled anything. Here that mismatch is total silence — detection
+    // is 100% server-side, there is no client-side poll to fall back on. The
+    // endpoint is idempotent, so repeating it is free.
+    fetch(Settings.api('/allegro/returns-monitor/enable'), {
+      method: 'POST', credentials: 'include', headers: Auth.headers(),
+    }).catch(() => {});
   }
 
   return { isEnabled, enable, disable, init };

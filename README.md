@@ -13,7 +13,7 @@ Obsługuje wielokanałowy dostęp: **interfejs webowy (PWA)** oraz **Facebook Me
 - Baza wiedzy sklepu (RAG) — odpowiedzi na pytania o polityki, FAQ, produkty
 - PWA z historią rozmów, trybem offline i eksportem do pliku
 - Integracja z Facebook Messengerem przez webhook
-- Automatyczne sprawdzanie nowych zamówień, wiadomości oraz zwrotów i reklamacji — powiadomienia w tle, nawet gdy karta jest zamknięta
+- Automatyczne sprawdzanie nowych zamówień, wiadomości oraz zwrotów i reklamacji — powiadomienia w tle, nawet gdy karta jest zamknięta, plus codzienne przypomnienie o zwrotach czekających na decyzję sprzedawcy
 - Przypomnienia o niewystawionych fakturach VAT — asystent sam pyta na czacie (co 2 h, 7:00–20:00) i dostosowuje się do odpowiedzi
 - Comiesięczne przypomnienie o ewidencji sprzedaży bezrachunkowej za poprzedni miesiąc (termin: 5. dnia) — od 1. dnia miesiąca, 2× dziennie przez pierwsze 3 dni i 4× dziennie później, w godzinach 8:00–20:00, aż potwierdzisz, że jest wystawiona
 - Powiadomienia push (VAPID — iOS 16.4+, Android, desktop)
